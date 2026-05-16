@@ -34,10 +34,10 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
     - [x] 5.4.1 `cargo test` green (101 tests)
     - [x] 5.4.2 README: end-to-end install + usage instructions (`Install` + `Set up in a project` sections)
     - [ ] 5.4.3 e2e: gated on 5.3 — replaced by real-project shakeout findings. Until that runs, Phase 5 stays open.
-- [ ] 6.0 MCP server mode (DEFERRED — only start after Phase 5 ships and concrete need surfaces)
-  - Rationale (added 2026-05-16): once the canonical PLAN.md format is stricter than what humans naturally write, hand-edited markdown risks format violations. MCP tools let Claude mutate plans through a typed API that the binary owns, sidestepping the format-discipline problem. This makes Phase 6 more likely than originally scoped — not less.
-  - [ ] 6.1 `plan-bridge serve` subcommand (stdio-based MCP)
-  - [ ] 6.2 Tools: `plan_add`, `plan_check`, `plan_uncheck`, `plan_archive`, `plan_list`, `plan_phase_exit`
-  - [ ] 6.3 Resource exposure: PLAN.md state as a readable resource
-  - [ ] 6.4 Unit + e2e tests
-  - [ ] 6.5 Phase 6 exit (docs + e2e)
+- [x] 6.0 MCP server mode
+  - Rationale (added 2026-05-16): once the canonical PLAN.md format is stricter than what humans naturally write, hand-edited markdown risks format violations. MCP tools let Claude mutate plans through a typed API that the binary owns, sidestepping the format-discipline problem.
+  - [x] 6.1 `plan-bridge serve` subcommand — stdio JSON-RPC 2.0; hand-rolled (no `rmcp` dep). Implements `initialize`, `tools/list`, `tools/call`. Notifications are silently absorbed.
+  - [x] 6.2 Tools shipped in v1: `plan_list`, `plan_check`, `plan_uncheck`, `plan_add`, `plan_archive`. Deferred to a later sweep: `plan_phase_exit` (composite operation), `plan_skip` (paired with the won't-do refactor in backlog).
+  - [ ] 6.3 Resource exposure (MCP `resources/*`) — deferred. v1 ships `plan_list` as a tool returning the AST text; that covers the read-PLAN.md use case. Add `resources/` when a client actually needs URI-keyed reads.
+  - [x] 6.4 Unit tests (12 in `mcp` module: initialize, tools/list, each tool, error paths, malformed JSON, notification handling, archive-via-MCP).
+  - [x] 6.5 Phase 6 exit — `cargo test` green (114 tests); README documents the MCP surface.

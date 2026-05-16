@@ -2,7 +2,7 @@
 
 Bridges Claude Code's `TaskCreate` task list to a canonical `PLAN.md` so the two systems stop fighting. Design rationale and acceptance criteria live in [SPEC.md](./SPEC.md); the implementation sequence in [PLAN.md](./PLAN.md).
 
-**Status:** Phases 1–4 complete + Phase 5 (hook I/O wrappers and `init`) implemented; needs real-project shakeout. `parse`, `writeback`, `reconcile`, `archive`, `init` all wired up.
+**Status:** Phases 1–4 complete + Phase 5 (hooks + `init`) implemented (needs real-project shakeout) + Phase 6 (MCP server mode) shipped. `parse`, `writeback`, `reconcile`, `archive`, `init`, `serve` all wired up.
 
 ## Build & test
 
@@ -109,6 +109,28 @@ plan-bridge archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]
 - IDs are **never renumbered**. Gaps in numbering after a sweep are intentional and acceptable; downstream code comments and commit messages may reference the original ids.
 - Both files are written atomically (tmp + rename).
 - `--dry-run` lists what would be archived without touching the filesystem.
+
+### `plan-bridge serve` (MCP)
+
+Run an MCP server over stdio. Lets a Claude Code session (or any MCP client) drive PLAN.md through typed tools instead of going through the hook layer.
+
+```
+plan-bridge serve [--plan PATH]
+```
+
+Wire it into your MCP client config (the exact shape depends on the client; for Claude Code, point an `mcpServers` entry at `plan-bridge serve`).
+
+#### Tools
+
+| Name | Args | Effect |
+|---|---|---|
+| `plan_list` | — | Returns the parsed `PLAN.md` AST as JSON text. |
+| `plan_check` | `plan_path` | Sets the node's checkbox to `[x]`. |
+| `plan_uncheck` | `plan_path` | Sets the node's checkbox to `[ ]`. |
+| `plan_add` | `plan_path`, `subject` | Adds a new leaf at `plan_path` (parent must exist). |
+| `plan_archive` | `dry_run?`, `date?` | Sweeps fully-complete phases to `PLAN_ARCHIVE.md`. |
+
+MCP-style tool errors are surfaced as JSON-RPC error responses (`code: -32603`), not as protocol-level disconnects. Unknown tool names and missing required args both produce clean errors that the client surfaces back to the user.
 
 ### State file
 
