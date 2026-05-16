@@ -68,6 +68,14 @@ enum Command {
         #[arg(long, default_value = "PLAN.md")]
         plan: PathBuf,
     },
+    /// Seed the state file with synthetic mappings for every leaf currently in
+    /// PLAN.md so the first reconcile after install isn't a wall of
+    /// `LeafAdded`. Idempotent. When Claude later TaskCreates against a
+    /// baselined plan_path, the baseline mapping is silently replaced.
+    Baseline {
+        #[arg(long, default_value = "PLAN.md")]
+        plan: PathBuf,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -100,6 +108,14 @@ fn main() -> Result<()> {
         }
         Command::Serve { plan } => {
             plan_bridge::mcp::McpServer::new(plan).serve()?;
+        }
+        Command::Baseline { plan } => {
+            let report = plan_bridge::baseline::baseline(&plan)?;
+            println!(
+                "plan-bridge: baselined {} leaf(s), skipped {} already-mapped",
+                report.baselined.len(),
+                report.already_mapped.len()
+            );
         }
         Command::Init { cwd, force } => {
             let report = plan_bridge::init::init(&cwd, force)?;

@@ -34,6 +34,6 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - Rationale (added 2026-05-16): once the canonical PLAN.md format is stricter than what humans naturally write, hand-edited markdown risks format violations. MCP tools let Claude mutate plans through a typed API that the binary owns, sidestepping the format-discipline problem.
   - [x] 6.1 `plan-bridge serve` subcommand — stdio JSON-RPC 2.0; hand-rolled (no `rmcp` dep). Implements `initialize`, `tools/list`, `tools/call`. Notifications are silently absorbed.
   - [x] 6.2 Tools shipped in v1: `plan_list`, `plan_check`, `plan_uncheck`, `plan_add`, `plan_archive`. Deferred to a later sweep: `plan_phase_exit` (composite operation), `plan_skip` (paired with the won't-do refactor in backlog).
-  - [ ] 6.3 Resource exposure (MCP `resources/*`) — deferred. v1 ships `plan_list` as a tool returning the AST text; that covers the read-PLAN.md use case. Add `resources/` when a client actually needs URI-keyed reads.
+  - [-] 6.3 Resource exposure (MCP `resources/*`) — deferred. v1 ships `plan_list` as a tool returning the AST text; that covers the read-PLAN.md use case. Add `resources/` when a client actually needs URI-keyed reads.
   - [x] 6.4 Unit tests (12 in `mcp` module: initialize, tools/list, each tool, error paths, malformed JSON, notification handling, archive-via-MCP).
   - [x] 6.5 Phase 6 exit — `cargo test` green (114 tests); README documents the MCP surface.

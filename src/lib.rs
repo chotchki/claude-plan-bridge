@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod ast;
+pub mod baseline;
 pub mod hook;
 pub mod init;
 pub mod mcp;

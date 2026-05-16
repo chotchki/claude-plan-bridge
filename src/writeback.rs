@@ -70,6 +70,10 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     std::fs::write(plan_path, serialize(&plan))
         .with_context(|| format!("write {}", plan_path.display()))?;
 
+    // Evict any baseline mapping for the same plan_path — once a real task
+    // lands, the synthetic baseline:<path> entry is stale.
+    crate::baseline::evict_baseline_for(&mut state, &assigned_path);
+
     // Capture last_synced_* off the leaf as it actually exists in PLAN.md.
     // For the just-inserted case that's the new node; for the idempotent
     // already-exists case it's whatever was there (possibly with a different

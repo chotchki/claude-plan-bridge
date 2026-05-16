@@ -52,6 +52,13 @@ impl Node {
         self.state == NodeState::Done
     }
 
+    /// Collect every leaf in this subtree (depth-first, document order).
+    pub fn leaves(&self) -> Vec<&Node> {
+        let mut out = Vec::new();
+        collect_leaves(self, &mut out);
+        out
+    }
+
     pub fn is_resolved(&self) -> bool {
         self.state.is_resolved()
     }
@@ -82,7 +89,26 @@ impl Node {
     }
 }
 
+fn collect_leaves<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+    if node.is_leaf() {
+        out.push(node);
+        return;
+    }
+    for child in &node.children {
+        collect_leaves(child, out);
+    }
+}
+
 impl Plan {
+    /// Every leaf across all phases. Document order.
+    pub fn leaves(&self) -> Vec<&Node> {
+        let mut out = Vec::new();
+        for phase in &self.phases {
+            collect_leaves(phase, &mut out);
+        }
+        out
+    }
+
     /// Full-tree search by id. O(N); plans are small.
     pub fn find(&self, id: &str) -> Option<&Node> {
         for p in &self.phases {
