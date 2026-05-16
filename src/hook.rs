@@ -67,6 +67,11 @@ pub struct HookOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookSpecificOutput {
+    /// Claude Code requires this on every `hookSpecificOutput` — it identifies
+    /// which event class the additionalContext is in response to
+    /// (`UserPromptSubmit`, `PostToolUse`, etc.). Without it Claude Code rejects
+    /// the hook output with a schema-validation error.
+    pub hook_event_name: String,
     pub additional_context: String,
 }
 
@@ -75,9 +80,10 @@ impl HookOutput {
         Self::default()
     }
 
-    pub fn context(msg: impl Into<String>) -> Self {
+    pub fn context(event: impl Into<String>, msg: impl Into<String>) -> Self {
         Self {
             hook_specific_output: Some(HookSpecificOutput {
+                hook_event_name: event.into(),
                 additional_context: msg.into(),
             }),
             ..Default::default()
@@ -97,16 +103,26 @@ impl HookOutput {
     }
 }
 
-/// Pull a task id out of `tool_response`. The TaskCreate/TaskUpdate response
-/// shape isn't strictly documented in the tool schema we have, so probe the
-/// three most likely field names.
+/// Pull a task id out of `tool_response`. Real-world shapes seen in Claude Code:
+///   TaskUpdate → `{"taskId": "1", ...}` (flat)
+///   TaskCreate → `{"task": {"id": "2", ...}}` (nested under `task`)
+/// Probe both, and accept either a JSON string or a JSON integer (some
+/// harness versions emit numeric ids).
 pub fn extract_task_id(response: &serde_json::Value) -> Option<String> {
-    for key in &["id", "task_id", "taskId"] {
-        if let Some(s) = response.get(*key).and_then(|v| v.as_str()) {
-            return Some(s.to_string());
+    fn pick(v: &serde_json::Value) -> Option<String> {
+        for key in &["id", "task_id", "taskId"] {
+            if let Some(field) = v.get(*key) {
+                if let Some(s) = field.as_str() {
+                    return Some(s.to_string());
+                }
+                if let Some(n) = field.as_i64() {
+                    return Some(n.to_string());
+                }
+            }
         }
+        None
     }
-    None
+    pick(response).or_else(|| response.get("task").and_then(pick))
 }
 
 #[cfg(test)]
@@ -158,11 +174,31 @@ mod tests {
     }
 
     #[test]
+    fn extract_task_id_handles_nested_task_create_response() {
+        // Real shape from Claude Code's TaskCreate hook (captured 2026-05-16).
+        let v = serde_json::json!({
+            "task": {"id": "2", "subject": "Second smoke-test"}
+        });
+        assert_eq!(extract_task_id(&v).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn extract_task_id_handles_numeric_ids() {
+        let v = serde_json::json!({"id": 42});
+        assert_eq!(extract_task_id(&v).as_deref(), Some("42"));
+        let v = serde_json::json!({"task": {"id": 7}});
+        assert_eq!(extract_task_id(&v).as_deref(), Some("7"));
+    }
+
+    #[test]
     fn hook_output_emits_camel_case() {
-        let out = HookOutput::context("hello");
+        let out = HookOutput::context("UserPromptSubmit", "hello");
         let json = out.to_json();
         assert!(json.contains("hookSpecificOutput"), "got: {json}");
         assert!(json.contains("additionalContext"), "got: {json}");
+        // Claude Code's hook-output schema requires hookEventName inside
+        // hookSpecificOutput — omitting it triggers a validation rejection.
+        assert!(json.contains("\"hookEventName\":\"UserPromptSubmit\""), "got: {json}");
     }
 
     #[test]

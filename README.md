@@ -2,7 +2,7 @@
 
 Bridges Claude Code's `TaskCreate` task list to a canonical `PLAN.md` so the two systems stop fighting. Design rationale and acceptance criteria live in [SPEC.md](./SPEC.md); the implementation sequence in [PLAN.md](./PLAN.md).
 
-**Status:** Phases 1–4 complete + Phase 5 (hooks + `init`) implemented (needs real-project shakeout) + Phase 6 (MCP server mode) shipped. `parse`, `writeback`, `reconcile`, `archive`, `init`, `serve` all wired up.
+**Status:** Phases 1–6 complete (ready for archive sweep). `parse`, `writeback`, `reconcile`, `archive`, `init`, `baseline`, `serve` all wired up and live-tested against this project.
 
 ## Build & test
 

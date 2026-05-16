@@ -12,7 +12,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 5.0 Hook integration + init
+- [x] 5.0 Hook integration + init
   - [x] 5.1 Hook JSON I/O wrappers
     - [x] 5.1.1 stdin reader for Claude Code hook payload shape — `HookPayload` deserializes (`session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_response`) with `#[serde(default)]` tolerance on missing fields
     - [x] 5.1.2 stdout writer producing camelCase `{ "hookSpecificOutput": { "additionalContext": "..." } }`
@@ -26,10 +26,12 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
     - [x] 5.2.5 Unit tests (6 covering fresh init, idempotent re-init, user-hook preservation, skip-existing-plan, force overwrite, gitignore idempotency)
   - [x] 5.3 Real-project shakeout (deferred to user — bridge can't drive itself end-to-end from this session)
     - Procedure: `cargo install --path .` (or build + symlink to PATH); in a scratch project run `plan-bridge init`; restart Claude Code to pick up new settings.json; have Claude do non-trivial work; observe that TaskCreate calls update PLAN.md, that user-edits to PLAN.md surface in next-turn reconcile, that archive sweep runs cleanly.
-  - [ ] 5.4 Phase 5 exit
+  - [x] 5.4 Phase 5 exit
     - [x] 5.4.1 `cargo test` green (101 tests)
     - [x] 5.4.2 README: end-to-end install + usage instructions (`Install` + `Set up in a project` sections)
-    - [ ] 5.4.3 e2e: gated on 5.3 — replaced by real-project shakeout findings. Until that runs, Phase 5 stays open.
+    - [x] 5.4.3 Real-project shakeout (2026-05-16): bridge driven live against this repo. Two bugs flushed out and fixed:
+      - `extract_task_id` probed only top-level keys; Claude Code's `TaskCreate.tool_response` nests as `{"task": {"id": "2", ...}}`. Now probes nested `task.{id|taskId|task_id}` and accepts numeric ids defensively. Regression test pinned to captured payload.
+      - `HookSpecificOutput` was missing `hookEventName`; Claude Code rejects the output with a schema-validation error when absent. Field added (camelCased), threaded through writeback (`payload.hook_event_name`) and reconcile (constant `"UserPromptSubmit"`).
 - [x] 6.0 MCP server mode
   - Rationale (added 2026-05-16): once the canonical PLAN.md format is stricter than what humans naturally write, hand-edited markdown risks format violations. MCP tools let Claude mutate plans through a typed API that the binary owns, sidestepping the format-discipline problem.
   - [x] 6.1 `plan-bridge serve` subcommand — stdio JSON-RPC 2.0; hand-rolled (no `rmcp` dep). Implements `initialize`, `tools/list`, `tools/call`. Notifications are silently absorbed.

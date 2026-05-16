@@ -176,7 +176,7 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
     if rendered.is_empty() {
         Ok(plan_bridge::hook::HookOutput::silent())
     } else {
-        Ok(plan_bridge::hook::HookOutput::context(rendered))
+        Ok(plan_bridge::hook::HookOutput::context("UserPromptSubmit", rendered))
     }
 }
 

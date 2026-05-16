@@ -42,9 +42,10 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     let mut state = State::load(&state_path)?;
 
     if let Some(existing) = state.plan_path(&task_id) {
-        return Ok(HookOutput::context(format!(
-            "plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
-        )));
+        return Ok(HookOutput::context(
+            &payload.hook_event_name,
+            format!("plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"),
+        ));
     }
 
     let plan_text = std::fs::read_to_string(plan_path)
@@ -94,12 +95,15 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     state.record(&task_id, mapping);
     state.save(&state_path)?;
 
-    Ok(HookOutput::context(format!(
-        "plan-bridge: {action} `{}` at {} in {}",
-        input.subject,
-        assigned_path,
-        plan_path.display()
-    )))
+    Ok(HookOutput::context(
+        &payload.hook_event_name,
+        format!(
+            "plan-bridge: {action} `{}` at {} in {}",
+            input.subject,
+            assigned_path,
+            plan_path.display()
+        ),
+    ))
 }
 
 /// Apply a `PostToolUse(TaskUpdate)` event to PLAN.md.
@@ -135,9 +139,10 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 return Ok(HookOutput::silent());
             };
             if node.is_done() {
-                return Ok(HookOutput::context(format!(
-                    "plan-bridge: {node_path} already complete (no-op)"
-                )));
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!("plan-bridge: {node_path} already complete (no-op)"),
+                ));
             }
             node.state = NodeState::Done;
             "marked complete".to_string()
@@ -153,16 +158,20 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             if is_wont_do {
                 state.remove(&input.task_id);
                 state.save(&state_path)?;
-                return Ok(HookOutput::context(format!(
-                    "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
-                )));
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
+                    ),
+                ));
             }
             if plan.remove(&node_path).is_none() {
                 state.remove(&input.task_id);
                 state.save(&state_path)?;
-                return Ok(HookOutput::context(format!(
-                    "plan-bridge: {node_path} already removed (mapping cleared)"
-                )));
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!("plan-bridge: {node_path} already removed (mapping cleared)"),
+                ));
             }
             state.remove(&input.task_id);
             "removed".to_string()
@@ -188,9 +197,10 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     }
     state.save(&state_path)?;
 
-    Ok(HookOutput::context(format!(
-        "plan-bridge: {action} {node_path}"
-    )))
+    Ok(HookOutput::context(
+        &payload.hook_event_name,
+        format!("plan-bridge: {action} {node_path}"),
+    ))
 }
 
 fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()> {
