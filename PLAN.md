@@ -6,7 +6,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ## Backlog (not yet phased)
 
-- Refactor checkbox-line grammar to **winnow** for declarative parsing + nicer error messages. Indent-tree stays hand-rolled regardless. Considered 2026-05-16, deferred — the hand-rolled parser passes 101 tests on real-world input; no concrete pain point yet. Revisit when grammar grows (e.g. inline metadata syntax) or when parser error messages become a user-facing problem.
+- ~~Refactor checkbox-line grammar to **winnow**~~ — done 2026-05-16. `id_and_title` / `bold_id` / `bare_id` / `id_chars` / `skip_separator` are winnow combinators now; the outer `- [STATE] ` matcher, the code-fence state machine, and the indent-stack tree assembly stay hand-rolled. 114 tests still passing including the quicksight smoke test.
 - **Won't-do checkbox state (`[-]`)** — accepted 2026-05-16, to be folded into a post-5.3 fix-up sweep (likely Phase 7). Needs:
   - `Node.checked: bool` → `Node.state: NodeState { Pending, Done, WontDo }` refactor across ast / parser / serializer / archive / reconcile / writeback.
   - Archive treats `WontDo` like `Done` (phase can exit).

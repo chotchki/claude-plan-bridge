@@ -1,5 +1,10 @@
 use crate::ast::{Annotation, Node, Plan};
 use thiserror::Error;
+use winnow::Parser;
+use winnow::ascii::space0;
+use winnow::combinator::{alt, delimited, opt};
+use winnow::error::ContextError;
+use winnow::token::{rest, take_while};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
@@ -198,37 +203,49 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
 /// - bare ids:          `X.4.a.1 title` or `1.0 title`
 /// - no id:             `do the thing` (returns `("", "do the thing")`)
 ///
-/// A token only counts as an id if it contains a dot OR is all-digits; otherwise
-/// it's ambiguous with title text and is left alone.
-fn extract_id_and_title(rest: &str) -> (String, String) {
-    let rest = rest.trim_start();
+/// Implemented as a winnow combinator: leading whitespace, then an `opt(alt(bold, bare))`
+/// (so an unrecognized leading token gracefully degrades to no-id), then an optional
+/// em-dash / hyphen / whitespace separator, then everything else as title. Always succeeds.
+fn extract_id_and_title(input: &str) -> (String, String) {
+    let mut input = input;
+    id_and_title
+        .parse_next(&mut input)
+        .expect("id_and_title is total")
+}
 
-    // Try `**ID**` first.
-    if let Some(after_open) = rest.strip_prefix("**") {
-        if let Some(end_bold) = after_open.find("**") {
-            let candidate = &after_open[..end_bold];
-            if is_valid_id(candidate) {
-                let after = &after_open[end_bold + 2..];
-                return (candidate.to_string(), strip_separator(after));
-            }
-        }
+fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
+    space0.parse_next(input)?;
+    let id = opt(alt((bold_id, bare_id)))
+        .parse_next(input)?
+        .unwrap_or_default();
+    if !id.is_empty() {
+        skip_separator.parse_next(input)?;
     }
+    let title = rest.parse_next(input)?.trim_end().to_string();
+    Ok((id, title))
+}
 
-    // Try a bare leading id.
-    let id_end = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
-        .count();
-    if id_end > 0 {
-        let candidate = &rest[..id_end];
-        if is_valid_id(candidate) {
-            let after = &rest[id_end..];
-            return (candidate.to_string(), strip_separator(after));
-        }
-    }
+fn bold_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
+    delimited("**", id_chars, "**").parse_next(input)
+}
 
-    // No id — the whole thing is the title.
-    (String::new(), rest.trim_end().to_string())
+fn bare_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
+    id_chars.parse_next(input)
+}
+
+fn id_chars(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
+    take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '.')
+        .verify(is_valid_id)
+        .map(String::from)
+        .parse_next(input)
+}
+
+fn skip_separator(input: &mut &str) -> winnow::ModalResult<(), ContextError> {
+    let _: &str = take_while(0.., |c: char| {
+        c == '—' || c == '-' || c.is_whitespace()
+    })
+    .parse_next(input)?;
+    Ok(())
 }
 
 fn is_valid_id(s: &str) -> bool {
@@ -241,12 +258,6 @@ fn is_valid_id(s: &str) -> bool {
     let has_dot = s.contains('.');
     let all_digits = s.chars().all(|c| c.is_ascii_digit());
     has_dot || all_digits
-}
-
-fn strip_separator(s: &str) -> String {
-    s.trim_start_matches(|c: char| c == '—' || c == '-' || c.is_whitespace())
-        .trim_end()
-        .to_string()
 }
 
 fn classify_annotation(raw: &str, indent: usize, trimmed: &str) -> Annotation {
