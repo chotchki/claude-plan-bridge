@@ -5,7 +5,7 @@
 //! The wire loop is tiny; the interesting code is the tool dispatcher and the
 //! per-tool argument handling.
 
-use crate::ast::{Node, parent_id_for};
+use crate::ast::{Node, NodeState, parent_id_for};
 use crate::parser::parse;
 use crate::serializer::serialize;
 use anyhow::{Context, Result, anyhow};
@@ -93,8 +93,10 @@ impl McpServer {
             "plan_list" => self.tool_plan_list(),
             "plan_check" => self.tool_plan_check(&args),
             "plan_uncheck" => self.tool_plan_uncheck(&args),
+            "plan_skip" => self.tool_plan_skip(&args),
             "plan_add" => self.tool_plan_add(&args),
             "plan_archive" => self.tool_plan_archive(&args),
+            "plan_phase_exit" => self.tool_plan_phase_exit(&args),
             other => Err(anyhow!("unknown tool: {other}")),
         }
     }
@@ -108,33 +110,30 @@ impl McpServer {
     }
 
     fn tool_plan_check(&self, args: &Value) -> Result<Value> {
-        let id = require_string(args, "plan_path")?;
-        let text = std::fs::read_to_string(&self.plan_path)?;
-        let mut plan = parse(&text)?;
-        let node = plan
-            .find_mut(&id)
-            .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
-        if node.checked {
-            return Ok(tool_text_result(&format!("{id} was already checked")));
-        }
-        node.checked = true;
-        std::fs::write(&self.plan_path, serialize(&plan))?;
-        Ok(tool_text_result(&format!("checked {id}")))
+        self.set_state(args, NodeState::Done, "checked")
     }
 
     fn tool_plan_uncheck(&self, args: &Value) -> Result<Value> {
+        self.set_state(args, NodeState::Pending, "unchecked")
+    }
+
+    fn tool_plan_skip(&self, args: &Value) -> Result<Value> {
+        self.set_state(args, NodeState::WontDo, "marked won't-do")
+    }
+
+    fn set_state(&self, args: &Value, target: NodeState, verb: &str) -> Result<Value> {
         let id = require_string(args, "plan_path")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
         let mut plan = parse(&text)?;
         let node = plan
             .find_mut(&id)
             .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
-        if !node.checked {
-            return Ok(tool_text_result(&format!("{id} was already unchecked")));
+        if node.state == target {
+            return Ok(tool_text_result(&format!("{id} was already {verb}")));
         }
-        node.checked = false;
+        node.state = target;
         std::fs::write(&self.plan_path, serialize(&plan))?;
-        Ok(tool_text_result(&format!("unchecked {id}")))
+        Ok(tool_text_result(&format!("{verb} {id}")))
     }
 
     fn tool_plan_add(&self, args: &Value) -> Result<Value> {
@@ -148,7 +147,7 @@ impl McpServer {
         let new_node = Node {
             id: plan_path.clone(),
             title: subject.clone(),
-            checked: false,
+            state: NodeState::Pending,
             children: vec![],
             annotations: vec![],
         };
@@ -161,6 +160,26 @@ impl McpServer {
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&format!(
             "added {plan_path} `{subject}`"
+        )))
+    }
+
+    /// Mark a phase (or any non-leaf) as ready to exit: validate every leaf in
+    /// its subtree is resolved (`[x]` or `[-]`), then archive just that phase
+    /// to PLAN_ARCHIVE.md. Use this for the "I'm officially done with phase X"
+    /// ceremony — `plan_archive` (no args) sweeps every fully-complete phase
+    /// at once; `plan_phase_exit` is the surgical variant.
+    fn tool_plan_phase_exit(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "plan_path")?;
+        let date = args
+            .get("date")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(crate::today::today_utc);
+        let report = crate::archive::archive_phase(&self.plan_path, &id, &date)?;
+        Ok(tool_text_result(&format!(
+            "exited and archived phase {}: {} plan paths cleared",
+            id,
+            report.archived_plan_paths.len()
         )))
     }
 
@@ -245,6 +264,31 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "plan_path": {"type": "string"}
+                    },
+                    "required": ["plan_path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_skip",
+                "description": "Mark the node with `plan_path` as won't-do ([-]). Resolved-but-not-done; archive treats this like checked. No-op if already skipped.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_path": {"type": "string"}
+                    },
+                    "required": ["plan_path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_phase_exit",
+                "description": "Exit a specific phase: validate every leaf in its subtree is resolved ([x] or [-]), then archive just that phase to PLAN_ARCHIVE.md. Errors out if the subtree still has [ ] leaves.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_path": {"type": "string", "description": "Id of the phase to exit, e.g. `1.0`."},
+                        "date": {"type": "string", "description": "YYYY-MM-DD header for the archive section. Defaults to today."}
                     },
                     "required": ["plan_path"],
                     "additionalProperties": false
@@ -476,6 +520,52 @@ mod tests {
         // Notification: no `id` field.
         let resp = s.handle_line(r#"{"jsonrpc": "2.0", "method": "notifications/initialized"}"#);
         assert!(resp.is_none());
+    }
+
+    #[test]
+    fn plan_skip_marks_wont_do() {
+        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "plan_skip", "arguments": {"plan_path": "1.1"}}}),
+        );
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains("- [-] 1.1 Task"), "got: {after}");
+    }
+
+    #[test]
+    fn plan_skip_no_op_when_already_skipped() {
+        let (_, s) = scratch_plan("- [-] 1.0 Skipped\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "plan_skip", "arguments": {"plan_path": "1.0"}}}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("already"), "got: {text}");
+    }
+
+    #[test]
+    fn plan_phase_exit_archives_one_phase() {
+        let (p, s) = scratch_plan("- [x] 1.0 Done\n  - [x] 1.1 Sub\n- [x] 2.0 Also done\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1.0", "date": "2026-05-16"}}}),
+        );
+        assert!(resp.get("error").is_none(), "{resp}");
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(!after.contains("1.0 Done"));
+        assert!(after.contains("2.0 Also done"), "untargeted phase should remain");
+    }
+
+    #[test]
+    fn plan_phase_exit_refuses_unresolved_phase() {
+        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Pending\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1.0"}}}),
+        );
+        assert!(resp.get("error").is_some());
+        assert!(resp["error"]["message"].as_str().unwrap().contains("not fully resolved"));
     }
 
     #[test]

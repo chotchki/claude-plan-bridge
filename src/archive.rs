@@ -1,4 +1,6 @@
 use crate::ast::{Node, Plan};
+#[cfg(test)]
+use crate::ast::NodeState;
 use crate::parser::parse;
 use crate::serializer::serialize;
 use crate::state::{State, default_state_path_for};
@@ -105,9 +107,83 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     Ok(report)
 }
 
+/// Archive a single phase by id. Validates the subtree is fully resolved
+/// (`[x]` or `[-]` leaves) — errors otherwise. The phase is moved to the same
+/// dated section as `archive` would write; state mappings whose `plan_path`
+/// lives inside the moved subtree are dropped.
+pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<ArchiveReport> {
+    let text = std::fs::read_to_string(plan_path)
+        .with_context(|| format!("read {}", plan_path.display()))?;
+    let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+
+    let phase_idx = plan
+        .phases
+        .iter()
+        .position(|p| p.id == phase_id)
+        .ok_or_else(|| anyhow::anyhow!("no phase with id `{phase_id}` at top level"))?;
+
+    if !phase_fully_done(&plan.phases[phase_idx]) {
+        let mut unresolved: Vec<String> = Vec::new();
+        collect_unresolved_leaves(&plan.phases[phase_idx], &mut unresolved);
+        anyhow::bail!(
+            "phase `{phase_id}` is not fully resolved; unresolved leaves: {}",
+            unresolved.join(", ")
+        );
+    }
+
+    let phase = plan.phases.remove(phase_idx);
+    let mut report = ArchiveReport::empty(false);
+    report.archived_phase_ids.push(phase.id.clone());
+    collect_plan_paths(&phase, &mut report.archived_plan_paths);
+
+    let new_plan_text = serialize(&plan);
+    let archive_section = build_archive_section(today, std::slice::from_ref(&phase));
+    let archive_path = archive_path_for(plan_path);
+    let archive_text = if archive_path.exists() {
+        std::fs::read_to_string(&archive_path)?
+    } else {
+        String::new()
+    };
+    let combined = prepend_archive(&archive_section, &archive_text);
+
+    atomic_write(plan_path, &new_plan_text)?;
+    atomic_write(&archive_path, &combined)?;
+
+    let state_path = crate::state::default_state_path_for(plan_path);
+    let mut state = crate::state::State::load(&state_path)?;
+    let archived: std::collections::HashSet<&str> =
+        report.archived_plan_paths.iter().map(String::as_str).collect();
+    let to_drop: Vec<String> = state
+        .mappings
+        .iter()
+        .filter(|(_, m)| archived.contains(m.plan_path.as_str()))
+        .map(|(tid, _)| tid.clone())
+        .collect();
+    for tid in &to_drop {
+        state.remove(tid);
+    }
+    if !to_drop.is_empty() {
+        state.save(&state_path)?;
+    }
+
+    Ok(report)
+}
+
+fn collect_unresolved_leaves(node: &Node, out: &mut Vec<String>) {
+    if node.is_leaf() {
+        if !node.is_resolved() {
+            out.push(node.id.clone());
+        }
+        return;
+    }
+    for child in &node.children {
+        collect_unresolved_leaves(child, out);
+    }
+}
+
 fn phase_fully_done(node: &Node) -> bool {
     if node.is_leaf() {
-        return node.checked;
+        return node.is_resolved();
     }
     node.children.iter().all(phase_fully_done)
 }
@@ -295,13 +371,13 @@ mod tests {
         state.record("t-archived", Mapping {
             plan_path: "1.1".to_string(),
             last_synced_title: "Done".to_string(),
-            last_synced_checked: true,
+            last_synced_state: NodeState::Done,
             last_synced_annotations: vec![],
         });
         state.record("t-elsewhere", Mapping {
             plan_path: "9.9".to_string(),
             last_synced_title: "x".to_string(),
-            last_synced_checked: false,
+            last_synced_state: NodeState::Pending,
             last_synced_annotations: vec![],
         });
         state.save(&state_path).unwrap();
@@ -326,5 +402,58 @@ mod tests {
         let plan = write_plan(&dir, "- [x] 1.0 Empty phase\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
         assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+    }
+
+    #[test]
+    fn phase_with_all_wont_do_leaves_archives() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [-] 1.1 Skipped\n  - [-] 1.2 Also skipped\n",
+        );
+        let report = archive(&plan, false, "2026-05-16").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+    }
+
+    #[test]
+    fn phase_with_mix_of_done_and_wont_do_archives() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n  - [-] 1.2 Skipped\n",
+        );
+        let report = archive(&plan, false, "2026-05-16").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+    }
+
+    #[test]
+    fn archive_phase_targets_a_specific_phase() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase one\n  - [x] 1.1 Done\n- [ ] 2.0 Phase two\n  - [x] 2.1 Also done\n",
+        );
+        // Even though both phases are fully done, archive_phase only moves 1.0.
+        let report = archive_phase(&plan, "1.0", "2026-05-16").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("1.0 Phase one"));
+        assert!(after.contains("2.0 Phase two"));
+    }
+
+    #[test]
+    fn archive_phase_refuses_unresolved_subtree() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Not done\n");
+        let err = archive_phase(&plan, "1.0", "2026-05-16").unwrap_err();
+        assert!(err.to_string().contains("not fully resolved"), "{err}");
+    }
+
+    #[test]
+    fn archive_phase_errors_when_phase_missing() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let err = archive_phase(&plan, "9.9", "2026-05-16").unwrap_err();
+        assert!(err.to_string().contains("9.9"));
     }
 }

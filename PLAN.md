@@ -6,13 +6,8 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ## Backlog (not yet phased)
 
-- ~~Refactor checkbox-line grammar to **winnow**~~ — done 2026-05-16. `id_and_title` / `bold_id` / `bare_id` / `id_chars` / `skip_separator` are winnow combinators now; the outer `- [STATE] ` matcher, the code-fence state machine, and the indent-stack tree assembly stay hand-rolled. 114 tests still passing including the quicksight smoke test.
-- **Won't-do checkbox state (`[-]`)** — accepted 2026-05-16, to be folded into a post-5.3 fix-up sweep (likely Phase 7). Needs:
-  - `Node.checked: bool` → `Node.state: NodeState { Pending, Done, WontDo }` refactor across ast / parser / serializer / archive / reconcile / writeback.
-  - Archive treats `WontDo` like `Done` (phase can exit).
-  - Reconcile gets a `LeafSkipped` (or similar) delta variant.
-  - Writeback: `TaskUpdate(status="deleted")` against a `[-]` leaf must keep the line and just drop the state mapping — currently it removes the line.
-  - MCP angle: a `plan_skip` tool in Phase 6 is the cleaner driver (TaskUpdate's status enum has no won't-do equivalent). Land the AST/parser piece first so MCP has somewhere to write to.
+- ~~Refactor checkbox-line grammar to **winnow**~~ — done 2026-05-16. `id_and_title` / `bold_id` / `bare_id` / `id_chars` / `skip_separator` are winnow combinators now; the outer `- [STATE] ` matcher, the code-fence state machine, and the indent-stack tree assembly stay hand-rolled.
+- ~~**Won't-do checkbox state (`[-]`)**~~ — done 2026-05-16. `Node.state: NodeState { Pending, Done, WontDo }` across the codebase. Parser accepts `[-]` and `[~]`; serializer emits `[-]`. Archive treats `WontDo` like `Done` (phase can exit). Reconcile emits `LeafStateChanged { old, new }` covering all transitions. Writeback's `TaskUpdate(deleted)` against a `[-]` leaf keeps the line and just drops the state mapping. MCP gained `plan_skip` (and `plan_phase_exit`). 128 tests passing.
 
 ---
 

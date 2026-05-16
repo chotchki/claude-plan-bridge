@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Node, Plan};
+use crate::ast::{Annotation, Node, NodeState, Plan};
 
 /// Render a `Plan` back to markdown.
 ///
@@ -21,7 +21,11 @@ pub fn serialize(plan: &Plan) -> String {
 
 fn write_node(out: &mut String, node: &Node, depth: usize) {
     let indent = " ".repeat(depth * 2);
-    let mark = if node.checked { "x" } else { " " };
+    let mark = match node.state {
+        NodeState::Done => "x",
+        NodeState::WontDo => "-",
+        NodeState::Pending => " ",
+    };
     out.push_str(&format!("{indent}- [{mark}] {} {}\n", node.id, node.title));
 
     let inner = " ".repeat((depth + 1) * 2);
@@ -90,6 +94,19 @@ mod tests {
     fn single_checked_phase() {
         let plan = parse("- [x] 1.0 Done\n").unwrap();
         assert_eq!(serialize(&plan), "- [x] 1.0 Done\n");
+    }
+
+    #[test]
+    fn wont_do_phase_round_trips_with_dash() {
+        let plan = parse("- [-] 1.0 Skipped\n").unwrap();
+        assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
+    }
+
+    #[test]
+    fn tilde_input_normalizes_to_dash_on_write() {
+        let plan = parse("- [~] 1.0 Skipped\n").unwrap();
+        // Tilde is accepted on read, but canonical output is `[-]`.
+        assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
     }
 
     #[test]

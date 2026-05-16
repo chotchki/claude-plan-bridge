@@ -1,4 +1,4 @@
-use crate::ast::{Node, Plan};
+use crate::ast::{Node, NodeState, Plan};
 use crate::parser::parse;
 use crate::state::{State, default_state_path_for};
 use crate::writeback::annotations_to_strings;
@@ -18,17 +18,20 @@ pub enum Delta {
     LeafAdded {
         plan_path: String,
         title: String,
-        checked: bool,
+        state: NodeState,
     },
     /// A leaf the bridge tracked is no longer in PLAN.md. Claude should call
     /// `TaskUpdate(status="deleted")` to mirror.
     LeafRemoved { plan_path: String, task_id: String },
-    /// PLAN.md says checked; bridge's last-synced state says not. Claude
-    /// should `TaskUpdate(status="completed")`.
-    LeafChecked { plan_path: String, task_id: String },
-    /// PLAN.md says unchecked; bridge's last-synced state says checked. Note
-    /// only — there's no clean way to un-complete a task via `TaskUpdate`.
-    LeafUnchecked { plan_path: String, task_id: String },
+    /// The leaf's checkbox state moved (e.g., `[ ]` → `[x]`, or `[x]` → `[-]`).
+    /// The renderer maps each `(old, new)` pair to a human-readable suggestion
+    /// (TaskUpdate completed / deleted / etc.).
+    LeafStateChanged {
+        plan_path: String,
+        task_id: String,
+        old: NodeState,
+        new: NodeState,
+    },
     /// Title text was edited in PLAN.md. Claude should `TaskUpdate(subject=...)`.
     LeafTitleChanged {
         plan_path: String,
@@ -88,19 +91,13 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                         old_title: mapping.last_synced_title.clone(),
                     });
                 }
-                if leaf.checked != mapping.last_synced_checked {
-                    let delta = if leaf.checked {
-                        Delta::LeafChecked {
-                            plan_path: leaf.id.clone(),
-                            task_id: task_id.to_string(),
-                        }
-                    } else {
-                        Delta::LeafUnchecked {
-                            plan_path: leaf.id.clone(),
-                            task_id: task_id.to_string(),
-                        }
-                    };
-                    deltas.push(delta);
+                if leaf.state != mapping.last_synced_state {
+                    deltas.push(Delta::LeafStateChanged {
+                        plan_path: leaf.id.clone(),
+                        task_id: task_id.to_string(),
+                        old: mapping.last_synced_state,
+                        new: leaf.state,
+                    });
                 }
                 let current = annotations_to_strings(&leaf.annotations);
                 if current != mapping.last_synced_annotations {
@@ -115,7 +112,7 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                 deltas.push(Delta::LeafAdded {
                     plan_path: leaf.id.clone(),
                     title: leaf.title.clone(),
-                    checked: leaf.checked,
+                    state: leaf.state,
                 });
             }
         }
@@ -140,13 +137,17 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
 }
 
 fn collect_parent_inconsistencies(node: &Node, out: &mut Vec<Delta>) {
-    if node.checked && !node.is_leaf() {
-        let mut unchecked: Vec<String> = Vec::new();
-        collect_unchecked_descendants(node, &mut unchecked);
-        if !unchecked.is_empty() {
+    // A parent is "marked resolved" if it's [x] or [-]. If any descendant leaf
+    // is still pending, we surface the inconsistency. WontDo counts as resolved
+    // for both parent and descendants — a phase made of [-] leaves can
+    // legitimately be archived.
+    if node.is_resolved() && !node.is_leaf() {
+        let mut unresolved: Vec<String> = Vec::new();
+        collect_unresolved_descendants(node, &mut unresolved);
+        if !unresolved.is_empty() {
             out.push(Delta::ParentInconsistent {
                 plan_path: node.id.clone(),
-                unchecked_descendants: unchecked,
+                unchecked_descendants: unresolved,
             });
         }
     }
@@ -155,14 +156,14 @@ fn collect_parent_inconsistencies(node: &Node, out: &mut Vec<Delta>) {
     }
 }
 
-fn collect_unchecked_descendants(node: &Node, out: &mut Vec<String>) {
+fn collect_unresolved_descendants(node: &Node, out: &mut Vec<String>) {
     for child in &node.children {
         if child.is_leaf() {
-            if !child.checked {
+            if !child.is_resolved() {
                 out.push(child.id.clone());
             }
         } else {
-            collect_unchecked_descendants(child, out);
+            collect_unresolved_descendants(child, out);
         }
     }
 }
@@ -176,8 +177,12 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
     let mut out = String::from("PLAN.md drift since last sync:\n");
     for d in deltas {
         match d {
-            Delta::LeafAdded { plan_path, title, checked } => {
-                let mark = if *checked { "[x]" } else { "[ ]" };
+            Delta::LeafAdded { plan_path, title, state } => {
+                let mark = match state {
+                    NodeState::Done => "[x]",
+                    NodeState::WontDo => "[-]",
+                    NodeState::Pending => "[ ]",
+                };
                 out.push_str(&format!(
                     "  + Added {mark} {plan_path} {title}  (consider TaskCreate)\n"
                 ));
@@ -187,14 +192,18 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     "  - Removed {plan_path}  (task {task_id} — consider TaskUpdate status=deleted)\n"
                 ));
             }
-            Delta::LeafChecked { plan_path, task_id } => {
+            Delta::LeafStateChanged { plan_path, task_id, old, new } => {
+                let suggestion = match (old, new) {
+                    (_, NodeState::Done) => "consider TaskUpdate status=completed",
+                    (_, NodeState::WontDo) => "consider TaskUpdate status=deleted (the [-] line stays in PLAN.md)",
+                    (NodeState::Done, NodeState::Pending) => "no TaskUpdate revives a completed task; informational",
+                    (NodeState::WontDo, NodeState::Pending) => "task was previously skipped; consider TaskCreate to re-introduce",
+                    _ => "informational",
+                };
                 out.push_str(&format!(
-                    "  v Checked {plan_path}  (task {task_id} — consider TaskUpdate status=completed)\n"
-                ));
-            }
-            Delta::LeafUnchecked { plan_path, task_id } => {
-                out.push_str(&format!(
-                    "  ^ Unchecked {plan_path}  (task {task_id} — no TaskUpdate revives a completed task; informational)\n"
+                    "  ~ State {plan_path} ({state_old:?} → {state_new:?}) (task {task_id} — {suggestion})\n",
+                    state_old = old,
+                    state_new = new,
                 ));
             }
             Delta::LeafTitleChanged { plan_path, task_id, new_title, old_title } => {
@@ -287,7 +296,7 @@ mod tests {
         Mapping {
             plan_path: plan_path.to_string(),
             last_synced_title: title.to_string(),
-            last_synced_checked: checked,
+            last_synced_state: if checked { NodeState::Done } else { NodeState::Pending },
             last_synced_annotations: annotations.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -355,7 +364,10 @@ mod tests {
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Done", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafChecked { .. })));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            Delta::LeafStateChanged { new: NodeState::Done, .. }
+        )));
     }
 
     #[test]
@@ -364,7 +376,10 @@ mod tests {
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Task", true, &[]))]);
         let deltas = reconcile(&plan).unwrap();
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafUnchecked { .. })));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            Delta::LeafStateChanged { new: NodeState::Pending, old: NodeState::Done, .. }
+        )));
     }
 
     #[test]
@@ -421,7 +436,7 @@ mod tests {
             ],
         );
         let deltas = reconcile(&plan).unwrap();
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafChecked { .. })));
+        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafStateChanged { new: NodeState::Done, .. })));
         assert!(deltas.iter().any(|d| matches!(d, Delta::LeafTitleChanged { .. })));
         assert!(deltas.iter().any(|d| matches!(d, Delta::LeafAdded { plan_path, .. } if plan_path == "1.3")));
         assert!(deltas.iter().any(|d| matches!(d, Delta::LeafRemoved { plan_path, .. } if plan_path == "9.9")));
@@ -528,17 +543,19 @@ mod tests {
             Delta::LeafAdded {
                 plan_path: "1.3".to_string(),
                 title: "New".to_string(),
-                checked: false,
+                state: NodeState::Pending,
             },
-            Delta::LeafChecked {
+            Delta::LeafStateChanged {
                 plan_path: "1.1".to_string(),
                 task_id: "t-1".to_string(),
+                old: NodeState::Pending,
+                new: NodeState::Done,
             },
         ];
         let r = render_deltas(&deltas);
         assert!(r.contains("Added"));
         assert!(r.contains("1.3"));
-        assert!(r.contains("Checked"));
+        assert!(r.contains("State"));
         assert!(r.contains("1.1"));
     }
 }

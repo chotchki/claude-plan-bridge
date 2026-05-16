@@ -127,8 +127,10 @@ Wire it into your MCP client config (the exact shape depends on the client; for 
 | `plan_list` | — | Returns the parsed `PLAN.md` AST as JSON text. |
 | `plan_check` | `plan_path` | Sets the node's checkbox to `[x]`. |
 | `plan_uncheck` | `plan_path` | Sets the node's checkbox to `[ ]`. |
+| `plan_skip` | `plan_path` | Sets the node's checkbox to `[-]` (won't-do). Archive treats `[-]` like `[x]`. |
 | `plan_add` | `plan_path`, `subject` | Adds a new leaf at `plan_path` (parent must exist). |
 | `plan_archive` | `dry_run?`, `date?` | Sweeps fully-complete phases to `PLAN_ARCHIVE.md`. |
+| `plan_phase_exit` | `plan_path`, `date?` | Validates one phase's subtree is fully resolved, then archives just that phase. Errors if any `[ ]` leaf remains. |
 
 MCP-style tool errors are surfaced as JSON-RPC error responses (`code: -32603`), not as protocol-level disconnects. Unknown tool names and missing required args both produce clean errors that the client surfaces back to the user.
 
@@ -176,7 +178,8 @@ Annotations are tagged unions:
 
 ### Canonical output format
 
-- Each checkbox: `- [ ]` / `- [x]` followed by an id and the title, plain space separator, no bold wrapping.
+- Each checkbox: `- [ ]` / `- [x]` / `- [-]` followed by an id and the title, plain space separator, no bold wrapping.
+- Three states: `[ ]` pending, `[x]` done, `[-]` won't-do (the parser also accepts `[~]` on read but always writes `[-]`).
 - Ids are **project-scoped** and **stable across archive sweeps**. Gaps in numbering are intentional.
 - Two-space indent per tree level.
 - Code-block fences re-emit at the normalized indent; their content is preserved verbatim.

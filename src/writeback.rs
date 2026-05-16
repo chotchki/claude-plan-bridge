@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Node, Plan, parent_id_for};
+use crate::ast::{Annotation, Node, NodeState, Plan, parent_id_for};
 use crate::hook::{HookOutput, HookPayload, TaskCreateInput, TaskUpdateInput, extract_task_id};
 use crate::parser::parse;
 use crate::serializer::serialize;
@@ -78,7 +78,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         Some(node) => Mapping {
             plan_path: assigned_path.clone(),
             last_synced_title: node.title.clone(),
-            last_synced_checked: node.checked,
+            last_synced_state: node.state,
             last_synced_annotations: annotations_to_strings(&node.annotations),
         },
         None => Mapping {
@@ -130,15 +130,29 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             let Some(node) = plan.find_mut(&node_path) else {
                 return Ok(HookOutput::silent());
             };
-            if node.checked {
+            if node.is_done() {
                 return Ok(HookOutput::context(format!(
                     "plan-bridge: {node_path} already complete (no-op)"
                 )));
             }
-            node.checked = true;
+            node.state = NodeState::Done;
             "marked complete".to_string()
         }
         Some("deleted") => {
+            // If PLAN.md already records the leaf as `[-]` (won't-do), the
+            // user has expressed intent to keep it visible. Just drop the
+            // state mapping; don't remove the line.
+            let is_wont_do = plan
+                .find(&node_path)
+                .map(|n| n.state == NodeState::WontDo)
+                .unwrap_or(false);
+            if is_wont_do {
+                state.remove(&input.task_id);
+                state.save(&state_path)?;
+                return Ok(HookOutput::context(format!(
+                    "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
+                )));
+            }
             if plan.remove(&node_path).is_none() {
                 state.remove(&input.task_id);
                 state.save(&state_path)?;
@@ -162,7 +176,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             let updated = Mapping {
                 plan_path: node_path.clone(),
                 last_synced_title: node.title.clone(),
-                last_synced_checked: node.checked,
+                last_synced_state: node.state,
                 last_synced_annotations: annotations_to_strings(&node.annotations),
             };
             state.record(&input.task_id, updated);
@@ -183,7 +197,7 @@ fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()>
     let new_node = Node {
         id: plan_path.to_string(),
         title: subject.to_string(),
-        checked: false,
+        state: NodeState::Pending,
         children: vec![],
         annotations: vec![],
     };
@@ -397,6 +411,24 @@ mod tests {
         let after = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(before, after);
         assert_eq!(out.to_json(), "{}", "should be silent");
+    }
+
+    #[test]
+    fn update_deleted_on_wont_do_leaf_keeps_line() {
+        let dir = scratch_dir();
+        // Pre-existing PLAN.md with a `[-]` leaf the user added by hand.
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [-] 1.1 Skipped\n");
+        // Bridge tracks it.
+        writeback_create(&payload_for_create("t-1", "Skipped", Some("1.1")), &plan).unwrap();
+        // Claude calls TaskUpdate(deleted). The line should remain.
+        writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [-] 1.1 Skipped"),
+            "the [-] line should be preserved: {contents}"
+        );
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-1"), None, "mapping should be cleared");
     }
 
     #[test]

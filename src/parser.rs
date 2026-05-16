@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Node, Plan};
+use crate::ast::{Annotation, Node, NodeState, Plan};
 use thiserror::Error;
 use winnow::Parser;
 use winnow::ascii::space0;
@@ -58,12 +58,12 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
         }
 
         match parse_checkbox(trimmed, line_no)? {
-            CheckboxLine::Checkbox { checked, id, title } => {
+            CheckboxLine::Checkbox { state, id, title } => {
                 saw_checkbox = true;
                 let node = Node {
                     id,
                     title,
-                    checked,
+                    state,
                     children: Vec::new(),
                     annotations: Vec::new(),
                 };
@@ -164,7 +164,7 @@ fn leading_spaces(s: &str) -> usize {
 
 enum CheckboxLine {
     Checkbox {
-        checked: bool,
+        state: NodeState,
         id: String,
         title: String,
     },
@@ -181,9 +181,10 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
     let Some((state, rest)) = after_open.split_once("] ") else {
         return Ok(CheckboxLine::NotACheckbox);
     };
-    let checked = match state {
-        " " => false,
-        "x" | "X" => true,
+    let state = match state {
+        " " => NodeState::Pending,
+        "x" | "X" => NodeState::Done,
+        "-" | "~" => NodeState::WontDo,
         other => {
             return Err(ParseError::BadCheckboxState {
                 line: line_no,
@@ -193,7 +194,7 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
     };
 
     let (id, title) = extract_id_and_title(rest);
-    Ok(CheckboxLine::Checkbox { checked, id, title })
+    Ok(CheckboxLine::Checkbox { state, id, title })
 }
 
 /// Pull an optional id off the front of the post-checkbox text.
@@ -300,14 +301,28 @@ mod tests {
         let phase = &plan.phases[0];
         assert_eq!(phase.id, "1.0");
         assert_eq!(phase.title, "First phase");
-        assert!(!phase.checked);
+        assert!(!phase.is_done());
         assert!(phase.children.is_empty());
     }
 
     #[test]
     fn parses_completed_checkbox() {
         let plan = parse("- [x] 1.0 Done phase\n").unwrap();
-        assert!(plan.phases[0].checked);
+        assert!(plan.phases[0].is_done());
+    }
+
+    #[test]
+    fn parses_wont_do_checkbox() {
+        let plan = parse("- [-] 1.0 Skipped phase\n").unwrap();
+        assert_eq!(plan.phases[0].state, NodeState::WontDo);
+        assert!(!plan.phases[0].is_done());
+        assert!(plan.phases[0].is_resolved());
+    }
+
+    #[test]
+    fn parses_tilde_as_wont_do_alias() {
+        let plan = parse("- [~] 1.0 Skipped via tilde\n").unwrap();
+        assert_eq!(plan.phases[0].state, NodeState::WontDo);
     }
 
     #[test]
@@ -440,7 +455,7 @@ Some prose.
         let plan = parse("- [x] **X.4.a.1** — Studio severability test\n").unwrap();
         assert_eq!(plan.phases[0].id, "X.4.a.1");
         assert_eq!(plan.phases[0].title, "Studio severability test");
-        assert!(plan.phases[0].checked);
+        assert!(plan.phases[0].is_done());
     }
 
     #[test]
@@ -547,14 +562,14 @@ Some prose.
 
         let p1 = &plan.phases[0];
         assert_eq!(p1.id, "1.0");
-        assert!(!p1.checked);
+        assert!(!p1.is_done());
         assert_eq!(p1.children.len(), 2);
 
         let t11 = &p1.children[0];
         assert_eq!(t11.id, "1.1");
         assert_eq!(t11.children.len(), 2);
-        assert!(t11.children[0].checked, "1.1.1 should be checked");
-        assert!(!t11.children[1].checked, "1.1.2 should be unchecked");
+        assert!(t11.children[0].is_done(), "1.1.1 should be checked");
+        assert!(!t11.children[1].is_done(), "1.1.2 should be unchecked");
 
         let t12 = &p1.children[1];
         assert_eq!(t12.id, "1.2");
@@ -562,9 +577,9 @@ Some prose.
 
         let p2 = &plan.phases[1];
         assert_eq!(p2.id, "2.0");
-        assert!(p2.checked);
+        assert!(p2.is_done());
         assert_eq!(p2.children.len(), 1);
-        assert!(p2.children[0].checked);
+        assert!(p2.children[0].is_done());
     }
 
     #[test]

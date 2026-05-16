@@ -41,7 +41,8 @@ Make PLAN.md the single source of truth. TaskCreate becomes a mirror, populated 
 - Nested tasks: `  - [ ] N.M Task title`
 - Leaf subtasks: `    - [ ] N.M.K Subtask title`
 - Two-space indent per level (parser accepts 2 or 4; normalizes to 2 on write).
-- `[x]` = complete. `[ ]` = pending. No other states in PLAN.md.
+- Three checkbox states: `[ ]` pending, `[x]` done, `[-]` won't-do. The parser also accepts `[~]` as an alias for won't-do on input but normalizes to `[-]` on write.
+- Archive treats `[x]` and `[-]` equivalently — both count as "resolved" for the phase-exit completeness check. The semantic difference is recorded in PLAN.md for the reader's benefit; it doesn't affect sweep behavior.
 - A phase exits only when every nested box is `[x]`. On exit, the phase is swept to `PLAN_ARCHIVE.md`.
 - Sibling bullets without checkboxes are notes/context, not tasks.
 

@@ -31,9 +31,9 @@ pub struct Mapping {
     #[serde(default)]
     pub last_synced_title: String,
     /// Last checkbox state we wrote into PLAN.md for this task. Used by
-    /// reconcile to detect external `[ ]` ↔ `[x]` flips.
+    /// reconcile to detect external `[ ]` / `[x]` / `[-]` flips.
     #[serde(default)]
-    pub last_synced_checked: bool,
+    pub last_synced_state: crate::ast::NodeState,
     /// Last annotations (text-form, one entry per annotation) under this leaf.
     /// Used by reconcile to surface user-added notes between turns.
     #[serde(default)]

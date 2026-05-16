@@ -15,14 +15,45 @@ pub struct Plan {
 pub struct Node {
     pub id: String,
     pub title: String,
-    pub checked: bool,
+    #[serde(default)]
+    pub state: NodeState,
     pub children: Vec<Node>,
     pub annotations: Vec<Annotation>,
+}
+
+/// Checkbox state. `Pending` = `[ ]`, `Done` = `[x]`, `WontDo` = `[-]`.
+///
+/// `Done` and `WontDo` are both "resolved" — archive treats them
+/// equivalently — but they're semantically distinct in PLAN.md: `WontDo`
+/// captures *we decided not to do this*, which is information worth keeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeState {
+    #[default]
+    Pending,
+    Done,
+    WontDo,
+}
+
+impl NodeState {
+    /// True when this leaf is no longer active work — either done or
+    /// explicitly skipped. Archive uses this; reconcile draws a finer line.
+    pub fn is_resolved(self) -> bool {
+        matches!(self, NodeState::Done | NodeState::WontDo)
+    }
 }
 
 impl Node {
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.state == NodeState::Done
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.state.is_resolved()
     }
 
     /// Recursively search this subtree for a node whose `id` matches.
@@ -102,7 +133,7 @@ impl Plan {
             self.phases.push(Node {
                 id: "Inbox.0".to_string(),
                 title: "Inbox".to_string(),
-                checked: false,
+                state: NodeState::Pending,
                 children: vec![],
                 annotations: vec![],
             });
@@ -112,7 +143,7 @@ impl Plan {
         inbox.children.push(Node {
             id: next.clone(),
             title: subject.to_string(),
-            checked: false,
+            state: NodeState::Pending,
             children: vec![],
             annotations: vec![],
         });
@@ -187,7 +218,7 @@ mod tests {
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
-                checked: false,
+                state: NodeState::Pending,
                 annotations: vec![Annotation::Text {
                     text: "note".to_string(),
                     indent: 2,
@@ -195,7 +226,7 @@ mod tests {
                 children: vec![Node {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
-                    checked: true,
+                    state: NodeState::Done,
                     children: vec![],
                     annotations: vec![],
                 }],
@@ -224,15 +255,15 @@ mod tests {
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
-                checked: false,
+                state: NodeState::Pending,
                 children: vec![Node {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
-                    checked: false,
+                    state: NodeState::Pending,
                     children: vec![Node {
                         id: "1.1.1".to_string(),
                         title: "Sub".to_string(),
-                        checked: true,
+                        state: NodeState::Done,
                         children: vec![],
                         annotations: vec![],
                     }],
@@ -255,7 +286,7 @@ mod tests {
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
-                checked: false,
+                state: NodeState::Pending,
                 children: vec![],
                 annotations: vec![],
             }],
@@ -263,7 +294,7 @@ mod tests {
         let child = Node {
             id: "1.1".to_string(),
             title: "Task".to_string(),
-            checked: false,
+            state: NodeState::Pending,
             children: vec![],
             annotations: vec![],
         };
@@ -277,7 +308,7 @@ mod tests {
         let child = Node {
             id: "1.1".to_string(),
             title: "Task".to_string(),
-            checked: false,
+            state: NodeState::Pending,
             children: vec![],
             annotations: vec![],
         };
@@ -339,19 +370,19 @@ mod tests {
             phases: vec![Node {
                 id: "Inbox.0".to_string(),
                 title: "Inbox".to_string(),
-                checked: false,
+                state: NodeState::Pending,
                 children: vec![
                     Node {
                         id: "Inbox.1".to_string(),
                         title: "x".to_string(),
-                        checked: false,
+                        state: NodeState::Pending,
                         children: vec![],
                         annotations: vec![],
                     },
                     Node {
                         id: "Inbox.3".to_string(),
                         title: "y".to_string(),
-                        checked: false,
+                        state: NodeState::Pending,
                         children: vec![],
                         annotations: vec![],
                     },
