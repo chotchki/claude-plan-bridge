@@ -1,0 +1,92 @@
+## 2026-05-16
+
+- [x] 1.0 Foundation: Rust project + PLAN.md parser/serializer
+  - [x] 1.1 Scaffold Cargo project
+    - [x] 1.1.1 `cargo init --bin plan-bridge` (2024 edition)
+    - [x] 1.1.2 Add dependencies: `clap` (derive), `serde`, `serde_json`, `anyhow`, `thiserror`
+    - [x] 1.1.3 `.gitignore` for `target/`, `.claude/plan-bridge-state.json`
+    - [x] 1.1.4 `cargo build` and `cargo test` green on empty project
+  - [x] 1.2 AST + parser
+    - [x] 1.2.1 Define types: `Plan`, `Node` (one type for phase/task/leaf, depth implied by position), `Annotation`
+    - [x] 1.2.2 Line tokenizer: classify each line as phase/task/leaf checkbox vs annotation vs blank
+    - [x] 1.2.3 Tree assembly via indent stack; mixed indent tolerated per-section
+    - [x] 1.2.4 Tolerate `1` vs `1.0` numbering
+    - [x] 1.2.5 Attach trailing annotations (notes, fenced code blocks, sub-bullets without checkboxes) to their parent node
+    - [x] 1.2.6 Unit tests inline + fixture-based (16 passing, covering empty, nested, mixed indent, all annotation types, error paths)
+    - [x] 1.2.7 Tolerate alphanumeric IDs (`X.4.a.1`, `Y.2.gate` style) — alphanumeric components separated by dots
+    - [x] 1.2.8 Tolerate bold-wrapped IDs (`**X.4.a.1**`) — stripped on parse, never emitted on write
+    - [x] 1.2.9 Tolerate em-dash / hyphen separator between ID and title (`— `, `- `, plain space)
+    - [x] 1.2.10 Tolerate bare checkbox without an ID (`- [ ] title only`); recorded as `id: ""`
+    - [x] 1.2.11 Tolerate markdown section headers (`## Header`) appearing within the tree — attached as text annotation on the most recent open node (structural fidelity not promised for non-canonical input)
+    - [x] 1.2.12 Smoke test against `../quicksight/PLAN.md` — parses without error when present; skipped if absent
+  - [x] 1.3 Serializer
+    - [x] 1.3.1 Render `Plan` → markdown with normalized 2-space indent
+    - [x] 1.3.2 Preserve annotation text verbatim (including fenced blocks)
+    - [x] 1.3.3 Roundtrip property: `parse(serialize(parse(input))) == parse(input)` over fixtures
+  - [x] 1.4 `plan-bridge parse` subcommand
+    - [x] 1.4.1 Clap wiring with optional `--plan <PATH>` (default `./PLAN.md`)
+    - [x] 1.4.2 Stable JSON output schema (documented in README)
+    - [x] 1.4.3 Unit tests verifying JSON shape on fixtures (2 ast tests: serde roundtrip + camelCase tag check)
+  - [x] 1.5 Phase 1 exit
+    - [x] 1.5.1 `cargo test` green (35 tests passing)
+    - [x] 1.5.2 README documents parser/serializer behavior, JSON schema, and tolerated input variants
+    - [x] 1.5.3 e2e: smoke tests parse this repo's PLAN.md and `../quicksight/PLAN.md` without error
+
+- [x] 2.0 Writeback + per-project state
+  - [x] 2.1 State file
+    - [x] 2.1.1 Define `.claude/plan-bridge-state.json` schema (`taskId ↔ plan_path` map via `Mapping` struct, schema version)
+    - [x] 2.1.2 Atomic read/write helpers (tmp + rename)
+    - [x] 2.1.3 Unit tests for state I/O (7 tests covering load-missing, roundtrip, parent-dir creation, atomicity, future-version refusal, lookup, default-path)
+  - [x] 2.2 `writeback --event create`
+    - [x] 2.2.1 Parse hook stdin JSON (`tool_input`, `tool_response`) — typed `HookPayload`, `TaskCreateInput`, `TaskMetadata` in `hook.rs`
+    - [x] 2.2.2 If `metadata.plan_path` present, locate insertion point via `parent_id_for`; else append under `Inbox.0` (auto-created if missing)
+    - [x] 2.2.3 Append `- [ ] N.M.K subject` at correct indent (AST mutation + serialize round-trip)
+    - [x] 2.2.4 Record `taskId → plan_path` in state file (atomic save)
+    - [x] 2.2.5 Idempotency: re-running same `task_id` is a no-op; pre-existing `plan_path` doesn't double-insert
+    - [x] 2.2.6 Unit tests (7 covering parent-existing, task-under-phase, state recording, idempotency, inbox fallback, missing-parent error, missing-task-id error)
+  - [x] 2.3 `writeback --event update`
+    - [x] 2.3.1 Look up `plan_path` from `taskId` via state file
+    - [x] 2.3.2 `status: completed` → `[ ]` becomes `[x]`
+    - [x] 2.3.3 `status: deleted` → remove the line. Orphaned empty parents are NOT cascade-removed in v1 — too risky, user prunes manually
+    - [x] 2.3.4 `status: in_progress` and `status: pending` → no PLAN.md change (in-flight state stays in TaskCreate only)
+    - [x] 2.3.5 Idempotency: completed-twice is a no-op; deleted-on-already-deleted clears the lingering state mapping
+    - [x] 2.3.6 Unit + e2e tests (5 unit tests; manual e2e: create → complete → delete on a scratch PLAN.md works as designed)
+  - [x] 2.4 Phase 2 exit
+    - [x] 2.4.1 `cargo test` green (72 tests)
+    - [x] 2.4.2 README documents writeback contract + state file
+    - [x] 2.4.3 e2e: manually piped `TaskCreate` + `TaskUpdate(completed)` + `TaskUpdate(deleted)` payloads through `plan-bridge writeback`; PLAN.md and state evolve as expected
+
+- [x] 3.0 Reconcile (PLAN.md ↔ recorded state drift detection)
+  - [x] 3.1 Delta types
+    - [x] 3.1.1 Define delta variants: `LeafAdded`, `LeafRemoved`, `LeafChecked`, `LeafUnchecked`, `LeafTitleChanged`, `LeafAnnotationChanged`
+    - [x] 3.1.2 Serde JSON representation (tagged enum with `kind` discriminator)
+  - [x] 3.2 Diff engine
+    - [x] 3.2.1 Build `Map<plan_path, Leaf>` from parsed PLAN.md
+    - [x] 3.2.2 Build reverse map `plan_path → task_id` from state file (the `last_synced_*` fields on `Mapping` are the baseline — TaskList JSON not needed in v1)
+    - [x] 3.2.3 Emit deltas: structural diffs (added/removed), box-state flips, title edits, annotation changes
+    - [x] 3.2.4 Compact human-readable rendering of deltas for `additionalContext` (`render_deltas`)
+  - [x] 3.3 `plan-bridge reconcile` subcommand
+    - [x] 3.3.1 No `--task-list` flag in v1 — state-driven diff is sufficient. Backlog: add when TaskList introspection becomes needed
+    - [x] 3.3.2 Emit hook-shaped JSON: `hookSpecificOutput.additionalContext` containing the rendered delta; `{}` silent when no drift
+    - [x] 3.3.3 Unit tests on synthetic plan/state pairs (11 covering empty, no-drift, each delta type, multiple-deltas compound, render)
+  - [x] 3.4 Phase 3 exit
+    - [x] 3.4.1 `cargo test` green (83 tests)
+    - [x] 3.4.2 README documents delta schema and the `additionalContext` envelope
+    - [x] 3.4.3 e2e: PLAN.md user-edit scenario (tick + rename + add note) drives reconcile to emit Title / Checked / Annotation deltas as expected
+
+- [x] 4.0 Archive sweep
+  - [x] 4.1 Archive logic
+    - [x] 4.1.1 Identify phases whose entire subtree is `[x]` (via `phase_fully_done`, parent's own checkbox state irrelevant — children determine)
+    - [x] 4.1.2 Move them to `PLAN_ARCHIVE.md` under a `## YYYY-MM-DD` header; newest section prepended
+    - [x] 4.1.3 Preserve annotations and structure on move (serialize the moved subtree intact)
+    - [x] 4.1.4 Renumber remaining phases — decision: NO (per `plan-id-stability` memory)
+  - [x] 4.2 `plan-bridge archive` subcommand
+    - [x] 4.2.1 Clap wiring; `--dry-run` flag; `--date` override for testability
+    - [x] 4.2.2 Atomic write of both files (PLAN.md + PLAN_ARCHIVE.md) via tmp + rename
+    - [x] 4.2.3 No-op when no fully-complete phase exists
+    - [x] 4.2.4 Unit tests (8 covering no-op, archive-completed, parent-unchecked-children-done, prepend-existing, dry-run, drop-state-mappings, empty-unchecked, empty-checked)
+  - [x] 4.3 Phase 4 exit
+    - [x] 4.3.1 `cargo test` green (91 tests)
+    - [x] 4.3.2 README documents archive behavior + the renumbering decision
+    - [x] 4.3.3 e2e: dogfooded archive on this repo's PLAN.md — Phases 1-4 swept to `PLAN_ARCHIVE.md`
+

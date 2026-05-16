@@ -1,0 +1,375 @@
+use serde::{Deserialize, Serialize};
+
+/// A parsed PLAN.md document.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plan {
+    /// Lines preceding the first checkbox node, preserved verbatim for round-trip.
+    pub preamble: Vec<String>,
+    /// Top-level nodes (phases). A node is a "leaf" when its `children` vec is empty.
+    pub phases: Vec<Node>,
+}
+
+/// A single checkbox node in the plan. Phases, tasks, and subtasks all share this shape;
+/// depth is determined by the dotted `id` (e.g., `1.0`, `1.1`, `1.1.1`) and by tree position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Node {
+    pub id: String,
+    pub title: String,
+    pub checked: bool,
+    pub children: Vec<Node>,
+    pub annotations: Vec<Annotation>,
+}
+
+impl Node {
+    pub fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    /// Recursively search this subtree for a node whose `id` matches.
+    pub fn find(&self, id: &str) -> Option<&Node> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(n) = child.find(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut Node> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &mut self.children {
+            if let Some(n) = child.find_mut(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+}
+
+impl Plan {
+    /// Full-tree search by id. O(N); plans are small.
+    pub fn find(&self, id: &str) -> Option<&Node> {
+        for p in &self.phases {
+            if let Some(n) = p.find(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut Node> {
+        for p in &mut self.phases {
+            if let Some(n) = p.find_mut(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Append a child to the node with `parent_id`. Returns Err if no such parent.
+    pub fn add_child_of(&mut self, parent_id: &str, child: Node) -> Result<(), String> {
+        let parent = self
+            .find_mut(parent_id)
+            .ok_or_else(|| format!("no node with id {parent_id} in PLAN.md"))?;
+        parent.children.push(child);
+        Ok(())
+    }
+
+    /// Remove a node by id from anywhere in the tree. Returns the detached
+    /// node when found. Does not cascade-remove orphaned empty parents
+    /// (deliberate v1 decision per PLAN.md 2.3.3).
+    pub fn remove(&mut self, id: &str) -> Option<Node> {
+        if let Some(idx) = self.phases.iter().position(|n| n.id == id) {
+            return Some(self.phases.remove(idx));
+        }
+        for phase in &mut self.phases {
+            if let Some(detached) = remove_descendant(phase, id) {
+                return Some(detached);
+            }
+        }
+        None
+    }
+
+    /// Find the existing Inbox phase (id `Inbox.0`) or create one at the end of
+    /// the plan. Returns the assigned id for a freshly appended child.
+    pub fn append_to_inbox(&mut self, subject: &str) -> String {
+        if self.find("Inbox.0").is_none() {
+            self.phases.push(Node {
+                id: "Inbox.0".to_string(),
+                title: "Inbox".to_string(),
+                checked: false,
+                children: vec![],
+                annotations: vec![],
+            });
+        }
+        let inbox = self.find_mut("Inbox.0").expect("just inserted");
+        let next = next_inbox_child_id(inbox);
+        inbox.children.push(Node {
+            id: next.clone(),
+            title: subject.to_string(),
+            checked: false,
+            children: vec![],
+            annotations: vec![],
+        });
+        next
+    }
+}
+
+fn remove_descendant(node: &mut Node, id: &str) -> Option<Node> {
+    if let Some(idx) = node.children.iter().position(|c| c.id == id) {
+        return Some(node.children.remove(idx));
+    }
+    for child in &mut node.children {
+        if let Some(detached) = remove_descendant(child, id) {
+            return Some(detached);
+        }
+    }
+    None
+}
+
+fn next_inbox_child_id(inbox: &Node) -> String {
+    let used: std::collections::HashSet<u32> = inbox
+        .children
+        .iter()
+        .filter_map(|c| c.id.strip_prefix("Inbox."))
+        .filter_map(|tail| tail.parse::<u32>().ok())
+        .collect();
+    let mut n = 1u32;
+    while used.contains(&n) {
+        n += 1;
+    }
+    format!("Inbox.{n}")
+}
+
+/// Derive the parent id for a canonical plan_path. Returns None for top-level
+/// (e.g. `1.0`, `Inbox.0`). For 2-part non-`.0` ids like `1.1` the parent is
+/// `1.0` (the phase). For 3+ parts, parent is the prefix without the last
+/// segment.
+pub fn parent_id_for(plan_path: &str) -> Option<String> {
+    let parts: Vec<&str> = plan_path.split('.').collect();
+    match parts.as_slice() {
+        [] | [_] => None,
+        [_, "0"] => None,
+        [head, _] => Some(format!("{head}.0")),
+        many => Some(many[..many.len() - 1].join(".")),
+    }
+}
+
+/// A non-checkbox line attached to a node — context for the work, not work itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Annotation {
+    /// Plain prose.
+    Text { text: String, indent: usize },
+    /// A `- something` bullet without a checkbox.
+    Bullet { text: String, indent: usize },
+    /// A fenced code block.
+    CodeBlock {
+        lang: Option<String>,
+        content: String,
+        indent: usize,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_roundtrip_preserves_plan() {
+        let plan = Plan {
+            preamble: vec!["# Header".to_string(), "".to_string()],
+            phases: vec![Node {
+                id: "1.0".to_string(),
+                title: "Phase".to_string(),
+                checked: false,
+                annotations: vec![Annotation::Text {
+                    text: "note".to_string(),
+                    indent: 2,
+                }],
+                children: vec![Node {
+                    id: "1.1".to_string(),
+                    title: "Task".to_string(),
+                    checked: true,
+                    children: vec![],
+                    annotations: vec![],
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(plan, back);
+    }
+
+    #[test]
+    fn parent_id_for_handles_canonical_shapes() {
+        assert_eq!(parent_id_for("1.0"), None);
+        assert_eq!(parent_id_for("Inbox.0"), None);
+        assert_eq!(parent_id_for("1"), None);
+        assert_eq!(parent_id_for("1.1"), Some("1.0".to_string()));
+        assert_eq!(parent_id_for("Inbox.3"), Some("Inbox.0".to_string()));
+        assert_eq!(parent_id_for("1.1.1"), Some("1.1".to_string()));
+        assert_eq!(parent_id_for("X.4.a.1"), Some("X.4.a".to_string()));
+    }
+
+    #[test]
+    fn find_walks_the_tree() {
+        let plan = Plan {
+            preamble: vec![],
+            phases: vec![Node {
+                id: "1.0".to_string(),
+                title: "Phase".to_string(),
+                checked: false,
+                children: vec![Node {
+                    id: "1.1".to_string(),
+                    title: "Task".to_string(),
+                    checked: false,
+                    children: vec![Node {
+                        id: "1.1.1".to_string(),
+                        title: "Sub".to_string(),
+                        checked: true,
+                        children: vec![],
+                        annotations: vec![],
+                    }],
+                    annotations: vec![],
+                }],
+                annotations: vec![],
+            }],
+        };
+        assert!(plan.find("1.0").is_some());
+        assert!(plan.find("1.1").is_some());
+        assert!(plan.find("1.1.1").is_some());
+        assert!(plan.find("1.2").is_none());
+        assert!(plan.find("Inbox.0").is_none());
+    }
+
+    #[test]
+    fn add_child_of_appends() {
+        let mut plan = Plan {
+            preamble: vec![],
+            phases: vec![Node {
+                id: "1.0".to_string(),
+                title: "Phase".to_string(),
+                checked: false,
+                children: vec![],
+                annotations: vec![],
+            }],
+        };
+        let child = Node {
+            id: "1.1".to_string(),
+            title: "Task".to_string(),
+            checked: false,
+            children: vec![],
+            annotations: vec![],
+        };
+        plan.add_child_of("1.0", child).unwrap();
+        assert_eq!(plan.find("1.1").unwrap().title, "Task");
+    }
+
+    #[test]
+    fn add_child_of_errors_when_parent_missing() {
+        let mut plan = Plan::default();
+        let child = Node {
+            id: "1.1".to_string(),
+            title: "Task".to_string(),
+            checked: false,
+            children: vec![],
+            annotations: vec![],
+        };
+        let err = plan.add_child_of("nope", child).unwrap_err();
+        assert!(err.contains("nope"));
+    }
+
+    #[test]
+    fn append_to_inbox_creates_phase_when_missing() {
+        let mut plan = Plan::default();
+        let assigned = plan.append_to_inbox("first inbox item");
+        assert_eq!(assigned, "Inbox.1");
+        assert!(plan.find("Inbox.0").is_some());
+        assert!(plan.find("Inbox.1").is_some());
+    }
+
+    #[test]
+    fn append_to_inbox_increments() {
+        let mut plan = Plan::default();
+        let a = plan.append_to_inbox("first");
+        let b = plan.append_to_inbox("second");
+        let c = plan.append_to_inbox("third");
+        assert_eq!(a, "Inbox.1");
+        assert_eq!(b, "Inbox.2");
+        assert_eq!(c, "Inbox.3");
+    }
+
+    #[test]
+    fn remove_pulls_a_leaf() {
+        let mut plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let removed = plan.remove("1.1").unwrap();
+        assert_eq!(removed.id, "1.1");
+        assert!(plan.find("1.1").is_none());
+        assert!(plan.find("1.0").is_some(), "parent should remain");
+    }
+
+    #[test]
+    fn remove_pulls_a_top_level_phase() {
+        let mut plan = parse_for_test("- [ ] 1.0 P1\n- [ ] 2.0 P2\n");
+        plan.remove("1.0").unwrap();
+        assert!(plan.find("1.0").is_none());
+        assert!(plan.find("2.0").is_some());
+    }
+
+    #[test]
+    fn remove_returns_none_when_missing() {
+        let mut plan = parse_for_test("- [ ] 1.0 P\n");
+        assert!(plan.remove("nope").is_none());
+    }
+
+    fn parse_for_test(input: &str) -> Plan {
+        crate::parser::parse(input).unwrap()
+    }
+
+    #[test]
+    fn append_to_inbox_skips_used_ids() {
+        let mut plan = Plan {
+            preamble: vec![],
+            phases: vec![Node {
+                id: "Inbox.0".to_string(),
+                title: "Inbox".to_string(),
+                checked: false,
+                children: vec![
+                    Node {
+                        id: "Inbox.1".to_string(),
+                        title: "x".to_string(),
+                        checked: false,
+                        children: vec![],
+                        annotations: vec![],
+                    },
+                    Node {
+                        id: "Inbox.3".to_string(),
+                        title: "y".to_string(),
+                        checked: false,
+                        children: vec![],
+                        annotations: vec![],
+                    },
+                ],
+                annotations: vec![],
+            }],
+        };
+        let next = plan.append_to_inbox("fills the gap");
+        assert_eq!(next, "Inbox.2");
+    }
+
+    #[test]
+    fn json_uses_kind_tag_for_annotations() {
+        let ann = Annotation::Bullet {
+            text: "x".to_string(),
+            indent: 2,
+        };
+        let json = serde_json::to_string(&ann).unwrap();
+        assert!(json.contains("\"kind\":\"bullet\""), "got: {json}");
+    }
+}
