@@ -76,7 +76,10 @@ pub fn init(cwd: &Path, force: bool) -> Result<InitReport> {
     } else {
         String::new()
     };
-    let needs_line = !current.lines().any(|l| l.trim() == gi_line);
+    let needs_line = !current.lines().any(|l| {
+        let trimmed = l.trim().trim_start_matches('/');
+        trimmed == gi_line
+    });
     if needs_line {
         let mut next = current;
         if !next.is_empty() && !next.ends_with('\n') {

@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "plan-bridge writeback --event create",
+            "type": "command"
+          }
+        ],
+        "matcher": "TaskCreate"
+      },
+      {
+        "hooks": [
+          {
+            "command": "plan-bridge writeback --event update",
+            "type": "command"
+          }
+        ],
+        "matcher": "TaskUpdate"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "plan-bridge reconcile",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
