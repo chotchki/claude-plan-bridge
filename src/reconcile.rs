@@ -77,9 +77,15 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     let mut leaves = Vec::new();
     collect_leaves(&plan, &mut leaves);
 
-    let mut seen_paths: HashSet<String> = HashSet::new();
+    // All node ids (leaves AND parents) — used for the LeafRemoved check.
+    // We need parents in the set so that a tracked node which grew children
+    // (and thus stopped being a leaf) doesn't falsely register as removed.
+    let mut all_node_paths: HashSet<String> = HashSet::new();
+    for phase in &plan.phases {
+        collect_all_paths(phase, &mut all_node_paths);
+    }
+
     for leaf in leaves {
-        seen_paths.insert(leaf.id.clone());
         match path_to_task.get(leaf.id.as_str()) {
             Some(&task_id) => {
                 let mapping = state.mappings.get(task_id).expect("path_to_task built from state");
@@ -118,9 +124,11 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
         }
     }
 
-    // State entries whose plan_path no longer exists in PLAN.md → removed.
+    // State entries whose plan_path no longer exists anywhere in PLAN.md → removed.
+    // A tracked node that gained children is still present (just as a parent now),
+    // so it stays in all_node_paths and does NOT trigger LeafRemoved.
     for (task_id, mapping) in &state.mappings {
-        if !seen_paths.contains(&mapping.plan_path) {
+        if !all_node_paths.contains(&mapping.plan_path) {
             deltas.push(Delta::LeafRemoved {
                 plan_path: mapping.plan_path.clone(),
                 task_id: task_id.clone(),
@@ -255,6 +263,13 @@ fn collect_leaves_node<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
     }
 }
 
+fn collect_all_paths(node: &Node, out: &mut HashSet<String>) {
+    out.insert(node.id.clone());
+    for child in &node.children {
+        collect_all_paths(child, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +344,30 @@ mod tests {
             &deltas[0],
             Delta::LeafAdded { plan_path, .. } if plan_path == "1.2"
         ));
+    }
+
+    #[test]
+    fn tracked_node_that_became_a_parent_is_not_removed() {
+        // Regression for Phase 9 bug: TaskCreate at 7.0 records a mapping; later
+        // TaskCreates add 7.1, 7.2 as children. 7.0 stops being a leaf but is
+        // still present in PLAN.md — reconcile must NOT fire LeafRemoved.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 7.0 Parent that grew children\n  - [ ] 7.1 Child one\n  - [ ] 7.2 Child two\n",
+        );
+        write_state(
+            &plan,
+            &[("t-parent", mapping("7.0", "Parent that grew children", false, &[]))],
+        );
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            !deltas.iter().any(|d| matches!(
+                d,
+                Delta::LeafRemoved { plan_path, .. } if plan_path == "7.0"
+            )),
+            "expected no LeafRemoved for parent-transitioned node, got: {deltas:?}"
+        );
     }
 
     #[test]
