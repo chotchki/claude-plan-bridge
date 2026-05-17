@@ -191,3 +191,17 @@
   - [x] 16.3 standardize: generalize `### Phase N — Title` to `### <id> — Title` so headings like `### AA.A — ...` promote to phase parents
   - [x] 16.4 Bump + tag v0.1.3 (panic fix); cargo install --force; archive Phase 16
 
+---
+
+## 2026-05-17
+
+- [x] 17.0 CLI consistency: every project-scoped subcommand accepts `--cwd` (init's convention)
+  - [x] 17.1 Refactor: shared ProjectArgs (--cwd + --plan) across parse/writeback/reconcile/archive/serve/baseline
+  - [x] 17.2 README: document the `--cwd` / `--plan` convention in CLI reference
+  - [x] 17.3 Phase 17 exit + bump v0.1.5 + tag + install
+
+- [x] 18.0 Empty-id leaves: stop colliding under `baseline:` key, stop emitting false drift on every reconcile
+  - [x] 18.1 baseline: skip empty-id leaves entirely (no state entry, no synthetic key)
+  - [x] 18.2 reconcile: skip empty-id leaves in the diff walk (no LeafAdded / LeafTitleChanged etc.)
+  - [x] 18.3 README: document that empty-id leaves are untracked; explain `parse` phases vs `baseline` leaves counts
+
