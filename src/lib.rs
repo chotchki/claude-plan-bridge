@@ -3,6 +3,7 @@ pub mod ast;
 pub mod baseline;
 pub mod hook;
 pub mod init;
+pub mod lock;
 pub mod mcp;
 pub mod parser;
 pub mod reconcile;

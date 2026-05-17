@@ -1,3 +1,4 @@
 /target
 /.claude/plan-bridge-state.json
+/.claude/plan-bridge-state.json.lock
 /.claude/settings.local.json

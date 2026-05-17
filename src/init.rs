@@ -68,26 +68,34 @@ pub fn init(cwd: &Path, force: bool) -> Result<InitReport> {
     }
 
     let gitignore_path = cwd.join(".gitignore");
-    let gi_line = ".claude/plan-bridge-state.json";
+    let gi_lines = [
+        ".claude/plan-bridge-state.json",
+        ".claude/plan-bridge-state.json.lock",
+    ];
     let existed_gi = gitignore_path.exists();
-    let current = if existed_gi {
+    let mut current = if existed_gi {
         std::fs::read_to_string(&gitignore_path)
             .with_context(|| format!("read {}", gitignore_path.display()))?
     } else {
         String::new()
     };
-    let needs_line = !current.lines().any(|l| {
-        let trimmed = l.trim().trim_start_matches('/');
-        trimmed == gi_line
-    });
-    if needs_line {
-        let mut next = current;
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
+    let mut changed = false;
+    for gi_line in &gi_lines {
+        let already = current.lines().any(|l| {
+            let trimmed = l.trim().trim_start_matches('/');
+            trimmed == *gi_line
+        });
+        if !already {
+            if !current.is_empty() && !current.ends_with('\n') {
+                current.push('\n');
+            }
+            current.push_str(gi_line);
+            current.push('\n');
+            changed = true;
         }
-        next.push_str(gi_line);
-        next.push('\n');
-        std::fs::write(&gitignore_path, next)
+    }
+    if changed {
+        std::fs::write(&gitignore_path, &current)
             .with_context(|| format!("write {}", gitignore_path.display()))?;
         if existed_gi {
             report.updated_gitignore = true;
@@ -302,7 +310,15 @@ mod tests {
         assert!(!report.created_gitignore);
         assert!(!report.updated_gitignore, "second init should not touch .gitignore");
         let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
-        let count = gi.matches(".claude/plan-bridge-state.json").count();
-        assert_eq!(count, 1);
+        let state_lines = gi
+            .lines()
+            .filter(|l| l.trim().trim_start_matches('/') == ".claude/plan-bridge-state.json")
+            .count();
+        let lock_lines = gi
+            .lines()
+            .filter(|l| l.trim().trim_start_matches('/') == ".claude/plan-bridge-state.json.lock")
+            .count();
+        assert_eq!(state_lines, 1, "state.json line should appear exactly once");
+        assert_eq!(lock_lines, 1, "state.json.lock line should appear exactly once");
     }
 }

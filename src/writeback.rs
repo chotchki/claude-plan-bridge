@@ -37,73 +37,71 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         .context("parse TaskCreate tool_input")?;
     let task_id = extract_task_id(&payload.tool_response)
         .ok_or_else(|| anyhow!("tool_response is missing a task id"))?;
-
     let state_path = default_state_path_for(plan_path);
-    let mut state = State::load(&state_path)?;
 
-    if let Some(existing) = state.plan_path(&task_id) {
-        return Ok(HookOutput::context(
+    crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
+        let mut state = State::load(&state_path)?;
+
+        if let Some(existing) = state.plan_path(&task_id) {
+            return Ok(HookOutput::context(
+                &payload.hook_event_name,
+                format!("plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"),
+            ));
+        }
+
+        let plan_text = std::fs::read_to_string(plan_path)
+            .with_context(|| format!("read {}", plan_path.display()))?;
+        let mut plan = parse(&plan_text)?;
+
+        let requested_path = input
+            .metadata
+            .as_ref()
+            .and_then(|m| m.plan_path.clone());
+
+        let (assigned_path, action) = match requested_path {
+            Some(p) => {
+                insert_at_path(&mut plan, &p, &input.subject)?;
+                (p, "added".to_string())
+            }
+            None => {
+                let p = plan.append_to_inbox(&input.subject);
+                (p, "added to Inbox".to_string())
+            }
+        };
+
+        std::fs::write(plan_path, serialize(&plan))
+            .with_context(|| format!("write {}", plan_path.display()))?;
+
+        // Evict any baseline mapping for the same plan_path — once a real task
+        // lands, the synthetic baseline:<path> entry is stale.
+        crate::baseline::evict_baseline_for(&mut state, &assigned_path);
+
+        let mapping = match plan.find(&assigned_path) {
+            Some(node) => Mapping {
+                plan_path: assigned_path.clone(),
+                last_synced_title: node.title.clone(),
+                last_synced_state: node.state,
+                last_synced_annotations: annotations_to_strings(&node.annotations),
+            },
+            None => Mapping {
+                plan_path: assigned_path.clone(),
+                last_synced_title: input.subject.clone(),
+                ..Default::default()
+            },
+        };
+        state.record(&task_id, mapping);
+        state.save(&state_path)?;
+
+        Ok(HookOutput::context(
             &payload.hook_event_name,
-            format!("plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"),
-        ));
-    }
-
-    let plan_text = std::fs::read_to_string(plan_path)
-        .with_context(|| format!("read {}", plan_path.display()))?;
-    let mut plan = parse(&plan_text)?;
-
-    let requested_path = input
-        .metadata
-        .as_ref()
-        .and_then(|m| m.plan_path.clone());
-
-    let (assigned_path, action) = match requested_path {
-        Some(p) => {
-            insert_at_path(&mut plan, &p, &input.subject)?;
-            (p, "added".to_string())
-        }
-        None => {
-            let p = plan.append_to_inbox(&input.subject);
-            (p, "added to Inbox".to_string())
-        }
-    };
-
-    std::fs::write(plan_path, serialize(&plan))
-        .with_context(|| format!("write {}", plan_path.display()))?;
-
-    // Evict any baseline mapping for the same plan_path — once a real task
-    // lands, the synthetic baseline:<path> entry is stale.
-    crate::baseline::evict_baseline_for(&mut state, &assigned_path);
-
-    // Capture last_synced_* off the leaf as it actually exists in PLAN.md.
-    // For the just-inserted case that's the new node; for the idempotent
-    // already-exists case it's whatever was there (possibly with a different
-    // title or annotations the user added by hand).
-    let mapping = match plan.find(&assigned_path) {
-        Some(node) => Mapping {
-            plan_path: assigned_path.clone(),
-            last_synced_title: node.title.clone(),
-            last_synced_state: node.state,
-            last_synced_annotations: annotations_to_strings(&node.annotations),
-        },
-        None => Mapping {
-            plan_path: assigned_path.clone(),
-            last_synced_title: input.subject.clone(),
-            ..Default::default()
-        },
-    };
-    state.record(&task_id, mapping);
-    state.save(&state_path)?;
-
-    Ok(HookOutput::context(
-        &payload.hook_event_name,
-        format!(
-            "plan-bridge: {action} `{}` at {} in {}",
-            input.subject,
-            assigned_path,
-            plan_path.display()
-        ),
-    ))
+            format!(
+                "plan-bridge: {action} `{}` at {} in {}",
+                input.subject,
+                assigned_path,
+                plan_path.display()
+            ),
+        ))
+    })
 }
 
 /// Apply a `PostToolUse(TaskUpdate)` event to PLAN.md.
@@ -119,88 +117,87 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookOutput> {
     let input: TaskUpdateInput = serde_json::from_value(payload.tool_input.clone())
         .context("parse TaskUpdate tool_input")?;
-
     let state_path = default_state_path_for(plan_path);
-    let mut state = State::load(&state_path)?;
 
-    let Some(node_path) = state.plan_path(&input.task_id).map(String::from) else {
-        return Ok(HookOutput::silent());
-    };
+    crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
+        let mut state = State::load(&state_path)?;
 
-    let status = input.status.as_deref();
+        let Some(node_path) = state.plan_path(&input.task_id).map(String::from) else {
+            return Ok(HookOutput::silent());
+        };
 
-    let plan_text = std::fs::read_to_string(plan_path)
-        .with_context(|| format!("read {}", plan_path.display()))?;
-    let mut plan = parse(&plan_text)?;
+        let status = input.status.as_deref();
 
-    let action = match status {
-        Some("completed") => {
-            let Some(node) = plan.find_mut(&node_path) else {
-                return Ok(HookOutput::silent());
-            };
-            if node.is_done() {
-                return Ok(HookOutput::context(
-                    &payload.hook_event_name,
-                    format!("plan-bridge: {node_path} already complete (no-op)"),
-                ));
+        let plan_text = std::fs::read_to_string(plan_path)
+            .with_context(|| format!("read {}", plan_path.display()))?;
+        let mut plan = parse(&plan_text)?;
+
+        let action = match status {
+            Some("completed") => {
+                let Some(node) = plan.find_mut(&node_path) else {
+                    return Ok(HookOutput::silent());
+                };
+                if node.is_done() {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!("plan-bridge: {node_path} already complete (no-op)"),
+                    ));
+                }
+                node.state = NodeState::Done;
+                "marked complete".to_string()
             }
-            node.state = NodeState::Done;
-            "marked complete".to_string()
-        }
-        Some("deleted") => {
-            // If PLAN.md already records the leaf as `[-]` (won't-do), the
-            // user has expressed intent to keep it visible. Just drop the
-            // state mapping; don't remove the line.
-            let is_wont_do = plan
-                .find(&node_path)
-                .map(|n| n.state == NodeState::WontDo)
-                .unwrap_or(false);
-            if is_wont_do {
+            Some("deleted") => {
+                let is_wont_do = plan
+                    .find(&node_path)
+                    .map(|n| n.state == NodeState::WontDo)
+                    .unwrap_or(false);
+                if is_wont_do {
+                    state.remove(&input.task_id);
+                    state.save(&state_path)?;
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
+                        ),
+                    ));
+                }
+                if plan.remove(&node_path).is_none() {
+                    state.remove(&input.task_id);
+                    state.save(&state_path)?;
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!("plan-bridge: {node_path} already removed (mapping cleared)"),
+                    ));
+                }
                 state.remove(&input.task_id);
-                state.save(&state_path)?;
-                return Ok(HookOutput::context(
-                    &payload.hook_event_name,
-                    format!(
-                        "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
-                    ),
-                ));
+                "removed".to_string()
             }
-            if plan.remove(&node_path).is_none() {
-                state.remove(&input.task_id);
-                state.save(&state_path)?;
-                return Ok(HookOutput::context(
-                    &payload.hook_event_name,
-                    format!("plan-bridge: {node_path} already removed (mapping cleared)"),
-                ));
+            _ => return Ok(HookOutput::silent()),
+        };
+
+        std::fs::write(plan_path, serialize(&plan))
+            .with_context(|| format!("write {}", plan_path.display()))?;
+
+        // Refresh last_synced_* off the post-mutation leaf so reconcile has a
+        // current baseline. Skip if the mapping was removed (deleted case).
+        if state.plan_path(&input.task_id).is_some() {
+            if let Some(node) = plan.find(&node_path) {
+                let updated = Mapping {
+                    plan_path: node_path.clone(),
+                    last_synced_title: node.title.clone(),
+                    last_synced_state: node.state,
+                    last_synced_annotations: annotations_to_strings(&node.annotations),
+                };
+                state.record(&input.task_id, updated);
             }
-            state.remove(&input.task_id);
-            "removed".to_string()
         }
-        _ => return Ok(HookOutput::silent()),
-    };
+        state.save(&state_path)?;
 
-    std::fs::write(plan_path, serialize(&plan))
-        .with_context(|| format!("write {}", plan_path.display()))?;
-
-    // Refresh last_synced_* off the post-mutation leaf so reconcile has a
-    // current baseline. Skip if the mapping was removed (deleted case).
-    if state.plan_path(&input.task_id).is_some() {
-        if let Some(node) = plan.find(&node_path) {
-            let updated = Mapping {
-                plan_path: node_path.clone(),
-                last_synced_title: node.title.clone(),
-                last_synced_state: node.state,
-                last_synced_annotations: annotations_to_strings(&node.annotations),
-            };
-            state.record(&input.task_id, updated);
-        }
-    }
-    state.save(&state_path)?;
-
-    Ok(HookOutput::context(
-        &payload.hook_event_name,
-        format!("plan-bridge: {action} {node_path}"),
-    ))
+        Ok(HookOutput::context(
+            &payload.hook_event_name,
+            format!("plan-bridge: {action} {node_path}"),
+        ))
+    })
 }
 
 fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()> {
@@ -443,6 +440,55 @@ mod tests {
         );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-1"), None, "mapping should be cleared");
+    }
+
+    #[test]
+    fn concurrent_writebacks_all_land_without_loss() {
+        // Phase 8.0 acceptance: spawning N concurrent writeback_create calls
+        // against the same PLAN.md must serialize through the file lock — all
+        // N entries must land in both PLAN.md and the state file. Without the
+        // lock this would race (read-modify-write last-writer-wins), so a
+        // pre-lock run of this test would fail with missing entries.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Parent\n");
+        let plan = Arc::new(plan);
+
+        let n: usize = 10;
+        let barrier = Arc::new(Barrier::new(n));
+        let mut handles = Vec::with_capacity(n);
+        for i in 1..=n {
+            let plan = Arc::clone(&plan);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let task_id = format!("t-{i}");
+                let subject = format!("child {i}");
+                let plan_path = format!("1.{i}");
+                let payload = payload_for_create(&task_id, &subject, Some(&plan_path));
+                barrier.wait();
+                writeback_create(&payload, &plan).expect("writeback should succeed under lock");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let contents = std::fs::read_to_string(plan.as_path()).unwrap();
+        for i in 1..=n {
+            let needle = format!("- [ ] 1.{i} child {i}");
+            assert!(contents.contains(&needle), "missing 1.{i} in PLAN.md:\n{contents}");
+        }
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        for i in 1..=n {
+            let expected = format!("1.{i}");
+            assert_eq!(
+                state.plan_path(&format!("t-{i}")),
+                Some(expected.as_str()),
+                "state mapping missing for t-{i}"
+            );
+        }
     }
 
     #[test]
