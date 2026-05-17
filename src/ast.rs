@@ -119,12 +119,16 @@ fn looks_like_markdown_header(text: &str) -> bool {
     (1..=6).contains(&hashes) && matches!(trimmed.chars().nth(hashes), Some(' '))
 }
 
-/// Parse `### Phase N — Title` style headers. Returns `(id, title)` when the
-/// header matches; None otherwise (caller treats as unrecognized).
+/// Parse `### Phase N — Title` style headers OR the more general
+/// `### <id> — Title` style. Returns `(id, title)` when the header matches;
+/// None otherwise (caller treats as unrecognized).
 ///
-/// Accepts dotted phase numbers verbatim: `Phase 3.5` → id `3.5`. Plain numeric
-/// `Phase 1` → id `1.0` (canonical top-level form). Rejects ids with non-id
-/// characters (`Phase 2/3` → None).
+/// Accepts numeric and alphanumeric id tokens. Dotted ids preserved verbatim
+/// (`Phase 3.5` → id `3.5`, `### AA.A — ...` → id `AA.A`). Pure numeric or
+/// pure-alpha ids get `.0` appended (`Phase 1` → `1.0`, `### AA — ...` →
+/// `AA.0`) so parent_id_for of children resolves correctly. The general path
+/// REQUIRES an em-dash or hyphen separator after the id, to keep generic
+/// headings (`### Architecture`, `## Notes`) from being mistakenly promoted.
 fn parse_phase_header(text: &str) -> Option<(String, String)> {
     let trimmed = text.trim_start();
     let hashes = trimmed.chars().take_while(|c| *c == '#').count();
@@ -132,16 +136,27 @@ fn parse_phase_header(text: &str) -> Option<(String, String)> {
         return None;
     }
     let after_hashes = trimmed.get(hashes..)?.trim_start();
-    let after_phase = after_hashes.strip_prefix("Phase ")?;
-    let id_end = after_phase
+
+    // Legacy: `Phase N — Title`. Strip the `Phase ` keyword and recurse.
+    if let Some(after_phase) = after_hashes.strip_prefix("Phase ") {
+        return parse_id_with_separator(after_phase);
+    }
+
+    // General: `<id> — Title` with a required em-dash/hyphen separator.
+    parse_id_with_separator(after_hashes)
+}
+
+fn parse_id_with_separator(s: &str) -> Option<(String, String)> {
+    let s = s.trim_start();
+    let id_end = s
         .find(|c: char| c.is_whitespace() || c == '—' || c == '-')
-        .unwrap_or(after_phase.len());
-    let id_part = &after_phase[..id_end];
+        .unwrap_or(s.len());
+    let id_part = &s[..id_end];
     if id_part.is_empty() {
         return None;
     }
     let mut chars = id_part.chars();
-    if !chars.next()?.is_ascii_digit() {
+    if !chars.next()?.is_ascii_alphanumeric() {
         return None;
     }
     if !id_part
@@ -150,13 +165,21 @@ fn parse_phase_header(text: &str) -> Option<(String, String)> {
     {
         return None;
     }
+
+    // Require em-dash or hyphen separator after the id, NOT just whitespace —
+    // that's the guard that keeps generic `### Architecture` from being
+    // mistaken for an `### Architecture — ...` phase heading.
+    let after_id = s[id_end..].trim_start_matches(|c: char| c.is_whitespace());
+    if !(after_id.starts_with('—') || after_id.starts_with('-')) {
+        return None;
+    }
+
     let id = if id_part.contains('.') {
         id_part.to_string()
     } else {
         format!("{id_part}.0")
     };
-    let rest = after_phase[id_end..].trim_start();
-    let title = rest
+    let title = after_id
         .trim_start_matches('—')
         .trim_start_matches('-')
         .trim()
@@ -820,6 +843,48 @@ mod tests {
             .find(|n| n.id == "3.5")
             .expect("3.5 created");
         assert_eq!(p35.title, "Titles via vision OCR [done]");
+    }
+
+    #[test]
+    fn standardize_promotes_alphanumeric_id_heading() {
+        // Phase 16.3 — quicksight shakeout. `### AA.A — Title` (no "Phase"
+        // keyword, alphanumeric id) should also promote to canonical.
+        let plan = parse_for_test(
+            "- [ ] 0.1 First\n\n### AA.A — Dropdown-control flip\n\n- [ ] AA.A.1 Audit\n",
+        );
+        let (out, notes) = plan.standardize_to_canonical().unwrap();
+        assert_eq!(notes.len(), 1);
+        let p_aa_a = out
+            .phases
+            .iter()
+            .find(|n| n.id == "AA.A")
+            .expect("AA.A phase created");
+        assert_eq!(p_aa_a.title, "Dropdown-control flip");
+        let child_ids: Vec<&str> = p_aa_a.children.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(child_ids, vec!["AA.A.1"]);
+    }
+
+    #[test]
+    fn standardize_alpha_only_id_gets_zero_appended() {
+        // `### AA — Title` → id="AA.0" (children like "AA.1" → parent "AA.0").
+        let plan =
+            parse_for_test("- [ ] 0.1 First\n\n### AA — Top-level alpha\n\n- [ ] AA.1 Sub\n");
+        let (out, _) = plan.standardize_to_canonical().unwrap();
+        let p_aa = out
+            .phases
+            .iter()
+            .find(|n| n.id == "AA.0")
+            .expect("AA.0 phase created");
+        assert_eq!(p_aa.title, "Top-level alpha");
+    }
+
+    #[test]
+    fn standardize_refuses_generic_heading_without_separator() {
+        // `### Architecture` has no em-dash → refused. This guard keeps
+        // generic markdown headings from being mistakenly promoted.
+        let plan = parse_for_test("- [ ] 0.1 First\n\n### Architecture\n\n- [ ] 1.0 Phase\n");
+        let err = plan.standardize_to_canonical().expect_err("should refuse");
+        assert!(err.contains("Architecture"), "got: {err}");
     }
 
     #[test]

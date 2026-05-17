@@ -4,7 +4,7 @@ use winnow::Parser;
 use winnow::ascii::space0;
 use winnow::combinator::{alt, delimited, opt};
 use winnow::error::ContextError;
-use winnow::token::{rest, take_while};
+use winnow::token::{rest, take_until, take_while};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
@@ -220,6 +220,27 @@ fn extract_id_and_title(input: &str) -> (String, String) {
 
 fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
     space0.parse_next(input)?;
+
+    // Strategy A — joined-bold `**id — title.**` (the bold span contains BOTH
+    // the id AND part of the title). Surfaces during the quicksight shakeout:
+    // `- [x] **AA.A.1 — Audit existing dropdowns.** Walked L1...`.
+    let snapshot = *input;
+    if let Ok((id, title_inside)) = joined_bold_id_title.parse_next(input) {
+        let trailing_raw: &str = rest.parse_next(input)?;
+        let trailing = trailing_raw.trim();
+        let title = if trailing.is_empty() {
+            title_inside
+        } else if title_inside.is_empty() {
+            trailing.to_string()
+        } else {
+            format!("{title_inside} {trailing}")
+        };
+        return Ok((id, title));
+    }
+    *input = snapshot;
+
+    // Strategy B — existing path: simple `**id**` or `id`, then separator,
+    // then title.
     let id = opt(alt((bold_id, bare_id)))
         .parse_next(input)?
         .unwrap_or_default();
@@ -232,6 +253,21 @@ fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), Conte
 
 fn bold_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
     delimited("**", id_chars, "**").parse_next(input)
+}
+
+/// Matches `**<id> <separator> <title-content>**` where the bold span contains
+/// both the id and the title text (joined). Caller gets `(id, title_inside)`;
+/// trailing prose after the closing `**` is captured separately.
+fn joined_bold_id_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
+    "**".parse_next(input)?;
+    let id = id_chars.parse_next(input)?;
+    // Require at least one separator char (em-dash, hyphen, or whitespace)
+    // after the id, else this is just `**id**` — let Strategy B handle it.
+    let _: &str =
+        take_while(1.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;
+    let title_inside: &str = take_until(0.., "**").parse_next(input)?;
+    "**".parse_next(input)?;
+    Ok((id, title_inside.trim().to_string()))
 }
 
 fn bare_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
@@ -466,6 +502,35 @@ Some prose.
         assert_eq!(plan.phases[0].id, "X.4.a.1");
         assert_eq!(plan.phases[0].title, "Studio severability test");
         assert!(plan.phases[0].is_done());
+    }
+
+    #[test]
+    fn parses_joined_bold_id_title_with_trailing_prose() {
+        // Phase 16.2 regression — quicksight shakeout. Bold span contains
+        // BOTH id and title (period included), followed by more prose.
+        let plan =
+            parse("- [x] **AA.A.1 — Audit existing dropdowns.** Walked L1 / L2 / forms\n").unwrap();
+        assert_eq!(plan.phases[0].id, "AA.A.1");
+        assert_eq!(
+            plan.phases[0].title,
+            "Audit existing dropdowns. Walked L1 / L2 / forms"
+        );
+        assert!(plan.phases[0].is_done());
+    }
+
+    #[test]
+    fn parses_joined_bold_no_trailing_prose() {
+        let plan = parse("- [ ] **1.0 — Just the bold contents**\n").unwrap();
+        assert_eq!(plan.phases[0].id, "1.0");
+        assert_eq!(plan.phases[0].title, "Just the bold contents");
+    }
+
+    #[test]
+    fn parses_joined_bold_with_space_separator() {
+        // Em-dash isn't required — any separator works.
+        let plan = parse("- [ ] **AA.A.1 Audit dropdowns.** trailing\n").unwrap();
+        assert_eq!(plan.phases[0].id, "AA.A.1");
+        assert_eq!(plan.phases[0].title, "Audit dropdowns. trailing");
     }
 
     #[test]

@@ -14,6 +14,6 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 - [ ] 16.0 Bug fixes from quicksight shakeout: UTF-8 panic + joined-bold-id + heading-as-parent
   - [x] 16.1 reconcile: fix UTF-8 byte-boundary panic in render_deltas annotation preview truncation
-  - [ ] 16.2 parser: tolerate joined-bold id+title format `**ID — Title.** rest`
-  - [ ] 16.3 standardize: generalize `### Phase N — Title` to `### <id> — Title` so headings like `### AA.A — ...` promote to phase parents
+  - [x] 16.2 parser: tolerate joined-bold id+title format `**ID — Title.** rest`
+  - [x] 16.3 standardize: generalize `### Phase N — Title` to `### <id> — Title` so headings like `### AA.A — ...` promote to phase parents
   - [ ] 16.4 Bump + tag v0.1.3 (panic fix); cargo install --force; archive Phase 16
