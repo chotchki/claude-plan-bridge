@@ -12,8 +12,3 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 21.0 Quicksight v0.1.7 readability: preserve `---`, blank lines between phases, quieter standardize note
-  - [x] 21.1 serializer: preserve original indent for ALL Text annotations, not just markdown headers
-  - [x] 21.2 serializer: emit a blank line between top-level phases (match archive style)
-  - [x] 21.3 writeback: summarize the standardize note instead of dumping every promotion
-  - [ ] 21.4 Phase 21 exit + bump v0.1.8 + tag + install

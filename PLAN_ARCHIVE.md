@@ -224,3 +224,13 @@
   - [x] 20.1 standardize: skip promotion when subtree has multiple Phase-N headers (leave as narrative)
   - [x] 20.2 Phase 20 exit + bump v0.1.7 + tag + install
 
+---
+
+## 2026-05-17
+
+- [x] 21.0 Quicksight v0.1.7 readability: preserve `---`, blank lines between phases, quieter standardize note
+  - [x] 21.1 serializer: preserve original indent for ALL Text annotations, not just markdown headers
+  - [x] 21.2 serializer: emit a blank line between top-level phases (match archive style)
+  - [x] 21.3 writeback: summarize the standardize note instead of dumping every promotion
+  - [x] 21.4 Phase 21 exit + bump v0.1.8 + tag + install
+
