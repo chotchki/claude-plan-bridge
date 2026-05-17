@@ -17,6 +17,20 @@ const STARTER_PLAN: &str = "\
 
 Describe what you're building.
 
+<!--
+This PLAN.md is driven by `claude-plan-bridge`:
+- TaskCreate adds a `- [ ] N.M task` line (auto-managed `Inbox.0` if no
+  `metadata.plan_path`).
+- TaskUpdate(status='completed') ticks the box; (status='deleted') removes
+  the line; (subject='...') rewrites the title.
+- Hand-edits between turns surface as `additionalContext` on the next
+  prompt — the bridge reconciles on every UserPromptSubmit.
+- `claude-plan-bridge archive` sweeps fully-`[x]` top-level phases into
+  PLAN_ARCHIVE.md.
+- `claude-plan-bridge status` reports state-file health if something
+  looks wrong.
+-->
+
 - [ ] 1.0 Phase one
 ";
 

@@ -99,6 +99,12 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Report PLAN.md / state file / hook health. First-stop diagnostic
+    /// when TaskCreates appear to succeed but PLAN.md doesn't move.
+    Status {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -192,6 +198,26 @@ fn main() -> Result<()> {
                     cwd.join(".gitignore").display()
                 );
             }
+            // Loud finale: Claude Code only loads .claude/settings.json at
+            // session start, so hooks that init just wrote won't fire mid-
+            // session. The recommended path is to init from a terminal
+            // BEFORE opening Claude Code in the project. If you're already
+            // in a session, the second block documents the recovery flow.
+            eprintln!();
+            eprintln!("▎ ✓ Recommended: run `claude-plan-bridge init` from a terminal BEFORE");
+            eprintln!("▎   you open Claude Code in this project. The hooks load at session");
+            eprintln!("▎   start and you skip the dance below entirely.");
+            eprintln!();
+            eprintln!("▎ ⚠ If you ran this from inside Claude Code: hooks are written but the");
+            eprintln!("▎   session has settings cached. TaskCreates in this session will succeed");
+            eprintln!("▎   in the harness but won't update PLAN.md. To recover, either:");
+            eprintln!("▎     1. Restart Claude Code now — hooks fire for tasks created after.");
+            eprintln!("▎     2. Keep working hand-edited; run `claude-plan-bridge baseline`");
+            eprintln!("▎        later to seed state from your manually-maintained PLAN.md.");
+            eprintln!();
+        }
+        Command::Status { project } => {
+            run_status(&project)?;
         }
         Command::Archive {
             project,
@@ -236,6 +262,139 @@ fn run_writeback(
     match event {
         WritebackEvent::Create => plan_bridge::writeback::writeback_create(&payload, plan),
         WritebackEvent::Update => plan_bridge::writeback::writeback_update(&payload, plan),
+    }
+}
+
+fn run_status(project: &ProjectArgs) -> Result<()> {
+    let plan_path = project.plan_path();
+    let cwd = &project.cwd;
+    let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+    let settings_path = cwd.join(".claude/settings.json");
+
+    let mut all_good = true;
+
+    // PLAN.md
+    print!("PLAN.md: {}", plan_path.display());
+    match std::fs::read_to_string(&plan_path) {
+        Ok(text) => match plan_bridge::parser::parse(&text) {
+            Ok(plan) => {
+                let leaves = plan.leaves().len();
+                let phases = plan.phases.len();
+                let leaf_word = if leaves == 1 { "leaf" } else { "leaves" };
+                let phase_word = if phases == 1 { "phase" } else { "phases" };
+                println!(" ({leaves} {leaf_word} in {phases} top-level {phase_word})");
+            }
+            Err(e) => {
+                all_good = false;
+                println!(" — PARSE ERROR: {e}");
+            }
+        },
+        Err(_) => {
+            all_good = false;
+            println!(" — MISSING");
+        }
+    }
+
+    // State file
+    print!("state file: {}", state_path.display());
+    let state_exists = state_path.exists();
+    if state_exists {
+        match plan_bridge::state::State::load(&state_path) {
+            Ok(state) => {
+                let n = state.mappings.len();
+                let mtime = std::fs::metadata(&state_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(format_relative_time)
+                    .unwrap_or_else(|| "?".to_string());
+                println!(" ({n} mappings, modified {mtime})");
+            }
+            Err(e) => {
+                all_good = false;
+                println!(" — LOAD ERROR: {e}");
+            }
+        }
+    } else {
+        println!(" — MISSING");
+    }
+
+    // Hooks in settings.json
+    print!("hooks: {}", settings_path.display());
+    let mut hooks_installed = false;
+    if !settings_path.exists() {
+        println!(" — MISSING");
+    } else {
+        match std::fs::read_to_string(&settings_path) {
+            Ok(text) => {
+                let count = text.matches("claude-plan-bridge").count();
+                hooks_installed = count >= 3;
+                if hooks_installed {
+                    println!();
+                    let want = [
+                        ("UserPromptSubmit", "claude-plan-bridge reconcile"),
+                        (
+                            "PostToolUse(TaskCreate)",
+                            "claude-plan-bridge writeback --event create",
+                        ),
+                        (
+                            "PostToolUse(TaskUpdate)",
+                            "claude-plan-bridge writeback --event update",
+                        ),
+                    ];
+                    for (label, cmd) in want {
+                        let mark = if text.contains(cmd) { "✓" } else { "✗" };
+                        if mark == "✗" {
+                            all_good = false;
+                        }
+                        println!("  {mark} {label} → {cmd}");
+                    }
+                } else {
+                    all_good = false;
+                    println!(" — no claude-plan-bridge hooks found");
+                }
+            }
+            Err(e) => {
+                all_good = false;
+                println!(" — READ ERROR: {e}");
+            }
+        }
+    }
+
+    // Binary version
+    println!("binary: claude-plan-bridge {}", env!("CARGO_PKG_VERSION"));
+
+    // Silent-failure detection: hooks installed but no state file.
+    // The classic "init mid-session, hooks don't fire" symptom.
+    if hooks_installed && !state_exists {
+        println!();
+        println!("⚠ Hooks are installed but the state file is missing — TaskCreate hooks");
+        println!("  likely haven't fired. If you just ran `init` mid-session, restart");
+        println!("  Claude Code so settings.json reloads. Subsequent TaskCreates will");
+        println!("  then update PLAN.md as expected.");
+        all_good = false;
+    }
+
+    if all_good {
+        println!();
+        println!("✓ all clear");
+    }
+    Ok(())
+}
+
+fn format_relative_time(t: std::time::SystemTime) -> String {
+    let now = std::time::SystemTime::now();
+    let secs = now
+        .duration_since(t)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 
