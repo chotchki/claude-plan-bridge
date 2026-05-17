@@ -116,6 +116,8 @@ Sweep every fully-resolved top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md`
 
 Seed the state file with synthetic `baseline:<plan_path>` mappings for every leaf currently in `PLAN.md`. Run once when installing into a project with an existing plan. Idempotent. When Claude later `TaskCreate`s against a baselined path, the baseline mapping is silently replaced.
 
+**Adopting baselined leaves into TaskList.** On a fresh session against a pre-populated `PLAN.md`, the harness's TaskList starts empty even though state has baseline mappings for every leaf. Reconcile surfaces a one-line advisory listing the baseline-only `plan_path`s so the agent sees them. To adopt: `TaskCreate(metadata.plan_path="N.M", subject="...")` — `writeback` dedupes against the existing line (no duplicate inserted) and replaces the `baseline:` mapping with the real `task_id`. Hand-editing the line directly also works; the bridge picks up the change via the next reconcile.
+
 **Leaves with empty ids** (bare-checkbox bullets like `- [ ] no id here`) are *skipped*: they have no stable `plan_path` to key state by, so the bridge can't track them. `baseline` reports the count under "NOTE: skipped N bare-checkbox leaf(s)…" — add a dotted id (`- [ ] 1.2.3 description`) to make a leaf trackable.
 
 ### `serve` (MCP)

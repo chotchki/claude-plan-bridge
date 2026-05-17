@@ -54,6 +54,12 @@ pub enum Delta {
         plan_path: String,
         unchecked_descendants: Vec<String>,
     },
+    /// State has `baseline:` mappings — leaves the bridge knows about but
+    /// the harness's TaskList doesn't. Surfaces on every reconcile while
+    /// baselines exist, so the agent can adopt them via
+    /// `TaskCreate(metadata.plan_path=...)`. Resolves itself as adoptions
+    /// evict the baseline mappings.
+    BaselineOnly { plan_paths: Vec<String> },
 }
 
 /// Diff PLAN.md (current) against the bridge's recorded state. Emits one
@@ -149,6 +155,21 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     // Intra-PLAN.md sanity check: parent-checked-but-children-not.
     for phase in &plan.phases {
         collect_parent_inconsistencies(phase, &mut deltas);
+    }
+
+    // Phase 23 advisory: state.mappings whose task_id starts with `baseline:`
+    // are leaves the bridge tracks but the harness's TaskList doesn't. Surface
+    // them so the agent knows to adopt with TaskCreate.
+    let baseline_paths: Vec<String> = state
+        .mappings
+        .iter()
+        .filter(|(tid, _)| tid.starts_with(crate::baseline::BASELINE_PREFIX))
+        .map(|(_, m)| m.plan_path.clone())
+        .collect();
+    if !baseline_paths.is_empty() {
+        deltas.push(Delta::BaselineOnly {
+            plan_paths: baseline_paths,
+        });
     }
 
     Ok(deltas)
@@ -292,6 +313,20 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     out.push_str(&format!("      - {u}\n"));
                 }
             }
+            Delta::BaselineOnly { plan_paths } => {
+                let preview: Vec<String> = plan_paths.iter().take(5).cloned().collect();
+                let trailer = if plan_paths.len() > 5 {
+                    format!(", +{} more", plan_paths.len() - 5)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "  i {} leaf(s) tracked via baseline (not yet in TaskList): {}{}\n     Adopt with TaskCreate(metadata.plan_path=...) — writeback dedupes against existing lines.\n",
+                    plan_paths.len(),
+                    preview.join(", "),
+                    trailer,
+                ));
+            }
         }
     }
     out
@@ -406,6 +441,52 @@ mod tests {
         write_state(&plan, &[("t-1", mapping("1.1", "Task", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.is_empty(), "got: {deltas:?}");
+    }
+
+    #[test]
+    fn emits_baseline_only_advisory_when_state_has_baseline_mappings() {
+        // Phase 23.1 — third-project shakeout. On a fresh session against
+        // a pre-populated PLAN.md, baseline-only mappings exist but TaskList
+        // is empty. Reconcile should surface that count + plan_paths so the
+        // agent knows to adopt via TaskCreate.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
+        write_state(
+            &plan,
+            &[
+                ("baseline:1.1", mapping("1.1", "First", false, &[])),
+                ("baseline:1.2", mapping("1.2", "Second", false, &[])),
+            ],
+        );
+        let deltas = reconcile(&plan).unwrap();
+        let found: Option<&Vec<String>> = deltas.iter().find_map(|d| match d {
+            Delta::BaselineOnly { plan_paths } => Some(plan_paths),
+            _ => None,
+        });
+        let paths = found.expect("BaselineOnly delta missing");
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"1.1".to_string()));
+        assert!(paths.contains(&"1.2".to_string()));
+    }
+
+    #[test]
+    fn baseline_only_silent_when_no_baseline_mappings() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        write_state(
+            &plan,
+            &[("real-task-id", mapping("1.1", "Task", false, &[]))],
+        );
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::BaselineOnly { .. })),
+            "no advisory when no baseline mappings"
+        );
     }
 
     #[test]
