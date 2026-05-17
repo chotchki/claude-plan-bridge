@@ -245,7 +245,10 @@ Prose.
     fn no_blank_before_first_phase_or_after_last() {
         let plan = parse("- [ ] 1.0 Only\n").unwrap();
         let out = serialize(&plan);
-        assert!(!out.starts_with('\n'), "shouldn't start with blank: {out:?}");
+        assert!(
+            !out.starts_with('\n'),
+            "shouldn't start with blank: {out:?}"
+        );
         // Single trailing newline is fine; multiple would be excess.
         assert!(!out.ends_with("\n\n\n"), "excess trailing blanks: {out:?}");
     }

@@ -12,3 +12,17 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
+- [ ] 24.0 Phase 24 — Restart-test README note + parent-inference fix
+  - [ ] 24.1 Add failing test for bare-N phase root
+  - [ ] 24.2 Fix parent-inference to accept bare N
+  - [ ] 24.3 Note restart-test cycle in README
+  - [ ] 24.4 Phase 24 exit — tests, version bump, archive
+
+- [ ] 25.0 Phase 25 — Session-restart rehydration via SessionStart hook
+  - [ ] 25.1 Add `plan-bridge resume` subcommand
+  - [ ] 25.2 Wire SessionStart hook into installer + add `upgrade-hooks` subcommand
+  - [ ] 25.3 Writeback: dedup mappings by plan_path on TaskCreate
+  - [ ] 25.4 Reconcile/writeback warn loudly when SessionStart hook is missing
+  - [ ] 25.5 e2e test: full restart cycle
+  - [ ] 25.6 README: document session-restart behavior
+  - [ ] 25.7 Phase 25 exit — tests, version bump, archive
