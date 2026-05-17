@@ -184,7 +184,7 @@ mod tests {
     fn refuses_future_version() {
         let dir = scratch_dir();
         let path = dir.join("state.json");
-        let future = format!("{{\"version\":99,\"mappings\":{{}}}}");
+        let future = r#"{"version":99,"mappings":{}}"#;
         std::fs::write(&path, future).unwrap();
         let err = State::load(&path).unwrap_err();
         assert!(err.to_string().contains("version 99"), "got: {err}");
