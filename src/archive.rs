@@ -40,7 +40,10 @@ impl ArchiveReport {
 pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveReport> {
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
-    let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+    let parsed = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+    let (mut plan, _notes) = parsed
+        .standardize_to_canonical()
+        .map_err(anyhow::Error::msg)?;
 
     // Partition phases into "stay" vs "archive" preserving order.
     let mut keep: Vec<Node> = Vec::new();
@@ -117,7 +120,10 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
 pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<ArchiveReport> {
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
-    let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+    let parsed = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+    let (mut plan, _notes) = parsed
+        .standardize_to_canonical()
+        .map_err(anyhow::Error::msg)?;
 
     let phase_idx = plan
         .phases

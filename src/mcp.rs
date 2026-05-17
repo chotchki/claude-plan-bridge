@@ -118,7 +118,8 @@ impl McpServer {
     fn set_state(&self, args: &Value, target: NodeState, verb: &str) -> Result<Value> {
         let id = require_string(args, "plan_path")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
-        let mut plan = parse(&text)?;
+        let parsed = parse(&text)?;
+        let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
         let node = plan
             .find_mut(&id)
             .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
@@ -134,7 +135,8 @@ impl McpServer {
         let plan_path = require_string(args, "plan_path")?;
         let subject = require_string(args, "subject")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
-        let mut plan = parse(&text)?;
+        let parsed = parse(&text)?;
+        let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
         if plan.find(&plan_path).is_some() {
             return Err(anyhow!("node `{plan_path}` already exists"));
         }
@@ -185,7 +187,8 @@ impl McpServer {
         crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
             let text = std::fs::read_to_string(&self.plan_path)
                 .with_context(|| format!("read {}", self.plan_path.display()))?;
-            let mut plan = parse(&text)?;
+            let parsed = parse(&text)?;
+            let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
 
             let node = plan
                 .find_mut(&id)
