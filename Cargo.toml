@@ -6,6 +6,8 @@ license = "MIT"
 description = "Bridges Claude Code's TaskCreate task list to a canonical PLAN.md so the two systems stop fighting. Provides hooks, an MCP server, and an archive sweeper."
 readme = "README.md"
 repository = "https://github.com/chotchki/claude-plan-bridge"
+keywords = ["claude-code", "planning", "markdown", "hooks", "mcp"]
+categories = ["development-tools", "command-line-utilities"]
 
 # Keep the library's import path as `plan_bridge` so existing `use
 # plan_bridge::...` in main.rs / tests doesn't churn. The crate published
