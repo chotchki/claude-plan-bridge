@@ -21,7 +21,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 - [ ] 25.0 Phase 25 — Session-restart rehydration via SessionStart hook
   - [x] 25.1 Add `plan-bridge resume` subcommand
   - [ ] 25.2 Wire SessionStart hook into installer + add `upgrade-hooks` subcommand
-  - [ ] 25.3 Writeback: dedup mappings by plan_path on TaskCreate
+  - [x] 25.3 Writeback: dedup mappings by plan_path on TaskCreate
   - [ ] 25.4 Reconcile/writeback warn loudly when SessionStart hook is missing
   - [ ] 25.5 e2e test: full restart cycle
   - [ ] 25.6 README: document session-restart behavior

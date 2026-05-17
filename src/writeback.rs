@@ -57,14 +57,41 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
     crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
         let mut state = State::load(&state_path)?;
+        let requested_path = input.metadata.as_ref().and_then(|m| m.plan_path.clone());
 
+        // No-op check: same task_id already mapped, and either no incoming
+        // plan_path or one that matches the existing mapping. Different
+        // plan_path is an inconsistency — refuse to silently re-link.
         if let Some(existing) = state.plan_path(&task_id) {
-            return Ok(HookOutput::context(
-                &payload.hook_event_name,
-                format!(
-                    "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
-                ),
-            ));
+            let existing = existing.to_string();
+            match requested_path.as_deref() {
+                None => {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
+                        ),
+                    ));
+                }
+                Some(req) if req == existing => {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
+                        ),
+                    ));
+                }
+                Some(req) => {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: WARNING task {task_id} is already mapped to {existing}, \
+                             but TaskCreate carries plan_path={req}. Refusing to silently move it. \
+                             If you meant to retarget, delete the task and re-create with the desired plan_path."
+                        ),
+                    ));
+                }
+            }
         }
 
         let plan_text = std::fs::read_to_string(plan_path)
@@ -72,8 +99,6 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         let parsed = parse(&plan_text)?;
         let (mut plan, standardize_notes) =
             parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
-
-        let requested_path = input.metadata.as_ref().and_then(|m| m.plan_path.clone());
 
         let (assigned_path, action) = match requested_path {
             Some(p) => {
@@ -92,6 +117,21 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         // Evict any baseline mapping for the same plan_path — once a real task
         // lands, the synthetic baseline:<path> entry is stale.
         crate::baseline::evict_baseline_for(&mut state, &assigned_path);
+
+        // Plan_path dedup: when rehydrating across a session restart, the
+        // same plan_path may already map to a stale task_id from a prior
+        // session. Drop those so the state file holds at most one mapping
+        // per plan_path. Excludes the incoming task_id (defensive — it
+        // shouldn't be in state here since the no-op check above bailed).
+        let stale_ids: Vec<String> = state
+            .mappings
+            .iter()
+            .filter(|(id, m)| id.as_str() != task_id && m.plan_path == assigned_path)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale_ids {
+            state.remove(id);
+        }
 
         let mapping = match plan.find(&assigned_path) {
             Some(node) => Mapping {
@@ -115,6 +155,12 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             assigned_path,
             plan_path.display()
         );
+        if !stale_ids.is_empty() {
+            message.push_str(&format!(
+                " (replaced stale mapping(s) for task(s) {})",
+                stale_ids.join(", ")
+            ));
+        }
         if !standardize_notes.is_empty() {
             message.push_str(&format!(
                 "\n\nNOTE: PLAN.md was standardized to canonical form ({} header(s) promoted to phase checkboxes){}",
@@ -397,6 +443,72 @@ mod tests {
         writeback_create(&again, &plan).unwrap();
         let second = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(first, second, "second run mutated PLAN.md: {second}");
+    }
+
+    #[test]
+    fn rehydrate_evicts_stale_plan_path_mapping_with_new_task_id() {
+        // Phase 25.3: simulate session restart. Prior session left a state
+        // mapping for task "5" → "1.1". Fresh session re-TaskCreates the same
+        // plan_path under a new task_id "99". Result: state holds only the
+        // new mapping; PLAN.md line stays put; no duplicate.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        // Seed prior-session state.
+        let state_path = default_state_path_for(&plan);
+        let mut prior = State::default();
+        prior.record(
+            "5",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Task".to_string(),
+                ..Default::default()
+            },
+        );
+        prior.save(&state_path).unwrap();
+
+        let payload = payload_for_create("99", "Task", Some("1.1"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let state = State::load(&state_path).unwrap();
+        assert_eq!(state.plan_path("99"), Some("1.1"), "new mapping missing");
+        assert_eq!(state.plan_path("5"), None, "stale mapping not evicted");
+        assert_eq!(state.mappings.len(), 1, "duplicate mappings left behind");
+        // PLAN.md untouched (line already existed).
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(
+            contents.matches("1.1 Task").count(),
+            1,
+            "PLAN.md duplicated the line: {contents}"
+        );
+        assert!(
+            out.to_json().contains("replaced stale mapping"),
+            "should announce eviction: {}",
+            out.to_json()
+        );
+    }
+
+    #[test]
+    fn taskcreate_refuses_to_silently_move_existing_task_to_different_path() {
+        // Phase 25.3: if task_id is already mapped but TaskCreate arrives with
+        // a different plan_path, refuse to move it. Caller likely confused
+        // task_id semantics with "retarget"; better to warn than silently
+        // rewrite the mapping.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan).unwrap();
+        let before = std::fs::read_to_string(&plan).unwrap();
+        let state_before = State::load(&default_state_path_for(&plan)).unwrap();
+
+        let out = writeback_create(&payload_for_create("t-1", "First", Some("1.2")), &plan).unwrap();
+
+        let after = std::fs::read_to_string(&plan).unwrap();
+        let state_after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(before, after, "PLAN.md mutated despite refusal");
+        assert_eq!(state_before, state_after, "state mutated despite refusal");
+        assert!(
+            out.to_json().contains("WARNING"),
+            "should warn loudly: {}",
+            out.to_json()
+        );
     }
 
     #[test]
