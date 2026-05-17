@@ -41,18 +41,16 @@ claude-plan-bridge baseline
 
 — it seeds the state file with synthetic mappings for every current leaf, so your first `reconcile` isn't a wall of `LeafAdded` deltas.
 
-> [!IMPORTANT]
-> **Canonical PLAN.md format required.** The bridge expects phases as
-> `- [ ] N.0 Phase title` checkboxes, not `### Phase N — Title` markdown
-> section headers. On first writeback the bridge will auto-promote
-> recognized `### Phase N — Title` headers to canonical phase checkboxes
-> and announce the rewrite in the hook output. Any markdown header it
-> can't cleanly map (`## Notes`, `### Phase 2/3 — …`, `### Setup` with no
-> phase number) makes writeback refuse loudly — no silent file mangling.
-> Either move those headers above the first checkbox into the preamble
-> (where they're preserved verbatim), or convert them manually to phase
-> checkboxes. See the [Canonical `PLAN.md` format](#canonical-planmd-format)
-> section for the full rules.
+> [!NOTE]
+> **Headers, briefly.** The bridge only promotes `##` or `###` headers
+> matching `<id> — Title` (e.g. `### Phase 1 — Build`, `### AA.A —
+> Dropdowns`) into canonical phase checkboxes — everything else stays as
+> narrative. `####+` headers are sub-section labels inside a phase and
+> are never promoted (the real hierarchy lives in dotted ids like
+> `X.4.a.1`). Generic headers (`## Notes`, `### Architecture`, `## Phase
+> history`) are preserved verbatim at their original column on writeback
+> — no refusal, no demotion. See [Canonical `PLAN.md` format](#canonical-planmd-format)
+> for the full rules.
 
 From the next session, the bridge runs invisibly:
 

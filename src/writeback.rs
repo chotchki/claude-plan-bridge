@@ -687,19 +687,33 @@ mod tests {
     }
 
     #[test]
-    fn writeback_create_refuses_unrecognized_header_without_writing() {
-        // `## Notes` doesn't match Phase N — bridge can't standardize it →
-        // refuse loudly, don't touch the file.
+    fn writeback_create_proceeds_through_narrative_headers() {
+        // Phase 19 — `## Notes` doesn't match Phase-N shape so it stays as
+        // narrative; writeback should proceed (insert the new task) and the
+        // header should still be in the file afterward at its original column.
         let dir = scratch_dir();
         let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n";
         let plan = write_plan(&dir, original);
-        let payload = payload_for_create("t-x", "new", Some("1.2"));
-        let err = writeback_create(&payload, &plan).expect_err("should refuse");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("aren't `### Phase N"), "got: {msg}");
-        assert!(msg.contains("## Notes"), "name the offender: {msg}");
+        let payload = payload_for_create("t-x", "new sub", Some("1.2"));
+        writeback_create(&payload, &plan).expect("narrative headers don't block");
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert_eq!(after, original, "file must not be modified on refusal");
+        assert!(
+            after.contains("- [ ] 1.2 new sub"),
+            "new task inserted:\n{after}"
+        );
+        assert!(
+            after.contains("## Notes"),
+            "narrative header preserved:\n{after}"
+        );
+        // Critically — `## Notes` should NOT be indented; it stays at column 0.
+        for line in after.lines() {
+            if line.contains("## Notes") {
+                assert!(
+                    line.starts_with("## "),
+                    "## Notes demoted to indented:\n{line}"
+                );
+            }
+        }
     }
 
     #[test]

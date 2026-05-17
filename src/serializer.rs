@@ -39,8 +39,18 @@ fn write_node(out: &mut String, node: &Node, depth: usize) {
 
 fn write_annotation(out: &mut String, ann: &Annotation, inner: &str) {
     match ann {
-        Annotation::Text { text, .. } => {
-            out.push_str(inner);
+        Annotation::Text { text, indent } => {
+            // Markdown headers preserve their *original* indent from parse
+            // time — otherwise a `## Phase history` at column 0 in source
+            // would be re-emitted at the canonical child indent, visually
+            // demoting top-level narrative under whatever checkbox the
+            // parser happened to attach it to.
+            let actual = if crate::ast::looks_like_markdown_header(text) {
+                " ".repeat(*indent)
+            } else {
+                inner.to_string()
+            };
+            out.push_str(&actual);
             out.push_str(text);
             out.push('\n');
         }

@@ -99,21 +99,7 @@ fn collect_leaves<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
     }
 }
 
-fn collect_unrecognized_headers(node: &Node, out: &mut Vec<String>) {
-    for ann in &node.annotations {
-        if let Annotation::Text { text, .. } = ann
-            && looks_like_markdown_header(text)
-            && parse_phase_header(text).is_none()
-        {
-            out.push(text.clone());
-        }
-    }
-    for child in &node.children {
-        collect_unrecognized_headers(child, out);
-    }
-}
-
-fn looks_like_markdown_header(text: &str) -> bool {
+pub fn looks_like_markdown_header(text: &str) -> bool {
     let trimmed = text.trim_start();
     let hashes = trimmed.chars().take_while(|c| *c == '#').count();
     (1..=6).contains(&hashes) && matches!(trimmed.chars().nth(hashes), Some(' '))
@@ -132,7 +118,12 @@ fn looks_like_markdown_header(text: &str) -> bool {
 fn parse_phase_header(text: &str) -> Option<(String, String)> {
     let trimmed = text.trim_start();
     let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-    if !(1..=6).contains(&hashes) {
+    // Promotion only fires for `##` and `###`. `#` is too shallow to be a
+    // phase header; `####+` is sub-section labeling inside a phase (the real
+    // hierarchy lives in dotted ids, e.g. `X.4.a.1`). Both stay as narrative
+    // annotations on serialize (preserved at original indent — see
+    // write_annotation).
+    if !(2..=3).contains(&hashes) {
         return None;
     }
     let after_hashes = trimmed.get(hashes..)?.trim_start();
@@ -291,34 +282,14 @@ impl Plan {
     /// resolution. Phase numbers with dots (`Phase 3.5`) are accepted and used
     /// verbatim as the id (so `Phase 3.5` becomes `3.5`, not `3.5.0`).
     pub fn standardize_to_canonical(self) -> Result<(Plan, Vec<String>), String> {
-        // First pass: refuse if any in-tree headers don't match the Phase N pattern.
-        let mut unrecognized = Vec::new();
-        for phase in &self.phases {
-            collect_unrecognized_headers(phase, &mut unrecognized);
-        }
-        if !unrecognized.is_empty() {
-            let preview: Vec<String> = unrecognized
-                .iter()
-                .take(3)
-                .map(|s| s.trim().to_string())
-                .collect();
-            let trailer = if unrecognized.len() > 3 {
-                format!(" (+{} more)", unrecognized.len() - 3)
-            } else {
-                String::new()
-            };
-            return Err(format!(
-                "PLAN.md contains {} markdown header(s) that aren't `### Phase N — Title` style \
-                 (e.g. {}){}. The bridge auto-converts Phase-N headers to canonical phase \
-                 checkboxes but doesn't know how to map these. Remove them, move above the first \
-                 checkbox into the preamble, or convert them manually.",
-                unrecognized.len(),
-                preview.join("; "),
-                trailer,
-            ));
-        }
+        // No refusal pass — headers that don't match the promotion shape
+        // stay as `Annotation::Text` and get emitted verbatim at their
+        // original indent by the serializer. Narrative dividers like
+        // `## Phase history`, `### Parallelism map`, or `#### X.4.a` are
+        // preserved in-place; only `##` / `###` headers matching
+        // `<id> — Title` get promoted to canonical phase checkboxes.
 
-        // Second pass: for each top-level phase, depth-first strip every
+        // For each top-level phase, depth-first strip every
         // Phase-N header annotation from anywhere in its subtree (headers
         // attached to nested leaves count too — the parser attaches a header
         // to whichever node was open at that indent level). Captured in
@@ -879,34 +850,69 @@ mod tests {
     }
 
     #[test]
-    fn standardize_refuses_generic_heading_without_separator() {
-        // `### Architecture` has no em-dash → refused. This guard keeps
-        // generic markdown headings from being mistakenly promoted.
+    fn standardize_leaves_generic_heading_without_separator_alone() {
+        // Phase 19 — `### Architecture` doesn't match Phase-N shape (no
+        // separator) → stays as an annotation, no refusal. Original column
+        // 0 indent is preserved via serializer.
         let plan = parse_for_test("- [ ] 0.1 First\n\n### Architecture\n\n- [ ] 1.0 Phase\n");
-        let err = plan.standardize_to_canonical().expect_err("should refuse");
-        assert!(err.contains("Architecture"), "got: {err}");
-    }
-
-    #[test]
-    fn standardize_refuses_unrecognized_headers() {
-        // `## Notes` doesn't match `### Phase N — Title` pattern → refuse.
-        let plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n");
-        let err = plan.standardize_to_canonical().expect_err("should refuse");
-        assert!(err.contains("aren't `### Phase N"), "got: {err}");
-        assert!(err.contains("## Notes"), "should name the offender: {err}");
-    }
-
-    #[test]
-    fn standardize_refuses_phase_with_slash() {
-        // `Phase 2/3` isn't a valid id — refuse rather than guess.
-        let plan = parse_for_test(
-            "- [ ] 0.1 First\n\n### Phase 2/3 — Batch pipeline [done]\n\n- [ ] 2.1 Sub\n",
-        );
-        let err = plan.standardize_to_canonical().expect_err("should refuse");
+        let (out, _) = plan
+            .standardize_to_canonical()
+            .expect("non-matching headers no longer refused");
+        // No promotion — original phases remain (0.1 and 1.0 at top level).
+        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
         assert!(
-            err.contains("Phase 2/3") || err.contains("aren't"),
-            "got: {err}"
+            ids.contains(&"0.1") && ids.contains(&"1.0"),
+            "phases preserved: {ids:?}"
         );
+    }
+
+    #[test]
+    fn standardize_leaves_unrecognized_headers_alone() {
+        // `## Notes` stays as narrative. Plan parses, standardizes, and the
+        // annotation survives on whichever node the parser attached it to.
+        let plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n");
+        let (out, _) = plan.standardize_to_canonical().unwrap();
+        // Look for `## Notes` text annotation anywhere in the resulting tree.
+        let found = out.phases.iter().any(|p| {
+            p.annotations
+                .iter()
+                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("## Notes")))
+                || p.children.iter().any(|c| {
+                    c.annotations.iter().any(
+                        |a| matches!(a, Annotation::Text { text, .. } if text.contains("## Notes")),
+                    )
+                })
+        });
+        assert!(found, "## Notes should remain as annotation");
+    }
+
+    #[test]
+    fn standardize_leaves_phase_with_slash_alone() {
+        // `Phase 2/3` isn't a valid id token (the `/`) → no promotion, but
+        // also no refusal. Stays as narrative.
+        let plan =
+            parse_for_test("- [ ] 0.1 First\n\n### Phase 2/3 — Batch pipeline\n\n- [ ] 2.1 Sub\n");
+        let (out, _) = plan
+            .standardize_to_canonical()
+            .expect("Phase 2/3 stays as narrative");
+        // No `2.0` or `2/3.0` phase synthesized; 0.1 and 2.1 stay top-level.
+        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"0.1") && ids.contains(&"2.1"), "got: {ids:?}");
+    }
+
+    #[test]
+    fn standardize_skips_promotion_for_deep_hash_headers() {
+        // Phase 19 — `####+` headers are sub-section labels inside a phase;
+        // they don't form phase boundaries. Even though `#### X.4.a — ...`
+        // matches the `<id> — Title` shape, depth 4 disqualifies it.
+        let plan = parse_for_test(
+            "- [ ] X.0 Phase\n  - [ ] X.1 Sub\n\n#### X.4.a — Foundations\n\n- [ ] X.4.a.1 Detail\n",
+        );
+        let (out, _) = plan.standardize_to_canonical().unwrap();
+        // No `X.4.a` phase synthesized — X.4.a.1 stays top-level.
+        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
+        assert!(!ids.contains(&"X.4.a"), "should NOT promote ####: {ids:?}");
+        assert!(ids.contains(&"X.4.a.1"), "X.4.a.1 stays top-level: {ids:?}");
     }
 
     #[test]
