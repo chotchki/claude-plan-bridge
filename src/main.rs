@@ -146,6 +146,7 @@ fn main() -> Result<()> {
             let output = run_writeback(&plan, event).unwrap_or_else(|e| {
                 plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
+            let output = maybe_warn_missing_session_start(&project.cwd, output, "PostToolUse");
             println!("{}", output.to_json());
         }
         Command::Reconcile { project } => {
@@ -153,6 +154,8 @@ fn main() -> Result<()> {
             let output = run_reconcile(&plan).unwrap_or_else(|e| {
                 plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
+            let output =
+                maybe_warn_missing_session_start(&project.cwd, output, "UserPromptSubmit");
             println!("{}", output.to_json());
         }
         Command::Serve { project } => {
@@ -450,6 +453,22 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
             "UserPromptSubmit",
             rendered,
         ))
+    }
+}
+
+/// Splice a "SessionStart hook missing" warning onto the front of `output`
+/// when the project lacks the SessionStart → resume entry. Keeps the real
+/// hook payload intact; just prepends a yell so a user on a pre-25.2 install
+/// can't ignore the drift. `hook_event` is the event we're responding to,
+/// used only when `output` is silent (we need to label the new context).
+fn maybe_warn_missing_session_start(
+    cwd: &std::path::Path,
+    output: plan_bridge::hook::HookOutput,
+    hook_event: &str,
+) -> plan_bridge::hook::HookOutput {
+    match plan_bridge::init::missing_session_start_warning(cwd) {
+        Some(warning) => output.prepend_context(hook_event, warning),
+        None => output,
     }
 }
 

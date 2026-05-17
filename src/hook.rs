@@ -90,6 +90,31 @@ impl HookOutput {
         }
     }
 
+    /// Prepend `prefix` to the existing additionalContext, or build a new
+    /// context with just the prefix when the output is currently silent.
+    /// Used to splice in warnings (e.g., missing SessionStart hook) without
+    /// dropping the real hook payload.
+    pub fn prepend_context(self, event: impl Into<String>, prefix: impl Into<String>) -> Self {
+        let prefix = prefix.into();
+        let event = event.into();
+        match self.hook_specific_output {
+            Some(hso) => Self {
+                hook_specific_output: Some(HookSpecificOutput {
+                    hook_event_name: hso.hook_event_name,
+                    additional_context: format!("{prefix}\n\n{}", hso.additional_context),
+                }),
+                ..self
+            },
+            None => Self {
+                hook_specific_output: Some(HookSpecificOutput {
+                    hook_event_name: event,
+                    additional_context: prefix,
+                }),
+                ..self
+            },
+        }
+    }
+
     pub fn block(reason: impl Into<String>) -> Self {
         Self {
             decision: Some("block".to_string()),
@@ -219,6 +244,31 @@ mod tests {
         let json = out.to_json();
         assert!(json.contains("\"decision\":\"block\""), "got: {json}");
         assert!(json.contains("malformed"), "got: {json}");
+    }
+
+    #[test]
+    fn prepend_context_on_silent_creates_context() {
+        let out = HookOutput::silent().prepend_context("UserPromptSubmit", "WARNING: bad");
+        let json = out.to_json();
+        assert!(json.contains("WARNING: bad"), "got: {json}");
+        assert!(
+            json.contains("\"hookEventName\":\"UserPromptSubmit\""),
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn prepend_context_on_existing_keeps_payload() {
+        let out = HookOutput::context("PostToolUse", "real payload")
+            .prepend_context("PostToolUse", "WARNING: bad");
+        let json = out.to_json();
+        // Both warning and payload survive, warning first.
+        let warn_pos = json.find("WARNING: bad").expect("warning missing");
+        let payload_pos = json.find("real payload").expect("payload missing");
+        assert!(
+            warn_pos < payload_pos,
+            "warning should precede payload: {json}"
+        );
     }
 
     #[test]

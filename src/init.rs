@@ -165,6 +165,32 @@ fn plan_bridge_hooks() -> Value {
     })
 }
 
+/// Detect whether the project at `cwd` has the SessionStart → resume hook
+/// installed. Returns a warning string when the hook is missing (or the
+/// settings.json is unreadable / lacks the entry); returns `None` when the
+/// hook is present.
+///
+/// Used by writeback and reconcile to yell loudly on every hook fire so a
+/// user on a pre-25.2 install discovers the missing hook the next time
+/// they create or update a task — without us needing to remember to run
+/// anything.
+pub fn missing_session_start_warning(cwd: &Path) -> Option<String> {
+    let settings_path = cwd.join(".claude/settings.json");
+    let Ok(text) = std::fs::read_to_string(&settings_path) else {
+        // Settings file unreadable or missing — most likely running outside
+        // a configured project (e.g., CLI smoke test). Stay quiet.
+        return None;
+    };
+    if text.contains("claude-plan-bridge resume") {
+        return None;
+    }
+    Some(
+        "claude-plan-bridge: ⚠ SessionStart hook missing from .claude/settings.json — \
+         task list won't rehydrate automatically when you restart Claude Code. Run \
+         `claude-plan-bridge upgrade-hooks` to add it (idempotent).".to_string(),
+    )
+}
+
 /// Idempotently merge the latest plan-bridge hooks into an existing
 /// `.claude/settings.json` without touching PLAN.md or `.gitignore`. Use
 /// this on projects that installed with an older bridge version that
@@ -390,6 +416,45 @@ mod tests {
         assert!(report.no_change, "expected no_change report on already-current settings");
         assert!(!report.created_settings);
         assert!(!report.updated_settings);
+    }
+
+    #[test]
+    fn missing_session_start_warning_returns_none_when_hook_present() {
+        let dir = scratch_dir();
+        init(&dir, false).unwrap();
+        assert!(missing_session_start_warning(&dir).is_none());
+    }
+
+    #[test]
+    fn missing_session_start_warning_fires_for_pre_25_2_install() {
+        let dir = scratch_dir();
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        let pre_25_2 = json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "claude-plan-bridge reconcile"
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&pre_25_2).unwrap(),
+        )
+        .unwrap();
+        let warn = missing_session_start_warning(&dir).expect("expected warning");
+        assert!(warn.contains("SessionStart"), "warn: {warn}");
+        assert!(warn.contains("upgrade-hooks"), "warn: {warn}");
+    }
+
+    #[test]
+    fn missing_session_start_warning_silent_when_settings_absent() {
+        // Running outside a configured Claude Code project (e.g. CLI smoke
+        // test) shouldn't emit warnings.
+        let dir = scratch_dir();
+        assert!(missing_session_start_warning(&dir).is_none());
     }
 
     #[test]
