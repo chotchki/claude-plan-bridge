@@ -216,3 +216,11 @@
   - [x] 19.4 README: document the new header policy (promote `##`/`###` Phase-N shape, narrative otherwise)
   - [x] 19.5 Phase 19 exit + bump v0.1.6 + tag + install
 
+---
+
+## 2026-05-17
+
+- [x] 20.0 Quicksight v0.1.6 shakeout: multi-header subtree no longer refuses writeback
+  - [x] 20.1 standardize: skip promotion when subtree has multiple Phase-N headers (leave as narrative)
+  - [x] 20.2 Phase 20 exit + bump v0.1.7 + tag + install
+

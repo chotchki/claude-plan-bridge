@@ -12,6 +12,3 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 20.0 Quicksight v0.1.6 shakeout: multi-header subtree no longer refuses writeback
-  - [x] 20.1 standardize: skip promotion when subtree has multiple Phase-N headers (leave as narrative)
-  - [ ] 20.2 Phase 20 exit + bump v0.1.7 + tag + install
