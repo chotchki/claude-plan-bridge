@@ -12,14 +12,4 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [x] 8.0 Serialize concurrent writebacks with a file lock — and surface lock failure as a loud hook block, never silent data loss
-- [ ] 10.0 Productionalize the tool — public repo, CI, packaging, README polish
-  - [x] 10.1 Public GitHub repo + LICENSE; update Cargo.toml `repository` and `license` fields
-    - We'll go with an MIT license for this
-  - [x] 10.2 CI builds — GitHub Actions workflow: cargo fmt --check, clippy -D warnings, test, on Linux/macOS/Windows stable
-  - [x] 10.3 README polish — lead with a 30-second pitch and an example transcript; trim implementation detail or fold it lower
-  - [ ] 10.4 Publish v0.1.0 to crates.io — fill out Cargo.toml metadata; cargo publish --dry-run; cargo publish
-  - [ ] 10.4a Draft a hotchkiss.io entry on plan-bridge — motivation, design, install/usage
-  - [x] 10.4b Internal-prefix rename: `plan-bridge:` → `claude-plan-bridge:` in source message strings (~10 files)
-  - [ ] 10.5 Phase 10 exit — all sub-boxes ticked; GH repo public; CI green on main; v0.1.0 on crates.io; README badges live
 - [ ] 11.0 Update global ~/.claude/CLAUDE.md to point at plan-bridge as the canonical PLAN.md driver
