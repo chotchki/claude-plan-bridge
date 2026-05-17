@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -14,12 +14,35 @@ struct Cli {
     command: Command,
 }
 
+/// Shared scope flags for every project-aware subcommand. `--cwd` points at
+/// the project directory (default `.`); `--plan` is an optional explicit
+/// override of the PLAN.md path. When both are absent, the plan resolves to
+/// `<cwd>/PLAN.md`. Backward compat: existing scripts that pass `--plan X.md`
+/// keep working unchanged.
+#[derive(Args, Clone)]
+struct ProjectArgs {
+    /// Project directory containing PLAN.md and the `.claude/` state dir.
+    #[arg(long, default_value = ".")]
+    cwd: PathBuf,
+    /// Explicit PLAN.md path. Overrides `<cwd>/PLAN.md` when set.
+    #[arg(long)]
+    plan: Option<PathBuf>,
+}
+
+impl ProjectArgs {
+    fn plan_path(&self) -> PathBuf {
+        self.plan
+            .clone()
+            .unwrap_or_else(|| self.cwd.join("PLAN.md"))
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Parse a PLAN.md and emit the AST as JSON on stdout.
     Parse {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
     },
     /// Apply a Claude Code PostToolUse hook event to PLAN.md.
     ///
@@ -27,8 +50,8 @@ enum Command {
     /// PLAN.md and the project state file, and emits a JSON hook response on
     /// stdout.
     Writeback {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
         #[arg(long, value_enum)]
         event: WritebackEvent,
     },
@@ -36,15 +59,15 @@ enum Command {
     /// `additionalContext` for Claude's next turn. Intended for the
     /// `UserPromptSubmit` hook; safe to run any time.
     Reconcile {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
     },
     /// Sweep every fully-complete top-level phase from PLAN.md into
-    /// PLAN_ARCHIVE.md (newest section at top), and drop the associated state
-    /// mappings.
+    /// PLAN_ARCHIVE.md (newest section at bottom), and drop the associated
+    /// state mappings.
     Archive {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
         #[arg(long)]
         dry_run: bool,
         /// Date stamp for the archive section header (YYYY-MM-DD). Defaults
@@ -65,16 +88,16 @@ enum Command {
     /// Run an MCP server over stdio that exposes plan-aware tools
     /// (`plan_list`, `plan_check`, `plan_uncheck`, `plan_add`, `plan_archive`).
     Serve {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
     },
     /// Seed the state file with synthetic mappings for every leaf currently in
     /// PLAN.md so the first reconcile after install isn't a wall of
     /// `LeafAdded`. Idempotent. When Claude later TaskCreates against a
     /// baselined plan_path, the baseline mapping is silently replaced.
     Baseline {
-        #[arg(long, default_value = "PLAN.md")]
-        plan: PathBuf,
+        #[command(flatten)]
+        project: ProjectArgs,
     },
 }
 
@@ -87,35 +110,57 @@ enum WritebackEvent {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Parse { plan } => {
+        Command::Parse { project } => {
+            let plan = project.plan_path();
             let input = std::fs::read_to_string(&plan)
                 .with_context(|| format!("failed to read {}", plan.display()))?;
             let parsed = plan_bridge::parser::parse(&input)
                 .with_context(|| format!("failed to parse {}", plan.display()))?;
             println!("{}", serde_json::to_string_pretty(&parsed)?);
         }
-        Command::Writeback { plan, event } => {
+        Command::Writeback { project, event } => {
+            let plan = project.plan_path();
             let output = run_writeback(&plan, event).unwrap_or_else(|e| {
                 plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
             println!("{}", output.to_json());
         }
-        Command::Reconcile { plan } => {
+        Command::Reconcile { project } => {
+            let plan = project.plan_path();
             let output = run_reconcile(&plan).unwrap_or_else(|e| {
                 plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
             println!("{}", output.to_json());
         }
-        Command::Serve { plan } => {
-            plan_bridge::mcp::McpServer::new(plan).serve()?;
+        Command::Serve { project } => {
+            plan_bridge::mcp::McpServer::new(project.plan_path()).serve()?;
         }
-        Command::Baseline { plan } => {
-            let report = plan_bridge::baseline::baseline(&plan)?;
+        Command::Baseline { project } => {
+            let report = plan_bridge::baseline::baseline(&project.plan_path())?;
             println!(
                 "claude-plan-bridge: baselined {} leaf(s), skipped {} already-mapped",
                 report.baselined.len(),
                 report.already_mapped.len()
             );
+            if !report.skipped_no_id.is_empty() {
+                println!(
+                    "claude-plan-bridge: NOTE: skipped {} bare-checkbox leaf(s) with no id — \
+                     untracked by the bridge (add an id like `1.2.3` to make them trackable):",
+                    report.skipped_no_id.len()
+                );
+                for title in report.skipped_no_id.iter().take(5) {
+                    let preview: String = title.chars().take(80).collect();
+                    let trailer = if title.chars().count() > 80 {
+                        "…"
+                    } else {
+                        ""
+                    };
+                    println!("    - {preview}{trailer}");
+                }
+                if report.skipped_no_id.len() > 5 {
+                    println!("    ... (+{} more)", report.skipped_no_id.len() - 5);
+                }
+            }
         }
         Command::Init { cwd, force } => {
             let report = plan_bridge::init::init(&cwd, force)?;
@@ -149,10 +194,11 @@ fn main() -> Result<()> {
             }
         }
         Command::Archive {
-            plan,
+            project,
             dry_run,
             date,
         } => {
+            let plan = project.plan_path();
             let date = date.unwrap_or_else(plan_bridge::today::today_utc);
             let report = plan_bridge::archive::archive(&plan, dry_run, &date)?;
             if report.is_empty() {

@@ -23,6 +23,10 @@ pub const BASELINE_PREFIX: &str = "baseline:";
 pub struct BaselineReport {
     pub baselined: Vec<String>,
     pub already_mapped: Vec<String>,
+    /// Leaves with empty `id` (bare-checkbox bullets like `- [ ] no id here`).
+    /// Untrackable — no stable plan_path to key state by. Reported so users
+    /// can see how many leaves the bridge can't follow without explicit ids.
+    pub skipped_no_id: Vec<String>,
 }
 
 pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
@@ -42,6 +46,15 @@ pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
     let mut report = BaselineReport::default();
 
     for leaf in plan.leaves() {
+        // Phase 18: skip empty-id leaves (bare-checkbox bullets without a
+        // dotted id). They have no stable plan_path so any state entry would
+        // collide on key `baseline:` — last-write-wins drops siblings, and
+        // every subsequent reconcile emits noisy LeafTitleChanged drift.
+        // Untrackable by design: give the leaf an id if you want it baselined.
+        if leaf.id.is_empty() {
+            report.skipped_no_id.push(leaf.title.clone());
+            continue;
+        }
         if mapped_paths.contains(&leaf.id) {
             report.already_mapped.push(leaf.id.clone());
             continue;
@@ -155,6 +168,29 @@ mod tests {
         let report = baseline(&plan).unwrap();
         assert!(report.baselined.is_empty());
         assert_eq!(report.already_mapped, vec!["1.1".to_string()]);
+    }
+
+    #[test]
+    fn skips_empty_id_leaves_to_avoid_collision() {
+        // Phase 18.1 regression — quicksight shakeout. Bare-checkbox leaves
+        // (no dotted id) used to all key on `baseline:` with plan_path="" —
+        // last-write-wins collapsed N leaves into 1 state entry, then
+        // reconcile spammed N-1 LeafTitleChanged deltas every prompt.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Real id\n  - [ ] No id here\n  - [ ] Another no id\n",
+        );
+        let report = baseline(&plan).unwrap();
+        assert_eq!(report.baselined, vec!["1.1".to_string()]);
+        assert_eq!(report.skipped_no_id.len(), 2);
+        assert!(report.skipped_no_id.iter().any(|t| t == "No id here"));
+
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        // Only one baseline entry; no `baseline:` collision key.
+        assert_eq!(state.plan_path("baseline:1.1"), Some("1.1"));
+        assert_eq!(state.plan_path("baseline:"), None);
+        assert_eq!(state.mappings.len(), 1);
     }
 
     #[test]

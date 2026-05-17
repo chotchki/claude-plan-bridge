@@ -86,6 +86,13 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     }
 
     for leaf in leaves {
+        // Phase 18: skip empty-id leaves (bare checkboxes without a dotted id).
+        // They share plan_path="" which collapses in path_to_task — the bridge
+        // can't tell them apart, so any diff emits noisy false-positive drift.
+        // Untrackable by design; matched in baseline's skip rule.
+        if leaf.id.is_empty() {
+            continue;
+        }
         match path_to_task.get(leaf.id.as_str()) {
             Some(&task_id) => {
                 let mapping = state
@@ -369,6 +376,27 @@ mod tests {
         let plan = write_plan(&dir, "");
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn empty_id_leaves_are_skipped_silently() {
+        // Phase 18.2 — quicksight shakeout. Bare-checkbox leaves (no dotted
+        // id) share plan_path="" which collapses in the state lookup;
+        // reconcile used to emit false LeafAdded / LeafTitleChanged for them
+        // on every prompt. Now it skips them entirely — no drift, no noise.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Real id\n  - [ ] First bare\n  - [ ] Second bare\n",
+        );
+        write_state(&plan, &[("t-1", mapping("1.1", "Real id", false, &[]))]);
+        let deltas = reconcile(&plan).unwrap();
+        // Only delta possible would be for 1.1; state matches PLAN.md so
+        // we get NONE. Critically, no spam from the 2 empty-id leaves.
+        assert!(
+            deltas.is_empty(),
+            "got false drift from empty-id leaves: {deltas:?}"
+        );
     }
 
     #[test]

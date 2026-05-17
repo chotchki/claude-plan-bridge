@@ -74,11 +74,19 @@ claude-plan-bridge archive
 
 ## CLI reference
 
-### `parse [--plan PATH]`
+Every project-scoped subcommand below accepts the same two scope flags:
 
-Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. `PATH` defaults to `./PLAN.md`.
+- `--cwd PATH` — project directory (default `.`). Useful for scripting from outside the project, e.g. `claude-plan-bridge baseline --cwd ../some-project/`.
+- `--plan PATH` — explicit PLAN.md path override. When set, takes precedence over `--cwd`-derived default.
+
+If neither is given, the plan resolves to `./PLAN.md`. Both are interchangeable for the common case; pick whichever matches what you have on hand.
+
+### `parse`
+
+Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-level *phases*; for a leaf-recursive count, run `baseline`.)
 
 ### `writeback --event {create|update}`
+
 
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
@@ -100,17 +108,19 @@ Delta variants Claude can act on:
 | `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read; act if needed |
 | `parent_inconsistent` | A parent is `[x]` but a descendant leaf isn't | Resolve before archive — sweep refuses inconsistent phases |
 
-### `archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]`
+### `archive [--dry-run] [--date YYYY-MM-DD]`
 
 Sweep every fully-resolved top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md`. New section is appended at the **bottom** under a `## YYYY-MM-DD` header, so history reads chronological-ascending. Both files written atomically (tmp + rename). State mappings under archived subtrees are dropped.
 
 **IDs are never renumbered.** Gaps after a sweep are intentional — downstream commit messages and code comments may reference the original ids.
 
-### `baseline [--plan PATH]`
+### `baseline`
 
 Seed the state file with synthetic `baseline:<plan_path>` mappings for every leaf currently in `PLAN.md`. Run once when installing into a project with an existing plan. Idempotent. When Claude later `TaskCreate`s against a baselined path, the baseline mapping is silently replaced.
 
-### `serve [--plan PATH]` (MCP)
+**Leaves with empty ids** (bare-checkbox bullets like `- [ ] no id here`) are *skipped*: they have no stable `plan_path` to key state by, so the bridge can't track them. `baseline` reports the count under "NOTE: skipped N bare-checkbox leaf(s)…" — add a dotted id (`- [ ] 1.2.3 description`) to make a leaf trackable.
+
+### `serve` (MCP)
 
 Run an MCP server over stdio that exposes typed plan-mutation tools. Useful when you'd rather drive plans through a structured API than through markdown editing.
 
