@@ -1,6 +1,6 @@
-use crate::ast::{Node, Plan};
 #[cfg(test)]
 use crate::ast::NodeState;
+use crate::ast::{Node, Plan};
 use crate::parser::parse;
 use crate::serializer::serialize;
 use crate::state::{State, default_state_path_for};
@@ -89,8 +89,11 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     // Drop state mappings whose plan_path lives inside any archived subtree.
     let state_path = default_state_path_for(plan_path);
     let mut state = State::load(&state_path)?;
-    let archived: std::collections::HashSet<&str> =
-        report.archived_plan_paths.iter().map(String::as_str).collect();
+    let archived: std::collections::HashSet<&str> = report
+        .archived_plan_paths
+        .iter()
+        .map(String::as_str)
+        .collect();
     let to_drop: Vec<String> = state
         .mappings
         .iter()
@@ -151,8 +154,11 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
 
     let state_path = crate::state::default_state_path_for(plan_path);
     let mut state = crate::state::State::load(&state_path)?;
-    let archived: std::collections::HashSet<&str> =
-        report.archived_plan_paths.iter().map(String::as_str).collect();
+    let archived: std::collections::HashSet<&str> = report
+        .archived_plan_paths
+        .iter()
+        .map(String::as_str)
+        .collect();
     let to_drop: Vec<String> = state
         .mappings
         .iter()
@@ -240,14 +246,12 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
         .parent()
         .with_context(|| format!("no parent for {}", path.display()))?;
     if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, contents)
-        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    std::fs::write(&tmp, contents).with_context(|| format!("write tmp {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -326,10 +330,7 @@ mod tests {
         // Bridge doesn't auto-tick parents; a phase whose box reads `[ ]` but
         // whose subtree is fully `[x]` should archive based on subtree state.
         let dir = scratch_dir();
-        let plan = write_plan(
-            &dir,
-            "- [ ] 1.0 Parent unchecked\n  - [x] 1.1 Done\n",
-        );
+        let plan = write_plan(&dir, "- [ ] 1.0 Parent unchecked\n  - [x] 1.1 Done\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
         assert_eq!(report.archived_phase_ids, vec!["1.0"]);
     }
@@ -339,15 +340,15 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
         let archive_path = archive_path_for(&plan);
-        std::fs::write(
-            &archive_path,
-            "## 2026-04-01\n\n- [x] 0.0 Earlier work\n",
-        )
-        .unwrap();
+        std::fs::write(&archive_path, "## 2026-04-01\n\n- [x] 0.0 Earlier work\n").unwrap();
         archive(&plan, false, "2026-05-16").unwrap();
         let archive_text = std::fs::read_to_string(&archive_path).unwrap();
-        let pos_new = archive_text.find("## 2026-05-16").expect("new section present");
-        let pos_old = archive_text.find("## 2026-04-01").expect("old section preserved");
+        let pos_new = archive_text
+            .find("## 2026-05-16")
+            .expect("new section present");
+        let pos_old = archive_text
+            .find("## 2026-04-01")
+            .expect("old section preserved");
         assert!(pos_old < pos_new, "newest should be appended at the bottom");
         assert!(archive_text.contains("0.0 Earlier work"));
         assert!(archive_text.contains("---"), "divider between sections");
@@ -368,10 +369,19 @@ mod tests {
         .unwrap();
         archive(&plan, false, "2026-05-16").unwrap();
         let archive_text = std::fs::read_to_string(&archive_path).unwrap();
-        let p1 = archive_text.find("## 2026-01-01").expect("section 1 preserved");
-        let p2 = archive_text.find("## 2026-03-01").expect("section 2 preserved");
-        let p3 = archive_text.find("## 2026-05-16").expect("new section present");
-        assert!(p1 < p2 && p2 < p3, "sections must read chronological-ascending; got order {p1},{p2},{p3}");
+        let p1 = archive_text
+            .find("## 2026-01-01")
+            .expect("section 1 preserved");
+        let p2 = archive_text
+            .find("## 2026-03-01")
+            .expect("section 2 preserved");
+        let p3 = archive_text
+            .find("## 2026-05-16")
+            .expect("new section present");
+        assert!(
+            p1 < p2 && p2 < p3,
+            "sections must read chronological-ascending; got order {p1},{p2},{p3}"
+        );
     }
 
     #[test]
@@ -393,24 +403,38 @@ mod tests {
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
-        state.record("t-archived", Mapping {
-            plan_path: "1.1".to_string(),
-            last_synced_title: "Done".to_string(),
-            last_synced_state: NodeState::Done,
-            last_synced_annotations: vec![],
-        });
-        state.record("t-elsewhere", Mapping {
-            plan_path: "9.9".to_string(),
-            last_synced_title: "x".to_string(),
-            last_synced_state: NodeState::Pending,
-            last_synced_annotations: vec![],
-        });
+        state.record(
+            "t-archived",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Done".to_string(),
+                last_synced_state: NodeState::Done,
+                last_synced_annotations: vec![],
+            },
+        );
+        state.record(
+            "t-elsewhere",
+            Mapping {
+                plan_path: "9.9".to_string(),
+                last_synced_title: "x".to_string(),
+                last_synced_state: NodeState::Pending,
+                last_synced_annotations: vec![],
+            },
+        );
         state.save(&state_path).unwrap();
 
         archive(&plan, false, "2026-05-16").unwrap();
         let loaded = State::load(&state_path).unwrap();
-        assert_eq!(loaded.plan_path("t-archived"), None, "archived mapping should be gone");
-        assert_eq!(loaded.plan_path("t-elsewhere"), Some("9.9"), "unrelated mapping should remain");
+        assert_eq!(
+            loaded.plan_path("t-archived"),
+            None,
+            "archived mapping should be gone"
+        );
+        assert_eq!(
+            loaded.plan_path("t-elsewhere"),
+            Some("9.9"),
+            "unrelated mapping should remain"
+        );
     }
 
     #[test]

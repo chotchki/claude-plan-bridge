@@ -47,7 +47,11 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
         // Open fence
         if let Some(after) = trimmed.strip_prefix("```") {
             let lang = after.trim();
-            let lang = if lang.is_empty() { None } else { Some(lang.to_string()) };
+            let lang = if lang.is_empty() {
+                None
+            } else {
+                Some(lang.to_string())
+            };
             in_code = Some(CodeAccumulator {
                 indent,
                 lang,
@@ -108,7 +112,7 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
     Ok(plan)
 }
 
-fn push_into_parent(plan: &mut Plan, stack: &mut Vec<(Node, usize)>, node: Node) {
+fn push_into_parent(plan: &mut Plan, stack: &mut [(Node, usize)], node: Node) {
     if let Some((parent, _)) = stack.last_mut() {
         parent.children.push(node);
     } else {
@@ -242,10 +246,8 @@ fn id_chars(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
 }
 
 fn skip_separator(input: &mut &str) -> winnow::ModalResult<(), ContextError> {
-    let _: &str = take_while(0.., |c: char| {
-        c == '—' || c == '-' || c.is_whitespace()
-    })
-    .parse_next(input)?;
+    let _: &str =
+        take_while(0.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;
     Ok(())
 }
 
@@ -352,7 +354,11 @@ mod tests {
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
         assert_eq!(phase.children.len(), 1, "1.1 should be child of 1.0");
-        assert_eq!(phase.children[0].children.len(), 1, "1.1.1 should be child of 1.1");
+        assert_eq!(
+            phase.children[0].children.len(),
+            1,
+            "1.1.1 should be child of 1.1"
+        );
     }
 
     #[test]
@@ -434,7 +440,11 @@ Some prose.
         let phase = &plan.phases[0];
         assert_eq!(phase.annotations.len(), 1);
         match &phase.annotations[0] {
-            Annotation::CodeBlock { lang, content, indent } => {
+            Annotation::CodeBlock {
+                lang,
+                content,
+                indent,
+            } => {
                 assert_eq!(lang.as_deref(), Some("rust"));
                 assert!(content.contains("fn foo()"));
                 assert_eq!(*indent, 2);
@@ -484,7 +494,10 @@ Some prose.
         // "Make" has no dot and isn't all-digits, so it must NOT be grabbed as an id.
         let plan = parse("- [ ] Make the core domain model the source\n").unwrap();
         assert_eq!(plan.phases[0].id, "");
-        assert_eq!(plan.phases[0].title, "Make the core domain model the source");
+        assert_eq!(
+            plan.phases[0].title,
+            "Make the core domain model the source"
+        );
     }
 
     #[test]
@@ -501,7 +514,11 @@ Some prose.
             Annotation::Text { text, .. } => assert_eq!(text, "## A markdown heading"),
             other => panic!("expected Text, got {other:?}"),
         }
-        assert_eq!(phase.children.len(), 1, "1.1 should still be a child of 1.0");
+        assert_eq!(
+            phase.children.len(),
+            1,
+            "1.1 should still be a child of 1.0"
+        );
     }
 
     #[test]
@@ -515,9 +532,11 @@ Some prose.
         }
         let input = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let plan = parse(&input)
-            .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-        assert!(!plan.phases.is_empty(), "quicksight PLAN.md should have phases");
+        let plan = parse(&input).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        assert!(
+            !plan.phases.is_empty(),
+            "quicksight PLAN.md should have phases"
+        );
     }
 
     #[test]
@@ -573,7 +592,11 @@ Some prose.
 
         let t12 = &p1.children[1];
         assert_eq!(t12.id, "1.2");
-        assert_eq!(t12.annotations.len(), 2, "1.2 has text + bullet annotations");
+        assert_eq!(
+            t12.annotations.len(),
+            2,
+            "1.2 has text + bullet annotations"
+        );
 
         let p2 = &plan.phases[1];
         assert_eq!(p2.id, "2.0");

@@ -140,7 +140,10 @@ mod tests {
         assert_eq!(p.tool_name, "TaskCreate");
         let input: TaskCreateInput = serde_json::from_value(p.tool_input).unwrap();
         assert_eq!(input.subject, "do the thing");
-        assert_eq!(extract_task_id(&p.tool_response).as_deref(), Some("abc-123"));
+        assert_eq!(
+            extract_task_id(&p.tool_response).as_deref(),
+            Some("abc-123")
+        );
     }
 
     #[test]
@@ -198,7 +201,10 @@ mod tests {
         assert!(json.contains("additionalContext"), "got: {json}");
         // Claude Code's hook-output schema requires hookEventName inside
         // hookSpecificOutput — omitting it triggers a validation rejection.
-        assert!(json.contains("\"hookEventName\":\"UserPromptSubmit\""), "got: {json}");
+        assert!(
+            json.contains("\"hookEventName\":\"UserPromptSubmit\""),
+            "got: {json}"
+        );
     }
 
     #[test]

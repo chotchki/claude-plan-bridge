@@ -150,9 +150,7 @@ fn merge_hooks(mut existing: Value) -> Value {
     let hooks_obj = hooks_entry.as_object_mut().expect("hooks is object");
 
     for (event, our_entries) in our.as_object().expect("our hooks is object") {
-        let event_arr = hooks_obj
-            .entry(event.clone())
-            .or_insert(json!([]));
+        let event_arr = hooks_obj.entry(event.clone()).or_insert(json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
@@ -235,7 +233,10 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         let plan_bridge_count = post.iter().filter(|e| is_plan_bridge_entry(e)).count();
-        assert_eq!(plan_bridge_count, 2, "expected exactly two plan-bridge PostToolUse entries");
+        assert_eq!(
+            plan_bridge_count, 2,
+            "expected exactly two plan-bridge PostToolUse entries"
+        );
     }
 
     #[test]
@@ -271,11 +272,13 @@ mod tests {
         let has_user = post.iter().any(|e| {
             e.get("hooks")
                 .and_then(Value::as_array)
-                .map(|hs| hs.iter().any(|h| {
-                    h.get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|c| c.contains("my-user-script"))
-                }))
+                .map(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| c.contains("my-user-script"))
+                    })
+                })
                 .unwrap_or(false)
         });
         assert!(has_user, "user's hook should survive init");
@@ -308,7 +311,10 @@ mod tests {
         init(&dir, false).unwrap();
         let report = init(&dir, false).unwrap();
         assert!(!report.created_gitignore);
-        assert!(!report.updated_gitignore, "second init should not touch .gitignore");
+        assert!(
+            !report.updated_gitignore,
+            "second init should not touch .gitignore"
+        );
         let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         let state_lines = gi
             .lines()
@@ -319,6 +325,9 @@ mod tests {
             .filter(|l| l.trim().trim_start_matches('/') == ".claude/plan-bridge-state.json.lock")
             .count();
         assert_eq!(state_lines, 1, "state.json line should appear exactly once");
-        assert_eq!(lock_lines, 1, "state.json.lock line should appear exactly once");
+        assert_eq!(
+            lock_lines, 1,
+            "state.json.lock line should appear exactly once"
+        );
     }
 }

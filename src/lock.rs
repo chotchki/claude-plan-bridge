@@ -24,11 +24,11 @@ where
     F: FnOnce() -> Result<T>,
 {
     let lock_path = lock_path_for(state_path);
-    if let Some(parent) = lock_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create lock dir {}", parent.display()))?;
-        }
+    if let Some(parent) = lock_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create lock dir {}", parent.display()))?;
     }
     let lock_file = OpenOptions::new()
         .create(true)
@@ -122,7 +122,10 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        assert!(holder.try_lock_exclusive().unwrap(), "preconditions: holder grabs lock");
+        assert!(
+            holder.try_lock_exclusive().unwrap(),
+            "preconditions: holder grabs lock"
+        );
 
         // Short timeout so the test is fast.
         let err = with_state_lock(&state, Duration::from_millis(150), || Ok(()))
@@ -178,7 +181,11 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        assert_eq!(*counter.lock().unwrap(), n as u32, "every caller ran exactly once");
+        assert_eq!(
+            *counter.lock().unwrap(),
+            n as u32,
+            "every caller ran exactly once"
+        );
         assert_eq!(
             max_seen.load(std::sync::atomic::Ordering::SeqCst),
             1,

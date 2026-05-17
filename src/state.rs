@@ -49,8 +49,8 @@ impl State {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read state file {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read state file {}", path.display()))?;
         let state: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse state file {}", path.display()))?;
         if state.version > CURRENT_VERSION {
@@ -70,12 +70,10 @@ impl State {
         let parent = path
             .parent()
             .with_context(|| format!("state path {} has no parent", path.display()))?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         let tmp = tmp_path(path);
         let json = serde_json::to_vec_pretty(self).context("serialize state")?;
-        std::fs::write(&tmp, json)
-            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())

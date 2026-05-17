@@ -53,10 +53,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             .with_context(|| format!("read {}", plan_path.display()))?;
         let mut plan = parse(&plan_text)?;
 
-        let requested_path = input
-            .metadata
-            .as_ref()
-            .and_then(|m| m.plan_path.clone());
+        let requested_path = input.metadata.as_ref().and_then(|m| m.plan_path.clone());
 
         let (assigned_path, action) = match requested_path {
             Some(p) => {
@@ -180,16 +177,16 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
         // Refresh last_synced_* off the post-mutation leaf so reconcile has a
         // current baseline. Skip if the mapping was removed (deleted case).
-        if state.plan_path(&input.task_id).is_some() {
-            if let Some(node) = plan.find(&node_path) {
-                let updated = Mapping {
-                    plan_path: node_path.clone(),
-                    last_synced_title: node.title.clone(),
-                    last_synced_state: node.state,
-                    last_synced_annotations: annotations_to_strings(&node.annotations),
-                };
-                state.record(&input.task_id, updated);
-            }
+        if state.plan_path(&input.task_id).is_some()
+            && let Some(node) = plan.find(&node_path)
+        {
+            let updated = Mapping {
+                plan_path: node_path.clone(),
+                last_synced_title: node.title.clone(),
+                last_synced_state: node.state,
+                last_synced_annotations: annotations_to_strings(&node.annotations),
+            };
+            state.record(&input.task_id, updated);
         }
         state.save(&state_path)?;
 
@@ -277,10 +274,7 @@ mod tests {
     #[test]
     fn inserts_leaf_under_existing_parent() {
         let dir = scratch_dir();
-        let plan = write_plan(
-            &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n",
-        );
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_for_create("t-1", "New subtask", Some("1.1.1"));
         let out = writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
@@ -298,7 +292,10 @@ mod tests {
         let payload = payload_for_create("t-1", "First task", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(new_contents.contains("  - [ ] 1.1 First task"), "got:\n{new_contents}");
+        assert!(
+            new_contents.contains("  - [ ] 1.1 First task"),
+            "got:\n{new_contents}"
+        );
     }
 
     #[test]
@@ -333,8 +330,14 @@ mod tests {
         let payload = payload_for_create("t-loose", "loose task", None);
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(new_contents.contains("- [ ] Inbox.0 Inbox"), "got:\n{new_contents}");
-        assert!(new_contents.contains("  - [ ] Inbox.1 loose task"), "got:\n{new_contents}");
+        assert!(
+            new_contents.contains("- [ ] Inbox.0 Inbox"),
+            "got:\n{new_contents}"
+        );
+        assert!(
+            new_contents.contains("  - [ ] Inbox.1 loose task"),
+            "got:\n{new_contents}"
+        );
     }
 
     #[test]
@@ -396,7 +399,10 @@ mod tests {
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(!contents.contains("1.1 Task"), "should be gone:\n{contents}");
+        assert!(
+            !contents.contains("1.1 Task"),
+            "should be gone:\n{contents}"
+        );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-1"), None);
     }
@@ -418,7 +424,8 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
         let before = std::fs::read_to_string(&plan).unwrap();
-        let out = writeback_update(&payload_for_update("never-created", "completed"), &plan).unwrap();
+        let out =
+            writeback_update(&payload_for_update("never-created", "completed"), &plan).unwrap();
         let after = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(before, after);
         assert_eq!(out.to_json(), "{}", "should be silent");
@@ -478,7 +485,10 @@ mod tests {
         let contents = std::fs::read_to_string(plan.as_path()).unwrap();
         for i in 1..=n {
             let needle = format!("- [ ] 1.{i} child {i}");
-            assert!(contents.contains(&needle), "missing 1.{i} in PLAN.md:\n{contents}");
+            assert!(
+                contents.contains(&needle),
+                "missing 1.{i} in PLAN.md:\n{contents}"
+            );
         }
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         for i in 1..=n {
@@ -496,10 +506,7 @@ mod tests {
         // PLAN.md already has the node; state file doesn't track this task yet.
         // Expected: don't double-insert; do record the mapping.
         let dir = scratch_dir();
-        let plan = write_plan(
-            &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Already here\n",
-        );
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Already here\n");
         let payload = payload_for_create("t-new", "Already here", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();

@@ -123,23 +123,40 @@ fn main() -> Result<()> {
                 println!("plan-bridge: created {}", cwd.join("PLAN.md").display());
             }
             if report.created_settings {
-                println!("plan-bridge: created {}", cwd.join(".claude/settings.json").display());
+                println!(
+                    "plan-bridge: created {}",
+                    cwd.join(".claude/settings.json").display()
+                );
             } else if report.updated_settings {
-                println!("plan-bridge: merged hooks into {}", cwd.join(".claude/settings.json").display());
+                println!(
+                    "plan-bridge: merged hooks into {}",
+                    cwd.join(".claude/settings.json").display()
+                );
             }
             if report.created_gitignore {
                 println!("plan-bridge: created {}", cwd.join(".gitignore").display());
             } else if report.updated_gitignore {
-                println!("plan-bridge: appended state file to {}", cwd.join(".gitignore").display());
+                println!(
+                    "plan-bridge: appended state file to {}",
+                    cwd.join(".gitignore").display()
+                );
             }
         }
-        Command::Archive { plan, dry_run, date } => {
+        Command::Archive {
+            plan,
+            dry_run,
+            date,
+        } => {
             let date = date.unwrap_or_else(plan_bridge::today::today_utc);
             let report = plan_bridge::archive::archive(&plan, dry_run, &date)?;
             if report.is_empty() {
                 println!("plan-bridge: nothing to archive");
             } else {
-                let verb = if report.dry_run { "would archive" } else { "archived" };
+                let verb = if report.dry_run {
+                    "would archive"
+                } else {
+                    "archived"
+                };
                 println!(
                     "plan-bridge: {verb} {} phase(s): {}",
                     report.archived_phase_ids.len(),
@@ -176,7 +193,9 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
     if rendered.is_empty() {
         Ok(plan_bridge::hook::HookOutput::silent())
     } else {
-        Ok(plan_bridge::hook::HookOutput::context("UserPromptSubmit", rendered))
+        Ok(plan_bridge::hook::HookOutput::context(
+            "UserPromptSubmit",
+            rendered,
+        ))
     }
 }
-

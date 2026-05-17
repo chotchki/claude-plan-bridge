@@ -420,9 +420,8 @@ mod tests {
     fn add_child_of_inserts_in_id_order_not_just_append() {
         // Regression for 7.7: given children [7.1, 7.2, 7.3], inserting `7.2a`
         // must land between 7.2 and 7.3, not at the end.
-        let mut plan = parse_for_test(
-            "- [ ] 7.0 Phase\n  - [ ] 7.1 a\n  - [ ] 7.2 b\n  - [ ] 7.3 c\n",
-        );
+        let mut plan =
+            parse_for_test("- [ ] 7.0 Phase\n  - [ ] 7.1 a\n  - [ ] 7.2 b\n  - [ ] 7.3 c\n");
         let new_child = Node {
             id: "7.2a".to_string(),
             title: "between".to_string(),

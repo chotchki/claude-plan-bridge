@@ -88,7 +88,10 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     for leaf in leaves {
         match path_to_task.get(leaf.id.as_str()) {
             Some(&task_id) => {
-                let mapping = state.mappings.get(task_id).expect("path_to_task built from state");
+                let mapping = state
+                    .mappings
+                    .get(task_id)
+                    .expect("path_to_task built from state");
                 if leaf.title != mapping.last_synced_title {
                     deltas.push(Delta::LeafTitleChanged {
                         plan_path: leaf.id.clone(),
@@ -185,7 +188,11 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
     let mut out = String::from("PLAN.md drift since last sync:\n");
     for d in deltas {
         match d {
-            Delta::LeafAdded { plan_path, title, state } => {
+            Delta::LeafAdded {
+                plan_path,
+                title,
+                state,
+            } => {
                 let mark = match state {
                     NodeState::Done => "[x]",
                     NodeState::WontDo => "[-]",
@@ -200,12 +207,23 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     "  - Removed {plan_path}  (task {task_id} — consider TaskUpdate status=deleted)\n"
                 ));
             }
-            Delta::LeafStateChanged { plan_path, task_id, old, new } => {
+            Delta::LeafStateChanged {
+                plan_path,
+                task_id,
+                old,
+                new,
+            } => {
                 let suggestion = match (old, new) {
                     (_, NodeState::Done) => "consider TaskUpdate status=completed",
-                    (_, NodeState::WontDo) => "consider TaskUpdate status=deleted (the [-] line stays in PLAN.md)",
-                    (NodeState::Done, NodeState::Pending) => "no TaskUpdate revives a completed task; informational",
-                    (NodeState::WontDo, NodeState::Pending) => "task was previously skipped; consider TaskCreate to re-introduce",
+                    (_, NodeState::WontDo) => {
+                        "consider TaskUpdate status=deleted (the [-] line stays in PLAN.md)"
+                    }
+                    (NodeState::Done, NodeState::Pending) => {
+                        "no TaskUpdate revives a completed task; informational"
+                    }
+                    (NodeState::WontDo, NodeState::Pending) => {
+                        "task was previously skipped; consider TaskCreate to re-introduce"
+                    }
                     _ => "informational",
                 };
                 out.push_str(&format!(
@@ -214,12 +232,21 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     state_new = new,
                 ));
             }
-            Delta::LeafTitleChanged { plan_path, task_id, new_title, old_title } => {
+            Delta::LeafTitleChanged {
+                plan_path,
+                task_id,
+                new_title,
+                old_title,
+            } => {
                 out.push_str(&format!(
                     "  ~ Title {plan_path} (task {task_id})\n     was: {old_title}\n     now: {new_title}\n"
                 ));
             }
-            Delta::LeafAnnotationChanged { plan_path, task_id, new_annotations } => {
+            Delta::LeafAnnotationChanged {
+                plan_path,
+                task_id,
+                new_annotations,
+            } => {
                 out.push_str(&format!(
                     "  + Annotations changed under {plan_path} (task {task_id})\n"
                 ));
@@ -237,7 +264,10 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     out.push_str(&format!("      - {body}\n"));
                 }
             }
-            Delta::ParentInconsistent { plan_path, unchecked_descendants } => {
+            Delta::ParentInconsistent {
+                plan_path,
+                unchecked_descendants,
+            } => {
                 out.push_str(&format!(
                     "  ! Inconsistent: {plan_path} is [x] but still has unchecked descendants ({}):\n",
                     unchecked_descendants.len()
@@ -315,7 +345,11 @@ mod tests {
         Mapping {
             plan_path: plan_path.to_string(),
             last_synced_title: title.to_string(),
-            last_synced_state: if checked { NodeState::Done } else { NodeState::Pending },
+            last_synced_state: if checked {
+                NodeState::Done
+            } else {
+                NodeState::Pending
+            },
             last_synced_annotations: annotations.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -340,7 +374,10 @@ mod tests {
     #[test]
     fn detects_leaf_added() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
         write_state(&plan, &[("t-1", mapping("1.1", "First", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert_eq!(deltas.len(), 1);
@@ -362,7 +399,10 @@ mod tests {
         );
         write_state(
             &plan,
-            &[("t-parent", mapping("7.0", "Parent that grew children", false, &[]))],
+            &[(
+                "t-parent",
+                mapping("7.0", "Parent that grew children", false, &[]),
+            )],
         );
         let deltas = reconcile(&plan).unwrap();
         assert!(
@@ -378,10 +418,7 @@ mod tests {
     fn detects_leaf_removed() {
         let dir = scratch_dir();
         // 1.0 has a child so it isn't itself a leaf; only 1.1's absence drives the test.
-        let plan = write_plan(
-            &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.2 Still here\n",
-        );
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.2 Still here\n");
         write_state(
             &plan,
             &[
@@ -409,7 +446,10 @@ mod tests {
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.iter().any(|d| matches!(
             d,
-            Delta::LeafStateChanged { new: NodeState::Done, .. }
+            Delta::LeafStateChanged {
+                new: NodeState::Done,
+                ..
+            }
         )));
     }
 
@@ -421,7 +461,11 @@ mod tests {
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.iter().any(|d| matches!(
             d,
-            Delta::LeafStateChanged { new: NodeState::Pending, old: NodeState::Done, .. }
+            Delta::LeafStateChanged {
+                new: NodeState::Pending,
+                old: NodeState::Done,
+                ..
+            }
         )));
     }
 
@@ -431,8 +475,15 @@ mod tests {
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Renamed task\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Old name", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
-        let found = deltas.iter().find(|d| matches!(d, Delta::LeafTitleChanged { .. }));
-        let Some(Delta::LeafTitleChanged { new_title, old_title, .. }) = found else {
+        let found = deltas
+            .iter()
+            .find(|d| matches!(d, Delta::LeafTitleChanged { .. }));
+        let Some(Delta::LeafTitleChanged {
+            new_title,
+            old_title,
+            ..
+        }) = found
+        else {
             panic!("expected LeafTitleChanged, got {deltas:?}");
         };
         assert_eq!(new_title, "Renamed task");
@@ -451,7 +502,10 @@ mod tests {
         let found = deltas
             .iter()
             .find(|d| matches!(d, Delta::LeafAnnotationChanged { .. }));
-        let Some(Delta::LeafAnnotationChanged { new_annotations, .. }) = found else {
+        let Some(Delta::LeafAnnotationChanged {
+            new_annotations, ..
+        }) = found
+        else {
             panic!("expected LeafAnnotationChanged, got {deltas:?}");
         };
         assert_eq!(new_annotations.len(), 1);
@@ -479,10 +533,28 @@ mod tests {
             ],
         );
         let deltas = reconcile(&plan).unwrap();
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafStateChanged { new: NodeState::Done, .. })));
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafTitleChanged { .. })));
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafAdded { plan_path, .. } if plan_path == "1.3")));
-        assert!(deltas.iter().any(|d| matches!(d, Delta::LeafRemoved { plan_path, .. } if plan_path == "9.9")));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            Delta::LeafStateChanged {
+                new: NodeState::Done,
+                ..
+            }
+        )));
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafTitleChanged { .. }))
+        );
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafAdded { plan_path, .. } if plan_path == "1.3"))
+        );
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafRemoved { plan_path, .. } if plan_path == "9.9"))
+        );
     }
 
     #[test]
@@ -513,9 +585,10 @@ mod tests {
         let inconsistencies: Vec<_> = deltas
             .iter()
             .filter_map(|d| match d {
-                Delta::ParentInconsistent { plan_path, unchecked_descendants } => {
-                    Some((plan_path, unchecked_descendants))
-                }
+                Delta::ParentInconsistent {
+                    plan_path,
+                    unchecked_descendants,
+                } => Some((plan_path, unchecked_descendants)),
                 _ => None,
             })
             .collect();
@@ -539,19 +612,24 @@ mod tests {
             ],
         );
         let deltas = reconcile(&plan).unwrap();
-        assert!(!deltas.iter().any(|d| matches!(d, Delta::ParentInconsistent { .. })));
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::ParentInconsistent { .. }))
+        );
     }
 
     #[test]
     fn unchecked_parent_with_unchecked_child_emits_no_inconsistency() {
         let dir = scratch_dir();
-        let plan = write_plan(
-            &dir,
-            "- [ ] 1.0 Parent\n  - [ ] 1.1 Pending\n",
-        );
+        let plan = write_plan(&dir, "- [ ] 1.0 Parent\n  - [ ] 1.1 Pending\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Pending", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
-        assert!(!deltas.iter().any(|d| matches!(d, Delta::ParentInconsistent { .. })));
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::ParentInconsistent { .. }))
+        );
     }
 
     #[test]
@@ -570,9 +648,10 @@ mod tests {
         let inconsistencies: Vec<_> = deltas
             .iter()
             .filter_map(|d| match d {
-                Delta::ParentInconsistent { plan_path, unchecked_descendants } => {
-                    Some((plan_path.as_str(), unchecked_descendants.clone()))
-                }
+                Delta::ParentInconsistent {
+                    plan_path,
+                    unchecked_descendants,
+                } => Some((plan_path.as_str(), unchecked_descendants.clone())),
                 _ => None,
             })
             .collect();

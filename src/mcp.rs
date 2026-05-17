@@ -53,20 +53,13 @@ impl McpServer {
         let req: JsonRpcRequest = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    Value::Null,
-                    -32700,
-                    format!("parse error: {e}"),
-                );
+                let resp = JsonRpcResponse::error(Value::Null, -32700, format!("parse error: {e}"));
                 return Some(serde_json::to_string(&resp).unwrap_or_default());
             }
         };
-        if req.id.is_none() {
-            // Notification — handle silently. We don't care about the
-            // `notifications/initialized` ack today; ignore everything.
-            return None;
-        }
-        let id = req.id.clone().unwrap();
+        // Notifications (id absent) — handle silently. We don't care about
+        // the `notifications/initialized` ack today; ignore everything.
+        let id = req.id.clone()?;
         let resp = match self.dispatch(&req) {
             Ok(result) => JsonRpcResponse::ok(id, result),
             Err(e) => JsonRpcResponse::error(id, -32603, format!("{e:#}")),
@@ -153,14 +146,10 @@ impl McpServer {
         };
         match parent_id_for(&plan_path) {
             None => plan.phases.push(new_node),
-            Some(pid) => plan
-                .add_child_of(&pid, new_node)
-                .map_err(|e| anyhow!(e))?,
+            Some(pid) => plan.add_child_of(&pid, new_node).map_err(|e| anyhow!(e))?,
         }
         std::fs::write(&self.plan_path, serialize(&plan))?;
-        Ok(tool_text_result(&format!(
-            "added {plan_path} `{subject}`"
-        )))
+        Ok(tool_text_result(&format!("added {plan_path} `{subject}`")))
     }
 
     /// Mark a phase (or any non-leaf) as ready to exit: validate every leaf in
@@ -383,11 +372,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch_plan(contents: &str) -> (PathBuf, McpServer) {
-        let dir = std::env::temp_dir().join(format!(
-            "plan-bridge-mcp-{}-{}",
-            std::process::id(),
-            uniq()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("plan-bridge-mcp-{}-{}", std::process::id(), uniq()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("PLAN.md");
         std::fs::write(&p, contents).unwrap();
@@ -410,7 +396,10 @@ mod tests {
     #[test]
     fn initialize_returns_capabilities() {
         let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
-        let resp = rpc(&s, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}));
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        );
         let result = resp.get("result").expect("ok response");
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
@@ -420,10 +409,19 @@ mod tests {
     #[test]
     fn tools_list_includes_all_tools() {
         let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
-        let resp = rpc(&s, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        );
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        for expected in &["plan_list", "plan_check", "plan_uncheck", "plan_add", "plan_archive"] {
+        for expected in &[
+            "plan_list",
+            "plan_check",
+            "plan_uncheck",
+            "plan_add",
+            "plan_archive",
+        ] {
             assert!(names.contains(expected), "missing {expected}: {names:?}");
         }
     }
@@ -494,7 +492,12 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "plan_add", "arguments": {"plan_path": "1.1", "subject": "x"}}}),
         );
         assert!(resp.get("error").is_some());
-        assert!(resp["error"]["message"].as_str().unwrap().contains("already exists"));
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already exists")
+        );
     }
 
     #[test]
@@ -502,7 +505,12 @@ mod tests {
         let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
         let resp = rpc(&s, json!({"jsonrpc": "2.0", "id": 9, "method": "blarg"}));
         assert!(resp.get("error").is_some());
-        assert!(resp["error"]["message"].as_str().unwrap().contains("unknown method"));
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown method")
+        );
     }
 
     #[test]
@@ -554,7 +562,10 @@ mod tests {
         assert!(resp.get("error").is_none(), "{resp}");
         let after = std::fs::read_to_string(&p).unwrap();
         assert!(!after.contains("1.0 Done"));
-        assert!(after.contains("2.0 Also done"), "untargeted phase should remain");
+        assert!(
+            after.contains("2.0 Also done"),
+            "untargeted phase should remain"
+        );
     }
 
     #[test]
@@ -565,7 +576,12 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1.0"}}}),
         );
         assert!(resp.get("error").is_some());
-        assert!(resp["error"]["message"].as_str().unwrap().contains("not fully resolved"));
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not fully resolved")
+        );
     }
 
     #[test]

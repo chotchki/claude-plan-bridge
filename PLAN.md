@@ -14,7 +14,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 - [x] 8.0 Serialize concurrent writebacks with a file lock — and surface lock failure as a loud hook block, never silent data loss
 - [ ] 10.0 Productionalize the tool — public repo, CI, packaging, README polish
-  - [ ] 10.1 Public GitHub repo + LICENSE; update Cargo.toml `repository` and `license` fields
+  - [x] 10.1 Public GitHub repo + LICENSE; update Cargo.toml `repository` and `license` fields
     - We'll go with an MIT license for this
   - [ ] 10.2 CI builds — GitHub Actions workflow: cargo fmt --check, clippy -D warnings, test, on Linux/macOS/Windows stable
   - [ ] 10.3 README polish — lead with a 30-second pitch and an example transcript; trim implementation detail or fold it lower
