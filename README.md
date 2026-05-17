@@ -8,7 +8,7 @@ Bridge Claude Code's per-session task list and a durable `PLAN.md` checked in wi
 
 Claude Code's task list (`TaskCreate`/`TaskList`) is **per-session** — it resets when you start a new conversation. That's fine for short, self-contained work, but anything spanning a day or a multi-step refactor needs to live somewhere durable. `PLAN.md` is the natural home: a checkbox tree in the repo, reviewed in PRs, version-controlled alongside the code it describes. The plan stays *with the code* — no external task tracker to drift out of sync, no separate login to chase.
 
-Running both means living with two task lists that both want to be the source of truth. Without coordination, Claude ticks tasks but `PLAN.md` grows stale, or you hand-edit `PLAN.md` and Claude can't see what changed. `claude-plan-bridge` installs three Claude Code hooks (`PostToolUse(TaskCreate)`, `PostToolUse(TaskUpdate)`, `UserPromptSubmit`) that keep the two views aligned: new `TaskCreate`s land in `PLAN.md`, completed tasks tick the right boxes, and any edits you make to `PLAN.md` between turns surface as `additionalContext` on your next message. An MCP server mode is also available for clients that prefer typed tool calls over markdown.
+Running both means living with two task lists that both want to be the source of truth. Without coordination, Claude ticks tasks but `PLAN.md` grows stale, or you hand-edit `PLAN.md` and Claude can't see what changed. `claude-plan-bridge` installs four Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `PostToolUse(TaskCreate)`, `PostToolUse(TaskUpdate)`) that keep the two views aligned: new `TaskCreate`s land in `PLAN.md`, completed tasks tick the right boxes, edits you make to `PLAN.md` between turns surface as `additionalContext` on your next message, and a fresh Claude Code session rehydrates the in-session task list from `PLAN.md` automatically. An MCP server mode is also available for clients that prefer typed tool calls over markdown.
 
 **Scope honesty:** designed for small teams (1–5 contributors). Many parallel branches editing `PLAN.md` will produce merge conflicts the bridge doesn't resolve — at that scale you'd want a real ticketing system. Flip side: the bridge imposes a **canonical** `PLAN.md` format (dotted-decimal ids, three-state checkboxes, two-space indent, suffix-positioning for in-between inserts) and the reconcile loop catches format drift early. It's useful even as a strict-format linter for plan documents.
 
@@ -56,6 +56,7 @@ From the next session, the bridge runs invisibly:
 
 | Claude does… | The bridge does… |
 |---|---|
+| Starts a new session | `SessionStart` hook emits a rehydration prompt listing every open `plan_path` so Claude re-`TaskCreate`s them into the fresh task list (writeback re-links to existing PLAN.md lines, no duplicates) |
 | `TaskCreate` (any source) | Appends `- [ ] N.M new task` to `PLAN.md` (under `Inbox.0` if no `plan_path` metadata, else at the requested id) |
 | `TaskUpdate(status="completed")` | Ticks `[ ]` → `[x]` at the mapped line |
 | `TaskUpdate(status="deleted")` | Removes the line (orphaned empty parents stay; you prune by hand) |
@@ -90,6 +91,10 @@ PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` +
 
 - **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set (parent must exist), else append to auto-managed `Inbox.0`. Idempotent on `task_id`.
 - **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work.
+
+### `resume`
+
+SessionStart hook handler. Reads the state file and emits a rehydration prompt listing every still-pending mapping with its live `PLAN.md` title, so Claude re-creates the in-session task list after a restart. Output is `{}` when there's no state file, no mappings, or every mapping points at a resolved/missing node. Re-`TaskCreate`s land via writeback's `plan_path`-keyed dedup — the existing PLAN.md line is reused and the stale `task_id` mapping is replaced in place, no duplicate inserted.
 
 ### `reconcile`
 
@@ -130,7 +135,11 @@ Wire it into your MCP client config — for Claude Code, point an `mcpServers` e
 
 ### `init [--cwd PATH] [--force]`
 
-Scaffold a new project. Creates a starter `PLAN.md`, merges the three hooks into `.claude/settings.json` (preserving any other hooks you've configured), and appends the state file + lock file to `.gitignore`. Idempotent. `--force` overwrites an existing `PLAN.md` with the template.
+Scaffold a new project. Creates a starter `PLAN.md`, merges the four hooks into `.claude/settings.json` (preserving any other hooks you've configured), and appends the state file + lock file to `.gitignore`. Idempotent. `--force` overwrites an existing `PLAN.md` with the template.
+
+### `upgrade-hooks [--cwd PATH]`
+
+Re-merge the latest hook set into an existing `.claude/settings.json` without touching `PLAN.md` or `.gitignore`. Use after upgrading the bridge binary on a project installed with an older version — notably anything predating the `SessionStart` hook (added in v0.1.11). Idempotent: a no-op when the file is already current. The `reconcile` and `writeback` hooks yell a one-line warning on every fire when the `SessionStart` hook is missing, so you'll notice quickly without having to remember to check.
 
 ## State file
 
