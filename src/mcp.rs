@@ -90,6 +90,7 @@ impl McpServer {
             "plan_add" => self.tool_plan_add(&args),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
+            "plan_rename" => self.tool_plan_rename(&args),
             other => Err(anyhow!("unknown tool: {other}")),
         }
     }
@@ -170,6 +171,60 @@ impl McpServer {
             id,
             report.archived_plan_paths.len()
         )))
+    }
+
+    /// Rewrite the title of the node at `plan_path`. Parallels the writeback
+    /// `TaskUpdate(subject=...)` path: if a tracked task points at this
+    /// plan_path, also refresh its `last_synced_title` so reconcile doesn't
+    /// redundantly fire `LeafTitleChanged` on the next prompt.
+    fn tool_plan_rename(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "plan_path")?;
+        let new_subject = require_string(args, "new_subject")?;
+        let state_path = crate::state::default_state_path_for(&self.plan_path);
+
+        crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
+            let text = std::fs::read_to_string(&self.plan_path)
+                .with_context(|| format!("read {}", self.plan_path.display()))?;
+            let mut plan = parse(&text)?;
+
+            let node = plan
+                .find_mut(&id)
+                .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
+
+            if node.title == new_subject {
+                return Ok(tool_text_result(&format!(
+                    "{id} already titled `{new_subject}`"
+                )));
+            }
+
+            node.title = new_subject.clone();
+            std::fs::write(&self.plan_path, serialize(&plan))
+                .with_context(|| format!("write {}", self.plan_path.display()))?;
+
+            // Refresh `last_synced_title` for any tracked task at this path —
+            // typically zero or one entry. State file may not exist yet on a
+            // fresh project; load() returns default in that case.
+            let mut state = crate::state::State::load(&state_path)?;
+            let tracked_tids: Vec<String> = state
+                .mappings
+                .iter()
+                .filter(|(_, m)| m.plan_path == id)
+                .map(|(tid, _)| tid.clone())
+                .collect();
+            let touched = !tracked_tids.is_empty();
+            for tid in &tracked_tids {
+                if let Some(m) = state.mappings.get_mut(tid) {
+                    m.last_synced_title = new_subject.clone();
+                }
+            }
+            if touched {
+                state.save(&state_path)?;
+            }
+
+            Ok(tool_text_result(&format!(
+                "renamed {id} to `{new_subject}`"
+            )))
+        })
     }
 
     fn tool_plan_archive(&self, args: &Value) -> Result<Value> {
@@ -305,6 +360,19 @@ fn tools_list() -> Value {
                         "dry_run": {"type": "boolean"},
                         "date": {"type": "string", "description": "YYYY-MM-DD header"}
                     },
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_rename",
+                "description": "Rewrite the title of the node at `plan_path` to `new_subject`. Refreshes the synced baseline for any tracked task at that path so reconcile is quiet next turn. No-op when the title already matches.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_path": {"type": "string"},
+                        "new_subject": {"type": "string"}
+                    },
+                    "required": ["plan_path", "new_subject"],
                     "additionalProperties": false
                 }
             }
@@ -582,6 +650,88 @@ mod tests {
                 .unwrap()
                 .contains("not fully resolved")
         );
+    }
+
+    #[test]
+    fn plan_rename_leaf_rewrites_title() {
+        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Old title\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.1", "new_subject": "New title"}}}),
+        );
+        assert!(resp.get("error").is_none(), "got error: {resp}");
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains("- [ ] 1.1 New title"), "got:\n{after}");
+        assert!(!after.contains("Old title"));
+    }
+
+    #[test]
+    fn plan_rename_parent_preserves_children() {
+        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Child\n");
+        rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.1", "new_subject": "Renamed parent"}}}),
+        );
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains("- [ ] 1.1 Renamed parent"), "got:\n{after}");
+        assert!(
+            after.contains("- [ ] 1.1.1 Child"),
+            "child preserved:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_rename_identical_title_is_no_op() {
+        let (p, s) = scratch_plan("- [ ] 1.0 Same\n");
+        let before = std::fs::read_to_string(&p).unwrap();
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 32, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.0", "new_subject": "Same"}}}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("already titled"), "got: {text}");
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(before, after, "identical title: no write");
+    }
+
+    #[test]
+    fn plan_rename_unknown_path_errors() {
+        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 33, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "9.9", "new_subject": "doesn't matter"}}}),
+        );
+        assert_eq!(resp["error"]["code"], -32603);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("9.9"));
+    }
+
+    #[test]
+    fn plan_rename_refreshes_tracked_task_baseline() {
+        // Set up: a tracked task at 1.1 with last_synced_title = "Old".
+        // After plan_rename, the state's last_synced_title should be the new
+        // title so reconcile is silent.
+        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Old\n");
+        let state_path = crate::state::default_state_path_for(&p);
+        let mut state = crate::state::State::default();
+        state.record(
+            "t-1",
+            crate::state::Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Old".to_string(),
+                last_synced_state: NodeState::Pending,
+                last_synced_annotations: vec![],
+            },
+        );
+        state.save(&state_path).unwrap();
+
+        rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 34, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.1", "new_subject": "Brand new"}}}),
+        );
+
+        let reloaded = crate::state::State::load(&state_path).unwrap();
+        let m = reloaded.mappings.get("t-1").expect("mapping preserved");
+        assert_eq!(m.last_synced_title, "Brand new", "baseline should refresh");
     }
 
     #[test]

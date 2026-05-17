@@ -101,7 +101,7 @@ Seed the state file with synthetic `baseline:<plan_path>` mappings for every lea
 
 Run an MCP server over stdio that exposes typed plan-mutation tools. Useful when you'd rather drive plans through a structured API than through markdown editing.
 
-Tools: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_add`, `plan_archive`, `plan_phase_exit`. Errors surface as JSON-RPC error responses (`code: -32603`); unknown tools and missing args produce clean errors the client can show.
+Tools: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_add`, `plan_rename`, `plan_archive`, `plan_phase_exit`. Errors surface as JSON-RPC error responses (`code: -32603`); unknown tools and missing args produce clean errors the client can show. `plan_rename(plan_path, new_subject)` mirrors writeback's `TaskUpdate(subject=...)` and refreshes the synced baseline so reconcile is quiet next turn.
 
 Wire it into your MCP client config — for Claude Code, point an `mcpServers` entry at `claude-plan-bridge serve`.
 

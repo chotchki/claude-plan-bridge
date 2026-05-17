@@ -12,5 +12,8 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 13.0 MCP plan_rename tool: typed-API parity with TaskUpdate(subject=...)
-- [ ] 14.0 Release workflow: also create a GitHub Release after `cargo publish` succeeds
+- [x] 13.0 MCP plan_rename tool: typed-API parity with TaskUpdate(subject=...)
+  - [x] 13.1 MCP plan_rename tool: impl + unit tests in src/mcp.rs
+  - [x] 13.2 README: add `plan_rename` row to the MCP tools table
+  - [x] 13.3 Phase 13 exit — cargo test green; README MCP table updated
+- [x] 14.0 Release workflow: also create a GitHub Release after `cargo publish` succeeds
