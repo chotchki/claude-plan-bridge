@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "plan-bridge",
+    name = "claude-plan-bridge",
     version,
     about = "Bridge PLAN.md to Claude Code's TaskCreate"
 )]
@@ -96,13 +96,13 @@ fn main() -> Result<()> {
         }
         Command::Writeback { plan, event } => {
             let output = run_writeback(&plan, event).unwrap_or_else(|e| {
-                plan_bridge::hook::HookOutput::block(format!("plan-bridge: {e:#}"))
+                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
             println!("{}", output.to_json());
         }
         Command::Reconcile { plan } => {
             let output = run_reconcile(&plan).unwrap_or_else(|e| {
-                plan_bridge::hook::HookOutput::block(format!("plan-bridge: {e:#}"))
+                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
             println!("{}", output.to_json());
         }
@@ -112,7 +112,7 @@ fn main() -> Result<()> {
         Command::Baseline { plan } => {
             let report = plan_bridge::baseline::baseline(&plan)?;
             println!(
-                "plan-bridge: baselined {} leaf(s), skipped {} already-mapped",
+                "claude-plan-bridge: baselined {} leaf(s), skipped {} already-mapped",
                 report.baselined.len(),
                 report.already_mapped.len()
             );
@@ -120,24 +120,30 @@ fn main() -> Result<()> {
         Command::Init { cwd, force } => {
             let report = plan_bridge::init::init(&cwd, force)?;
             if report.created_plan {
-                println!("plan-bridge: created {}", cwd.join("PLAN.md").display());
+                println!(
+                    "claude-plan-bridge: created {}",
+                    cwd.join("PLAN.md").display()
+                );
             }
             if report.created_settings {
                 println!(
-                    "plan-bridge: created {}",
+                    "claude-plan-bridge: created {}",
                     cwd.join(".claude/settings.json").display()
                 );
             } else if report.updated_settings {
                 println!(
-                    "plan-bridge: merged hooks into {}",
+                    "claude-plan-bridge: merged hooks into {}",
                     cwd.join(".claude/settings.json").display()
                 );
             }
             if report.created_gitignore {
-                println!("plan-bridge: created {}", cwd.join(".gitignore").display());
+                println!(
+                    "claude-plan-bridge: created {}",
+                    cwd.join(".gitignore").display()
+                );
             } else if report.updated_gitignore {
                 println!(
-                    "plan-bridge: appended state file to {}",
+                    "claude-plan-bridge: appended state file to {}",
                     cwd.join(".gitignore").display()
                 );
             }
@@ -150,7 +156,7 @@ fn main() -> Result<()> {
             let date = date.unwrap_or_else(plan_bridge::today::today_utc);
             let report = plan_bridge::archive::archive(&plan, dry_run, &date)?;
             if report.is_empty() {
-                println!("plan-bridge: nothing to archive");
+                println!("claude-plan-bridge: nothing to archive");
             } else {
                 let verb = if report.dry_run {
                     "would archive"
@@ -158,7 +164,7 @@ fn main() -> Result<()> {
                     "archived"
                 };
                 println!(
-                    "plan-bridge: {verb} {} phase(s): {}",
+                    "claude-plan-bridge: {verb} {} phase(s): {}",
                     report.archived_phase_ids.len(),
                     report.archived_phase_ids.join(", ")
                 );

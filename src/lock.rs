@@ -59,7 +59,7 @@ fn acquire_with_timeout(f: &std::fs::File, timeout: Duration) -> Result<()> {
             Ok(false) => {
                 if start.elapsed() >= timeout {
                     anyhow::bail!(
-                        "plan-bridge: writeback lock busy after {:?} — another writeback is in-flight",
+                        "claude-plan-bridge: writeback lock busy after {:?} — another writeback is in-flight",
                         timeout
                     );
                 }

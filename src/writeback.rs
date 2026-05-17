@@ -45,7 +45,9 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         if let Some(existing) = state.plan_path(&task_id) {
             return Ok(HookOutput::context(
                 &payload.hook_event_name,
-                format!("plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"),
+                format!(
+                    "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
+                ),
             ));
         }
 
@@ -92,7 +94,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         Ok(HookOutput::context(
             &payload.hook_event_name,
             format!(
-                "plan-bridge: {action} `{}` at {} in {}",
+                "claude-plan-bridge: {action} `{}` at {} in {}",
                 input.subject,
                 assigned_path,
                 plan_path.display()
@@ -137,7 +139,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 if node.is_done() {
                     return Ok(HookOutput::context(
                         &payload.hook_event_name,
-                        format!("plan-bridge: {node_path} already complete (no-op)"),
+                        format!("claude-plan-bridge: {node_path} already complete (no-op)"),
                     ));
                 }
                 node.state = NodeState::Done;
@@ -154,7 +156,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                     return Ok(HookOutput::context(
                         &payload.hook_event_name,
                         format!(
-                            "plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
+                            "claude-plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
                         ),
                     ));
                 }
@@ -163,7 +165,9 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                     state.save(&state_path)?;
                     return Ok(HookOutput::context(
                         &payload.hook_event_name,
-                        format!("plan-bridge: {node_path} already removed (mapping cleared)"),
+                        format!(
+                            "claude-plan-bridge: {node_path} already removed (mapping cleared)"
+                        ),
                     ));
                 }
                 state.remove(&input.task_id);
@@ -192,7 +196,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
         Ok(HookOutput::context(
             &payload.hook_event_name,
-            format!("plan-bridge: {action} {node_path}"),
+            format!("claude-plan-bridge: {action} {node_path}"),
         ))
     })
 }
