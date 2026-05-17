@@ -230,7 +230,11 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     } else {
                         preview
                     };
-                    out.push_str(&format!("      - {trimmed}\n"));
+                    // `annotation_to_string` serializes Annotation::Bullet as
+                    // "- text", so the leading "- " is part of the payload.
+                    // Strip it here so we don't render "- - text".
+                    let body = trimmed.strip_prefix("- ").unwrap_or(&trimmed);
+                    out.push_str(&format!("      - {body}\n"));
                 }
             }
             Delta::ParentInconsistent { plan_path, unchecked_descendants } => {
@@ -574,6 +578,37 @@ mod tests {
             .collect();
         // Both 1.0 and 1.1 are inconsistent (each has 1.1.1 as unchecked descendant).
         assert_eq!(inconsistencies.len(), 2);
+    }
+
+    #[test]
+    fn render_annotation_bullet_does_not_double_prefix() {
+        // Regression for 7.6: when a bullet annotation reaches the renderer,
+        // it arrives as "- text" (per annotation_to_string). Without the
+        // strip_prefix, the output would read "      - - text".
+        let deltas = vec![Delta::LeafAnnotationChanged {
+            plan_path: "10.1".to_string(),
+            task_id: "t-13".to_string(),
+            new_annotations: vec!["- We'll go with an MIT license".to_string()],
+        }];
+        let r = render_deltas(&deltas);
+        assert!(
+            r.contains("      - We'll go with an MIT license"),
+            "expected single bullet prefix, got: {r}"
+        );
+        assert!(!r.contains("- - We'll"), "double prefix leaked: {r}");
+    }
+
+    #[test]
+    fn render_annotation_text_keeps_single_prefix() {
+        // Non-bullet annotations (Annotation::Text) don't have a leading "- ";
+        // the renderer should still prepend exactly one "- ".
+        let deltas = vec![Delta::LeafAnnotationChanged {
+            plan_path: "1.1".to_string(),
+            task_id: "t-1".to_string(),
+            new_annotations: vec!["Plain text note".to_string()],
+        }];
+        let r = render_deltas(&deltas);
+        assert!(r.contains("      - Plain text note"), "got: {r}");
     }
 
     #[test]

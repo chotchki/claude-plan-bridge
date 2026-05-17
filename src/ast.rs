@@ -128,13 +128,20 @@ impl Plan {
         None
     }
 
-    /// Append a child to the node with `parent_id`. Returns Err if no such parent.
+    /// Insert a child into the node with `parent_id`, positioned in id-sort
+    /// order against its siblings. Lets `1.2a` land between `1.2` and `1.3`
+    /// without renumbering. Returns Err if no such parent.
     pub fn add_child_of(&mut self, parent_id: &str, child: Node) -> Result<(), String> {
         let parent = self
             .find_mut(parent_id)
             .ok_or_else(|| format!("no node with id {parent_id} in PLAN.md"))?;
-        parent.children.push(child);
+        insert_in_order(&mut parent.children, child);
         Ok(())
+    }
+
+    /// Insert a top-level phase in id-sort order against existing phases.
+    pub fn insert_phase(&mut self, phase: Node) {
+        insert_in_order(&mut self.phases, phase);
     }
 
     /// Remove a node by id from anywhere in the tree. Returns the detached
@@ -201,6 +208,59 @@ fn next_inbox_child_id(inbox: &Node) -> String {
         n += 1;
     }
     format!("Inbox.{n}")
+}
+
+/// Insert `new_node` into `siblings` at the first position whose id sorts
+/// strictly after the new id (per `cmp_ids`). When the new id is the largest,
+/// this is just an append.
+fn insert_in_order(siblings: &mut Vec<Node>, new_node: Node) {
+    let pos = siblings
+        .iter()
+        .position(|n| cmp_ids(&new_node.id, &n.id) == std::cmp::Ordering::Less)
+        .unwrap_or(siblings.len());
+    siblings.insert(pos, new_node);
+}
+
+/// Compare two plan-path ids component-wise. Each `.`-separated component is
+/// split into (numeric prefix, alpha suffix); numeric prefixes compare
+/// numerically (so `1.10` > `1.9`), then suffixes compare lex with empty < any
+/// non-empty suffix (so `1.2` < `1.2a` < `1.2b` < `1.3`). Components with no
+/// numeric prefix fall back to full lex compare. Shorter ids sort before
+/// longer ones sharing the same prefix (so `7.2` < `7.2.1`).
+pub fn cmp_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a_parts: Vec<&str> = a.split('.').collect();
+    let b_parts: Vec<&str> = b.split('.').collect();
+    for (ap, bp) in a_parts.iter().zip(b_parts.iter()) {
+        match cmp_component(ap, bp) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    a_parts.len().cmp(&b_parts.len())
+}
+
+fn cmp_component(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (an, asuf) = split_numeric_prefix(a);
+    let (bn, bsuf) = split_numeric_prefix(b);
+    match (an, bn) {
+        (Some(a), Some(b)) => a.cmp(&b).then_with(|| asuf.cmp(bsuf)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
+}
+
+fn split_numeric_prefix(s: &str) -> (Option<u64>, &str) {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num_str, rest) = s.split_at(end);
+    let num = if num_str.is_empty() {
+        None
+    } else {
+        num_str.parse::<u64>().ok()
+    };
+    (num, rest)
 }
 
 /// Derive the parent id for a canonical plan_path. Returns None for top-level
@@ -326,6 +386,90 @@ mod tests {
         };
         plan.add_child_of("1.0", child).unwrap();
         assert_eq!(plan.find("1.1").unwrap().title, "Task");
+    }
+
+    #[test]
+    fn cmp_ids_numeric_components_use_numeric_compare() {
+        use std::cmp::Ordering;
+        assert_eq!(cmp_ids("1.1", "1.2"), Ordering::Less);
+        // Numeric, not lex: 1.10 > 1.9 (lex would say "1.10" < "1.9").
+        assert_eq!(cmp_ids("1.10", "1.9"), Ordering::Greater);
+        assert_eq!(cmp_ids("1.9", "1.10"), Ordering::Less);
+        assert_eq!(cmp_ids("1.1", "1.1"), Ordering::Equal);
+    }
+
+    #[test]
+    fn cmp_ids_alpha_suffix_orders_between_numerics() {
+        use std::cmp::Ordering;
+        // Empty suffix sorts before any non-empty suffix.
+        assert_eq!(cmp_ids("7.2", "7.2a"), Ordering::Less);
+        assert_eq!(cmp_ids("7.2a", "7.2b"), Ordering::Less);
+        // Suffixed component still less than the next integer component.
+        assert_eq!(cmp_ids("7.2a", "7.3"), Ordering::Less);
+        assert_eq!(cmp_ids("7.2", "7.3"), Ordering::Less);
+    }
+
+    #[test]
+    fn cmp_ids_shorter_id_sorts_first_under_same_prefix() {
+        use std::cmp::Ordering;
+        assert_eq!(cmp_ids("7.2", "7.2.1"), Ordering::Less);
+        assert_eq!(cmp_ids("7.2.1", "7.2"), Ordering::Greater);
+    }
+
+    #[test]
+    fn add_child_of_inserts_in_id_order_not_just_append() {
+        // Regression for 7.7: given children [7.1, 7.2, 7.3], inserting `7.2a`
+        // must land between 7.2 and 7.3, not at the end.
+        let mut plan = parse_for_test(
+            "- [ ] 7.0 Phase\n  - [ ] 7.1 a\n  - [ ] 7.2 b\n  - [ ] 7.3 c\n",
+        );
+        let new_child = Node {
+            id: "7.2a".to_string(),
+            title: "between".to_string(),
+            state: NodeState::Pending,
+            children: vec![],
+            annotations: vec![],
+        };
+        plan.add_child_of("7.0", new_child).unwrap();
+        let parent = plan.find("7.0").unwrap();
+        let ids: Vec<&str> = parent.children.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["7.1", "7.2", "7.2a", "7.3"]);
+    }
+
+    #[test]
+    fn add_child_of_prepends_when_new_id_is_smallest() {
+        let mut plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.5 mid\n  - [ ] 1.9 last\n");
+        let new_child = Node {
+            id: "1.1".to_string(),
+            title: "first".to_string(),
+            state: NodeState::Pending,
+            children: vec![],
+            annotations: vec![],
+        };
+        plan.add_child_of("1.0", new_child).unwrap();
+        let ids: Vec<&str> = plan
+            .find("1.0")
+            .unwrap()
+            .children
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["1.1", "1.5", "1.9"]);
+    }
+
+    #[test]
+    fn insert_phase_orders_top_level_too() {
+        // Symmetry: top-level phases use the same ordering as child insertion.
+        let mut plan = parse_for_test("- [ ] 1.0 a\n- [ ] 3.0 c\n");
+        plan.insert_phase(Node {
+            id: "2.0".to_string(),
+            title: "b".to_string(),
+            state: NodeState::Pending,
+            children: vec![],
+            annotations: vec![],
+        });
+        let ids: Vec<&str> = plan.phases.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["1.0", "2.0", "3.0"]);
     }
 
     #[test]

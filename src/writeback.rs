@@ -216,7 +216,7 @@ fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()>
         annotations: vec![],
     };
     match parent_id_for(plan_path) {
-        None => plan.phases.push(new_node),
+        None => plan.insert_phase(new_node),
         Some(parent_id) => {
             plan.add_child_of(&parent_id, new_node)
                 .map_err(|e| anyhow!(e))
