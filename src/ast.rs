@@ -181,11 +181,21 @@ fn parse_id_with_separator(s: &str) -> Option<(String, String)> {
 /// Depth-first: strip every `Phase N — Title` header annotation from this
 /// node and all descendants. Captures (id, title) into `out` in document
 /// order (descendants first, then this node's own annotations).
+///
+/// If the subtree contains MORE than one Phase-N header, we bail without
+/// stripping anything — promotion would be ambiguous (which header bounds
+/// which top-level phase?). The headers stay as `Annotation::Text` and the
+/// serializer (which respects their original indent for markdown headers)
+/// preserves them verbatim. The user sees no refusal and no demotion; the
+/// only thing they lose is auto-promotion of those particular headers.
 fn strip_and_collect_phase_headers(
     node: &mut Node,
     out: &mut Vec<(String, String)>,
     conversions: &mut Vec<String>,
 ) {
+    if count_phase_headers_in_subtree(node) > 1 {
+        return;
+    }
     for child in &mut node.children {
         strip_and_collect_phase_headers(child, out, conversions);
     }
@@ -201,6 +211,21 @@ fn strip_and_collect_phase_headers(
             true
         }
     });
+}
+
+fn count_phase_headers_in_subtree(node: &Node) -> usize {
+    let here = node
+        .annotations
+        .iter()
+        .filter(
+            |a| matches!(a, Annotation::Text { text, .. } if parse_phase_header(text).is_some()),
+        )
+        .count();
+    here + node
+        .children
+        .iter()
+        .map(count_phase_headers_in_subtree)
+        .sum::<usize>()
 }
 
 fn flush_phase_group(
@@ -302,23 +327,13 @@ impl Plan {
             tagged.push((headers_in_subtree, phase));
         }
 
-        // Third pass: each phase's outgoing header is the LAST one in its
-        // subtree (in document order). Multiple headers in one phase's content
-        // would mean the user nested `### Phase N` markers *inside* a phase —
-        // ambiguous; refuse rather than guess.
+        // Third pass: each phase's outgoing header is the single Phase-N
+        // header that was in its subtree (if any). Multi-header subtrees were
+        // skipped above — their headers stay as narrative annotations.
         let mut new_phases: Vec<Node> = Vec::new();
         let mut pending: Vec<Node> = Vec::new();
         let mut current_header: Option<(String, String)> = None;
         for (mut headers, phase) in tagged {
-            if headers.len() > 1 {
-                return Err(format!(
-                    "phase `{}` has {} `### Phase N — Title` headers within its content — \
-                     ambiguous (which one ends the phase?). Re-organize so each Phase header \
-                     sits between top-level phase blocks, not nested inside one.",
-                    phase.id,
-                    headers.len()
-                ));
-            }
             pending.push(phase);
             if let Some((id, title)) = headers.pop() {
                 flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
@@ -898,6 +913,46 @@ mod tests {
         // No `2.0` or `2/3.0` phase synthesized; 0.1 and 2.1 stay top-level.
         let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
         assert!(ids.contains(&"0.1") && ids.contains(&"2.1"), "got: {ids:?}");
+    }
+
+    #[test]
+    fn standardize_leaves_multi_header_subtree_alone() {
+        // Phase 20 regression — quicksight shakeout v0.1.6. When multiple
+        // `## Phase N — Title` headers attach to the same top-level phase's
+        // subtree (because intervening content didn't pop the parser stack),
+        // standardize should leave them ALL as narrative rather than refuse.
+        let plan = parse_for_test(
+            "- [ ] 0.1 First\n\n## Phase X — Top\n## Phase AA — Other\n## Phase Z — Third\n",
+        );
+        let (out, _) = plan
+            .standardize_to_canonical()
+            .expect("multi-header subtree no longer refuses");
+        // No promotion happened — original phase still top-level, no
+        // synthesized X.0 / AA.0 / Z.0 nodes.
+        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["0.1"],
+            "no promotion; only original phase: {ids:?}"
+        );
+        // All three headers preserved as annotations on the phase.
+        let phase_0_1 = out.phases.iter().find(|n| n.id == "0.1").unwrap();
+        let header_anns: Vec<&str> = phase_0_1
+            .annotations
+            .iter()
+            .filter_map(|a| {
+                if let Annotation::Text { text, .. } = a {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            header_anns.len(),
+            3,
+            "all 3 Phase-N headers preserved as narrative: {header_anns:?}"
+        );
     }
 
     #[test]
