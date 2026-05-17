@@ -205,3 +205,14 @@
   - [x] 18.2 reconcile: skip empty-id leaves in the diff walk (no LeafAdded / LeafTitleChanged etc.)
   - [x] 18.3 README: document that empty-id leaves are untracked; explain `parse` phases vs `baseline` leaves counts
 
+---
+
+## 2026-05-17
+
+- [x] 19.0 Quicksight v0.1.5 shakeout: narrative headers shouldn't block writeback
+  - [x] 19.1 serializer: preserve original indent for markdown-header text annotations (no demotion)
+  - [x] 19.2 parse_phase_header: depth-limit promotion to `##`/`###` only; `####+` always None (narrative)
+  - [x] 19.3 standardize_to_canonical: drop refusal — non-matching headers stay as annotations (narrative)
+  - [x] 19.4 README: document the new header policy (promote `##`/`###` Phase-N shape, narrative otherwise)
+  - [x] 19.5 Phase 19 exit + bump v0.1.6 + tag + install
+
