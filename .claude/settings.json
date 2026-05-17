@@ -20,6 +20,16 @@
         "matcher": "TaskUpdate"
       }
     ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "claude-plan-bridge resume",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

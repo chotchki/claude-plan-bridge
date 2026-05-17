@@ -12,6 +12,15 @@ pub struct InitReport {
     pub created_gitignore: bool,
 }
 
+/// What `upgrade_hooks` did, for the CLI summary.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UpgradeHooksReport {
+    pub created_settings: bool,
+    pub updated_settings: bool,
+    /// True when the merged settings equal the existing ones (no real change).
+    pub no_change: bool,
+}
+
 const STARTER_PLAN: &str = "\
 # PLAN
 
@@ -125,6 +134,12 @@ pub fn init(cwd: &Path, force: bool) -> Result<InitReport> {
 /// Code's hook config shape: `{matcher?, hooks: [{type, command}]}`.
 fn plan_bridge_hooks() -> Value {
     json!({
+        "SessionStart": [{
+            "hooks": [{
+                "type": "command",
+                "command": "claude-plan-bridge resume",
+            }],
+        }],
         "UserPromptSubmit": [{
             "hooks": [{
                 "type": "command",
@@ -148,6 +163,48 @@ fn plan_bridge_hooks() -> Value {
             },
         ],
     })
+}
+
+/// Idempotently merge the latest plan-bridge hooks into an existing
+/// `.claude/settings.json` without touching PLAN.md or `.gitignore`. Use
+/// this on projects that installed with an older bridge version that
+/// didn't ship every hook entry — e.g., projects predating the
+/// SessionStart hook introduced in 25.2.
+pub fn upgrade_hooks(cwd: &Path) -> Result<UpgradeHooksReport> {
+    let mut report = UpgradeHooksReport::default();
+    let claude_dir = cwd.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("create {}", claude_dir.display()))?;
+    let settings_path = claude_dir.join("settings.json");
+    let existed = settings_path.exists();
+    let existing = if existed {
+        let raw = std::fs::read_to_string(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+        if raw.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str::<Value>(&raw)
+                .with_context(|| format!("parse {}", settings_path.display()))?
+        }
+    } else {
+        json!({})
+    };
+    let merged = merge_hooks(existing.clone());
+    if existed && merged == existing {
+        report.no_change = true;
+        return Ok(report);
+    }
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&merged)? + "\n",
+    )
+    .with_context(|| format!("write {}", settings_path.display()))?;
+    if existed {
+        report.updated_settings = true;
+    } else {
+        report.created_settings = true;
+    }
+    Ok(report)
 }
 
 fn merge_hooks(mut existing: Value) -> Value {
@@ -226,11 +283,129 @@ mod tests {
         )
         .unwrap();
         let hooks = settings.get("hooks").unwrap();
+        assert!(hooks.get("SessionStart").is_some(), "SessionStart hook missing");
         assert!(hooks.get("UserPromptSubmit").is_some());
         assert!(hooks.get("PostToolUse").is_some());
 
         let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert!(gi.contains(".claude/plan-bridge-state.json"));
+    }
+
+    #[test]
+    fn fresh_init_includes_session_start_resume_hook() {
+        // Phase 25.2: SessionStart hook must run `claude-plan-bridge resume`
+        // so a fresh Claude Code session rehydrates the task list from the
+        // state file.
+        let dir = scratch_dir();
+        init(&dir, false).unwrap();
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let ss = settings
+            .pointer("/hooks/SessionStart")
+            .and_then(Value::as_array)
+            .expect("SessionStart array");
+        let has_resume = ss.iter().any(|e| {
+            e.get("hooks")
+                .and_then(Value::as_array)
+                .map(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(Value::as_str)
+                            == Some("claude-plan-bridge resume")
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_resume, "SessionStart hook missing resume command");
+    }
+
+    #[test]
+    fn upgrade_hooks_patches_pre_25_2_install() {
+        // Simulate an existing install from before 25.2: settings.json has
+        // the old three hooks but no SessionStart entry. upgrade_hooks
+        // should add it without disturbing the others.
+        let dir = scratch_dir();
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        let pre_25_2 = json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "claude-plan-bridge reconcile"
+                    }]
+                }],
+                "PostToolUse": [
+                    {
+                        "matcher": "TaskCreate",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge writeback --event create"
+                        }]
+                    },
+                    {
+                        "matcher": "TaskUpdate",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge writeback --event update"
+                        }]
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&pre_25_2).unwrap(),
+        )
+        .unwrap();
+
+        let report = upgrade_hooks(&dir).unwrap();
+        assert!(report.updated_settings, "expected updated_settings");
+        assert!(!report.no_change);
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            settings.pointer("/hooks/SessionStart").is_some(),
+            "SessionStart missing after upgrade"
+        );
+        // PostToolUse entries should still be there, with no duplicates.
+        let post = settings
+            .pointer("/hooks/PostToolUse")
+            .and_then(Value::as_array)
+            .unwrap();
+        let plan_bridge_count = post.iter().filter(|e| is_plan_bridge_entry(e)).count();
+        assert_eq!(plan_bridge_count, 2);
+    }
+
+    #[test]
+    fn upgrade_hooks_is_idempotent_no_change_on_second_run() {
+        let dir = scratch_dir();
+        init(&dir, false).unwrap();
+        // PLAN.md and gitignore got created by init; upgrade should be a no-op.
+        let report = upgrade_hooks(&dir).unwrap();
+        assert!(report.no_change, "expected no_change report on already-current settings");
+        assert!(!report.created_settings);
+        assert!(!report.updated_settings);
+    }
+
+    #[test]
+    fn upgrade_hooks_creates_settings_when_missing() {
+        let dir = scratch_dir();
+        let report = upgrade_hooks(&dir).unwrap();
+        assert!(report.created_settings);
+        assert!(!report.no_change);
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(settings.pointer("/hooks/SessionStart").is_some());
+        // upgrade_hooks must NOT scaffold PLAN.md or .gitignore.
+        assert!(!dir.join("PLAN.md").exists(), "upgrade_hooks scaffolded PLAN.md");
+        assert!(!dir.join(".gitignore").exists(), "upgrade_hooks scaffolded .gitignore");
     }
 
     #[test]

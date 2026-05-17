@@ -113,6 +113,15 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Re-merge the latest plan-bridge hooks into an existing
+    /// `.claude/settings.json` without touching PLAN.md or `.gitignore`. Use
+    /// after upgrading the bridge binary on a project that was installed
+    /// with an older version (e.g., one predating the SessionStart hook).
+    /// Idempotent — safe to re-run.
+    UpgradeHooks {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -234,6 +243,23 @@ fn main() -> Result<()> {
             });
             println!("{}", output.to_json());
         }
+        Command::UpgradeHooks { cwd } => {
+            let report = plan_bridge::init::upgrade_hooks(&cwd)?;
+            let settings = cwd.join(".claude/settings.json").display().to_string();
+            if report.no_change {
+                println!("claude-plan-bridge: {settings} already up to date");
+            } else if report.created_settings {
+                println!("claude-plan-bridge: created {settings} with plan-bridge hooks");
+            } else if report.updated_settings {
+                println!("claude-plan-bridge: merged latest plan-bridge hooks into {settings}");
+            }
+            eprintln!();
+            eprintln!("▎ ⚠ Hooks reload only at Claude Code session start. If you're running");
+            eprintln!("▎   `upgrade-hooks` from inside Claude Code, restart the session for the");
+            eprintln!("▎   updated hook set (notably SessionStart, which rehydrates the task");
+            eprintln!("▎   list from PLAN.md) to take effect.");
+            eprintln!();
+        }
         Command::Archive {
             project,
             dry_run,
@@ -346,6 +372,7 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                 if hooks_installed {
                     println!();
                     let want = [
+                        ("SessionStart", "claude-plan-bridge resume"),
                         ("UserPromptSubmit", "claude-plan-bridge reconcile"),
                         (
                             "PostToolUse(TaskCreate)",
