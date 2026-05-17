@@ -153,13 +153,22 @@ Re-merge the latest hook set into an existing `.claude/settings.json` without to
       "plan_path": "1.2.3",
       "last_synced_title": "...",
       "last_synced_state": "pending",
-      "last_synced_annotations": []
+      "last_synced_annotations": [],
+      "created_in_session": "<session-id>"
     }
-  }
+  },
+  "pending_rehydration": ["1.2.3"],
+  "rehydration_announced": 1
 }
 ```
 
 Atomic tmp+rename writes; cross-process advisory lock on the read-modify-write critical section. Gitignored by `init`. A sidecar `.lock` file (also gitignored) hosts the lock.
+
+`pending_rehydration` and `rehydration_announced` are seeded by the `SessionStart` hook when it wipes stale mappings on `source=startup|clear`. While paths sit in `pending_rehydration`, reconcile suppresses duplicate "Added [ ] … (consider TaskCreate)" drift for them — the rehydration prompt already asked Claude to create them. As each matching `TaskCreate` lands, writeback evicts the path. When the set drains to empty, writeback's `PostToolUse` message gains a `rehydration complete: N/N mapped` line so end-to-end success is visible.
+
+`created_in_session` lets writeback distinguish a same-session duplicate `TaskCreate` (refused with a warning) from a legitimate cross-session re-mapping (silently evicts the stale mapping).
+
+Sidecar `.claude/plan-bridge-cleared.jsonl` is an append-only JSON Lines audit log; one row per state mapping the bridge drops during a SessionStart wipe. Timestamps are Unix-epoch seconds — decode with `date -r <n>` or `jq '.epoch_secs | strftime("%FT%TZ")'`. Useful when chasing a "where did my task go?" report.
 
 ## Canonical `PLAN.md` format
 

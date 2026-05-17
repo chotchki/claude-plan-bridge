@@ -1,17 +1,33 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: u32 = 1;
 
-/// Per-project bridge state. Currently just maps Claude's `taskId` to a
-/// dotted `plan_path` so that writeback events can locate the right line in
-/// PLAN.md from a `TaskUpdate` payload alone.
+/// Per-project bridge state. Maps Claude's `taskId` to a dotted `plan_path`
+/// so writeback can locate the right PLAN.md line from a `TaskUpdate` payload
+/// alone. `pending_rehydration` carries the set of plan_paths the SessionStart
+/// hook just emitted to Claude for re-creation — reconcile consults it to
+/// suppress LeafAdded drift in the prompt-window between rehydration emit and
+/// the matching TaskCreates landing. Writeback evicts paths from the set as
+/// each TaskCreate completes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     pub version: u32,
     pub mappings: BTreeMap<String, Mapping>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pending_rehydration: BTreeSet<String>,
+    /// Total plan_paths announced in the last SessionStart rehydration prompt.
+    /// Lets writeback render "rehydration complete: N/N" when the matching
+    /// TaskCreates have drained `pending_rehydration` to empty. Reset to 0
+    /// once the confirmation fires.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rehydration_announced: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Default for State {
@@ -19,6 +35,8 @@ impl Default for State {
         Self {
             version: CURRENT_VERSION,
             mappings: BTreeMap::new(),
+            pending_rehydration: BTreeSet::new(),
+            rehydration_announced: 0,
         }
     }
 }
@@ -38,6 +56,13 @@ pub struct Mapping {
     /// Used by reconcile to surface user-added notes between turns.
     #[serde(default)]
     pub last_synced_annotations: Vec<String>,
+    /// `session_id` (from the HookPayload) of the session that created this
+    /// mapping. Used by writeback_create to refuse same-session duplicate
+    /// TaskCreates for the same plan_path while still allowing cross-session
+    /// re-mapping after restart. Empty string when unknown (pre-26.6 state
+    /// files load as "").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_in_session: String,
 }
 
 impl State {

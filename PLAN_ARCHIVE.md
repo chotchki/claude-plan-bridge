@@ -253,3 +253,18 @@
   - [x] 23.2 README: document TaskCreate-against-existing-line idempotency + the baseline-adopt workflow
   - [x] 23.3 Phase 23 exit + bump v0.1.10 + tag + install
 
+---
+
+## 2026-05-17
+
+- [x] 26.0 Phase 26 — SessionStart rehydration polish
+  - [x] 26.1 Preload TaskCreate schema (or hint ToolSearch) in rehydration prompt
+  - [x] 26.2 Drift detector: skip or special-case [x] completed lines
+  - [x] 26.3 Rehydration prompt: tell model description can mirror subject
+  - [x] 26.4 Rehydration prompt: explicit parallel-batch hint
+  - [x] 26.5 Drift detector: skip plan_paths just rehydrated by SessionStart
+  - [x] 26.6 TaskCreate idempotency: skip duplicate plan_path within session
+  - [x] 26.7 Rehydration confirmation: emit N/N complete on final TaskCreate
+  - [x] 26.8 Audit log for cleared state mappings
+  - [x] 26.9 Phase 26 exit — tests, version bump, archive
+

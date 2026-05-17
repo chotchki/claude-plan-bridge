@@ -723,6 +723,7 @@ mod tests {
                 last_synced_title: "Old".to_string(),
                 last_synced_state: NodeState::Pending,
                 last_synced_annotations: vec![],
+                ..Default::default()
             },
         );
         state.save(&state_path).unwrap();

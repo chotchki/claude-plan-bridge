@@ -131,11 +131,28 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                 }
             }
             None => {
-                deltas.push(Delta::LeafAdded {
-                    plan_path: leaf.id.clone(),
-                    title: leaf.title.clone(),
-                    state: leaf.state,
-                });
+                // Phase 26.2: only emit LeafAdded for Pending leaves. After a
+                // SessionStart wipe (source=startup|clear), every existing
+                // PLAN.md leaf becomes mapping-less, so resolved leaves would
+                // otherwise show up as "Added [x] … (consider TaskCreate)"
+                // noise on every prompt forever — there's nothing to create
+                // for a done/won't-do task, and archive sweeps from PLAN.md
+                // state directly without needing a state mapping.
+                //
+                // Phase 26.5: also suppress LeafAdded when the leaf's
+                // plan_path is in `pending_rehydration`. Resume already
+                // told Claude to TaskCreate it; reconcile re-flagging the
+                // same path as "Added (consider TaskCreate)" on the next
+                // UserPromptSubmit is pure double-nudge.
+                if leaf.state == NodeState::Pending
+                    && !state.pending_rehydration.contains(&leaf.id)
+                {
+                    deltas.push(Delta::LeafAdded {
+                        plan_path: leaf.id.clone(),
+                        title: leaf.title.clone(),
+                        state: leaf.state,
+                    });
+                }
             }
         }
     }
@@ -402,6 +419,7 @@ mod tests {
                 NodeState::Pending
             },
             last_synced_annotations: annotations.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -487,6 +505,71 @@ mod tests {
                 .any(|d| matches!(d, Delta::BaselineOnly { .. })),
             "no advisory when no baseline mappings"
         );
+    }
+
+    #[test]
+    fn skips_leaf_added_for_resolved_leaves() {
+        // Phase 26.2: after SessionStart wipes mappings, every PLAN.md leaf
+        // becomes mapping-less. Pending leaves get covered by the resume
+        // prompt; resolved (Done/WontDo) leaves have no harness action and
+        // would otherwise spam "Added [x] … (consider TaskCreate)" on every
+        // prompt forever. Suppress them at the reconcile layer.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Open\n  - [x] 1.2 Done\n  - [-] 1.3 Skipped\n",
+        );
+        // Empty state simulates post-SessionStart-wipe.
+        write_state(&plan, &[]);
+        let deltas = reconcile(&plan).unwrap();
+        let added: Vec<&String> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                Delta::LeafAdded { plan_path, .. } => Some(plan_path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(added.len(), 1, "expected only 1.1, got: {deltas:?}");
+        assert_eq!(added[0], "1.1");
+    }
+
+    #[test]
+    fn suppresses_leaf_added_for_paths_in_pending_rehydration() {
+        // Phase 26.5: on the prompt immediately after SessionStart wipes
+        // state, every pending PLAN.md leaf is mapping-less. Resume seeded
+        // `pending_rehydration` with those paths to tell Claude to
+        // TaskCreate them — reconcile must NOT also flag them as
+        // "Added [ ] … (consider TaskCreate)". Pending leaves NOT in the
+        // set still emit drift (they're genuinely new since rehydration).
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Already announced\n  - [ ] 1.1 Already announced\n- [ ] 2.0 Brand new\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state
+            .pending_rehydration
+            .insert("1.0".to_string());
+        state
+            .pending_rehydration
+            .insert("1.1".to_string());
+        state.save(&state_path).unwrap();
+
+        let deltas = reconcile(&plan).unwrap();
+        let added: Vec<&String> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                Delta::LeafAdded { plan_path, .. } => Some(plan_path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            added.len(),
+            1,
+            "expected only 2.0 to drift; rehydration set should suppress 1.0/1.1: {deltas:?}"
+        );
+        assert_eq!(added[0], "2.0");
     }
 
     #[test]

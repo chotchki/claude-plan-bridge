@@ -67,6 +67,7 @@ pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
                 last_synced_title: leaf.title.clone(),
                 last_synced_state: leaf.state,
                 last_synced_annotations: annotations_to_strings(&leaf.annotations),
+                ..Default::default()
             },
         );
         report.baselined.push(leaf.id.clone());

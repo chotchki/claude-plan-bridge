@@ -123,6 +123,39 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         // session. Drop those so the state file holds at most one mapping
         // per plan_path. Excludes the incoming task_id (defensive — it
         // shouldn't be in state here since the no-op check above bailed).
+        //
+        // Phase 26.6: distinguish cross-session (safe to evict) from
+        // same-session (a duplicate TaskCreate — bug). A mapping with a
+        // non-empty `created_in_session` matching the incoming payload's
+        // session_id is live in the current session; silently replacing it
+        // would orphan the older harness task from writeback. Refuse and
+        // warn instead — Claude can TaskUpdate(deleted) the duplicate.
+        let same_session_owner: Option<String> = if payload.session_id.is_empty() {
+            None
+        } else {
+            state.mappings.iter().find_map(|(id, m)| {
+                if id.as_str() != task_id
+                    && m.plan_path == assigned_path
+                    && m.created_in_session == payload.session_id
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(owner) = same_session_owner {
+            return Ok(HookOutput::context(
+                &payload.hook_event_name,
+                format!(
+                    "claude-plan-bridge: WARNING refused to map task {task_id} to \
+                     {assigned_path} — task {owner} already owns that plan_path in \
+                     this session. Likely a duplicate TaskCreate; call \
+                     TaskUpdate(taskId={task_id}, status=deleted) to retire it. \
+                     {owner} remains canonical (no PLAN.md change, no state change)."
+                ),
+            ));
+        }
         let stale_ids: Vec<String> = state
             .mappings
             .iter()
@@ -139,14 +172,34 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 last_synced_title: node.title.clone(),
                 last_synced_state: node.state,
                 last_synced_annotations: annotations_to_strings(&node.annotations),
+                created_in_session: payload.session_id.clone(),
             },
             None => Mapping {
                 plan_path: assigned_path.clone(),
                 last_synced_title: input.subject.clone(),
+                created_in_session: payload.session_id.clone(),
                 ..Default::default()
             },
         };
         state.record(&task_id, mapping);
+        // Phase 26.5: a rehydration TaskCreate just landed — evict its
+        // plan_path from the pending set so the next reconcile no longer
+        // suppresses it (and so the set can drain to empty as a signal
+        // the rehydration is complete).
+        let evicted_from_rehydration = state.pending_rehydration.remove(&assigned_path);
+        // Phase 26.7: when this eviction drained the rehydration set, the
+        // bridge can confirm end-to-end success ("N/N mapped"). Reset the
+        // announced count so the signal fires exactly once.
+        let rehydration_total = if evicted_from_rehydration
+            && state.pending_rehydration.is_empty()
+            && state.rehydration_announced > 0
+        {
+            let n = state.rehydration_announced;
+            state.rehydration_announced = 0;
+            Some(n)
+        } else {
+            None
+        };
         state.save(&state_path)?;
 
         let mut message = format!(
@@ -155,6 +208,11 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             assigned_path,
             plan_path.display()
         );
+        if let Some(n) = rehydration_total {
+            message.push_str(&format!(
+                "\nrehydration complete: {n}/{n} mapped — state file synced"
+            ));
+        }
         if !stale_ids.is_empty() {
             message.push_str(&format!(
                 " (replaced stale mapping(s) for task(s) {})",
@@ -281,11 +339,21 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         if state.plan_path(&input.task_id).is_some()
             && let Some(node) = plan.find(&node_path)
         {
+            // Preserve the mapping's `created_in_session` stamp across the
+            // refresh — it's only meaningful to writeback_create's
+            // duplicate-detection logic and shouldn't be reset by an
+            // update event.
+            let created_in_session = state
+                .mappings
+                .get(&input.task_id)
+                .map(|m| m.created_in_session.clone())
+                .unwrap_or_default();
             let updated = Mapping {
                 plan_path: node_path.clone(),
                 last_synced_title: node.title.clone(),
                 last_synced_state: node.state,
                 last_synced_annotations: annotations_to_strings(&node.annotations),
+                created_in_session,
             };
             state.record(&input.task_id, updated);
         }
@@ -559,6 +627,163 @@ mod tests {
         payload.tool_response = serde_json::json!({});
         let err = writeback_create(&payload, &plan).unwrap_err();
         assert!(err.to_string().contains("task id"));
+    }
+
+    #[test]
+    fn taskcreate_refuses_same_session_duplicate_for_same_plan_path() {
+        // Phase 26.6: if a TaskCreate arrives with a plan_path that is
+        // already owned by a different task_id stamped with the *same*
+        // session_id, refuse rather than silently replace. Silently
+        // replacing would orphan the original harness task from writeback
+        // — its future TaskUpdates would no-op.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let mut first = payload_for_create("t-first", "Task", Some("1.1"));
+        first.session_id = "sess-A".to_string();
+        writeback_create(&first, &plan).unwrap();
+
+        let mut dupe = payload_for_create("t-second", "Task", Some("1.1"));
+        dupe.session_id = "sess-A".to_string();
+        let out = writeback_create(&dupe, &plan).unwrap().to_json();
+        assert!(out.contains("WARNING"), "expected refusal warning, got: {out}");
+        assert!(
+            out.contains("t-first") && out.contains("t-second"),
+            "warning should name both tasks, got: {out}"
+        );
+
+        // State unchanged: t-first still owns 1.1, t-second never registered.
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-first"), Some("1.1"));
+        assert_eq!(state.plan_path("t-second"), None);
+        assert_eq!(state.mappings.len(), 1, "got: {:?}", state.mappings);
+    }
+
+    #[test]
+    fn taskcreate_cross_session_eviction_still_works() {
+        // Phase 26.6 contract: only SAME-session duplicates get refused.
+        // A new task_id from a different session is the legitimate cross-
+        // session rehydration path (fallback when SessionStart hook
+        // didn't run / wipe state). It must still evict cleanly so the
+        // bridge stays usable when the hook is missing.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let state_path = default_state_path_for(&plan);
+        let mut prior = State::default();
+        prior.record(
+            "t-old",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Task".to_string(),
+                created_in_session: "sess-PRIOR".to_string(),
+                ..Default::default()
+            },
+        );
+        prior.save(&state_path).unwrap();
+
+        let mut fresh = payload_for_create("t-new", "Task", Some("1.1"));
+        fresh.session_id = "sess-CURRENT".to_string();
+        let out = writeback_create(&fresh, &plan).unwrap().to_json();
+        assert!(
+            out.contains("replaced stale mapping"),
+            "cross-session eviction should announce; got: {out}"
+        );
+        let state = State::load(&state_path).unwrap();
+        assert_eq!(state.plan_path("t-new"), Some("1.1"));
+        assert_eq!(state.plan_path("t-old"), None);
+    }
+
+    #[test]
+    fn taskcreate_evicts_path_from_pending_rehydration() {
+        // Phase 26.5: when SessionStart seeds pending_rehydration with the
+        // open plan_paths it announced, each subsequent TaskCreate must
+        // evict its plan_path from the set. This both unblocks the next
+        // reconcile (the entry no longer suppresses real drift) and lets
+        // the bridge detect rehydration completion when the set drains to
+        // empty (foundation for the 26.7 confirmation signal).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let state_path = default_state_path_for(&plan);
+        let mut seed = State::default();
+        seed.pending_rehydration.insert("1.1".to_string());
+        seed.pending_rehydration.insert("1.2".to_string());
+        seed.save(&state_path).unwrap();
+
+        writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan).unwrap();
+        let after_first = State::load(&state_path).unwrap();
+        assert_eq!(
+            after_first
+                .pending_rehydration
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["1.2".to_string()],
+            "1.1 should have been evicted; got: {:?}",
+            after_first.pending_rehydration
+        );
+
+        writeback_create(&payload_for_create("t-2", "Second", Some("1.2")), &plan).unwrap();
+        let after_second = State::load(&state_path).unwrap();
+        assert!(
+            after_second.pending_rehydration.is_empty(),
+            "set should drain to empty after final TaskCreate; got: {:?}",
+            after_second.pending_rehydration
+        );
+    }
+
+    #[test]
+    fn taskcreate_emits_rehydration_complete_when_final_path_evicted() {
+        // Phase 26.7: the bridge announces N at SessionStart; each
+        // matching TaskCreate evicts one path. When the final eviction
+        // drains the set to empty, writeback's hook message gains a
+        // "rehydration complete: N/N mapped" line so the agent and the
+        // user see the end-to-end success signal. Intermediate
+        // TaskCreates stay quiet.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let state_path = default_state_path_for(&plan);
+        let mut seed = State::default();
+        seed.pending_rehydration.insert("1.1".to_string());
+        seed.pending_rehydration.insert("1.2".to_string());
+        seed.rehydration_announced = 2;
+        seed.save(&state_path).unwrap();
+
+        let out_first = writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan)
+            .unwrap()
+            .to_json();
+        assert!(
+            !out_first.contains("rehydration complete"),
+            "first TaskCreate (1/2) should stay quiet; got: {out_first}"
+        );
+
+        let out_last = writeback_create(&payload_for_create("t-2", "Second", Some("1.2")), &plan)
+            .unwrap()
+            .to_json();
+        assert!(
+            out_last.contains("rehydration complete: 2/2 mapped"),
+            "final TaskCreate should announce completion; got: {out_last}"
+        );
+
+        // Announced count resets so a second drain doesn't double-fire.
+        let after = State::load(&state_path).unwrap();
+        assert_eq!(after.rehydration_announced, 0);
+    }
+
+    #[test]
+    fn taskcreate_outside_rehydration_does_not_emit_completion() {
+        // Genuine new tasks (no pending_rehydration entry for their
+        // plan_path) must not pretend rehydration is complete. The set is
+        // empty before AND after — `evicted` is false, so the signal
+        // suppresses cleanly.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        // No seed; pending_rehydration starts empty.
+        let out = writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan)
+            .unwrap()
+            .to_json();
+        assert!(
+            !out.contains("rehydration complete"),
+            "non-rehydration TaskCreate must not emit completion; got: {out}"
+        );
     }
 
     fn payload_for_update(task_id: &str, status: &str) -> HookPayload {
@@ -884,6 +1109,7 @@ mod tests {
                 last_synced_title: "Task".to_string(),
                 last_synced_state: NodeState::Pending,
                 last_synced_annotations: vec![],
+                ..Default::default()
             },
         );
         state.save(&default_state_path_for(&plan)).unwrap();

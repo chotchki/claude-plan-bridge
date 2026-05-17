@@ -72,12 +72,38 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         // collides with one. Cleanest to wipe and let TaskCreate
         // re-populate. PLAN.md is unaffected (state file is just the
         // harness-id ↔ plan_path indirection).
+        //
+        // Also seed `pending_rehydration` with the open plan_paths we just
+        // told Claude to TaskCreate. Reconcile uses that set to suppress
+        // duplicate "Added [ ] … (consider TaskCreate)" drift on the very
+        // next UserPromptSubmit; writeback evicts paths as their matching
+        // TaskCreates land.
         let dropped = if harness_is_fresh(source) {
+            // Phase 26.8: capture an audit entry per mapping before it's
+            // dropped, so a "where did my task go?" investigation can be
+            // traced to a specific SessionStart event. Best-effort — if
+            // the log write fails we still proceed with the wipe, since
+            // a missing audit row is strictly less harmful than refusing
+            // to rehydrate.
             let stale: Vec<String> = state.mappings.keys().cloned().collect();
+            let entries: Vec<crate::audit::ClearedEntry> = stale
+                .iter()
+                .filter_map(|id| {
+                    state
+                        .mappings
+                        .get(id)
+                        .map(|m| crate::audit::entry_now(source, id, &m.plan_path))
+                })
+                .collect();
+            if let Err(e) = crate::audit::append_cleared(&state_path_for_closure, &entries) {
+                eprintln!("claude-plan-bridge: WARNING audit log append failed: {e:#}");
+            }
             for id in &stale {
                 state.remove(id);
             }
-            if !stale.is_empty() {
+            state.pending_rehydration = open.iter().map(|(p, _)| p.clone()).collect();
+            state.rehydration_announced = state.pending_rehydration.len() as u32;
+            if !stale.is_empty() || !state.pending_rehydration.is_empty() {
                 state.save(&state_path_for_closure)?;
             }
             stale.len()
@@ -90,7 +116,11 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             "claude-plan-bridge: session restart — the harness task list is empty, but \
              PLAN.md has open tasks tracked in the state file. Before responding to the \
              user, call TaskCreate for each item below with `metadata.plan_path = \"<id>\"` \
-             so writeback links the new harness IDs to the existing PLAN.md lines.\n\n",
+             so writeback links the new harness IDs to the existing PLAN.md lines.\n\n\
+             If TaskCreate isn't loaded yet, fetch it first with \
+             `ToolSearch query=\"select:TaskCreate\"`. The bulleted title can be reused \
+             for both `subject` and `description`. All TaskCreate calls are independent — \
+             batch them in a single tool-call block.\n\n",
         );
         for (path, title) in &open {
             out.push_str(&format!("  - {path} — {title}\n"));
@@ -517,6 +547,194 @@ mod tests {
         assert!(
             !msg.contains("Please re-create"),
             "old polite wording survived: {msg}"
+        );
+    }
+
+    #[test]
+    fn prompt_includes_phase_26_polish_hints() {
+        // Phase 26.1/26.3/26.4: the rehydration prompt should tell the model
+        //   - to ToolSearch TaskCreate if it isn't loaded (26.1)
+        //   - that subject/description can share the title (26.3)
+        //   - that calls are independent and should batch (26.4)
+        // Lock in the wording so future edits don't silently drop a hint.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "5",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "").unwrap().unwrap();
+        assert!(
+            msg.contains("ToolSearch") && msg.contains("select:TaskCreate"),
+            "26.1 ToolSearch hint missing: {msg}"
+        );
+        assert!(
+            msg.contains("`subject`") && msg.contains("`description`"),
+            "26.3 subject/description hint missing: {msg}"
+        );
+        assert!(
+            msg.contains("batch") && msg.contains("single tool-call block"),
+            "26.4 parallel-batch hint missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn startup_clear_appends_one_audit_entry_per_dropped_mapping() {
+        // Phase 26.8: every mapping the bridge drops on startup/clear
+        // gets a row in the cleared.jsonl audit log so users can trace
+        // missing tasks back to a specific SessionStart event. Pending
+        // and resolved mappings alike are recorded — the criterion is
+        // "we dropped this from state", not "it was pending".
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n- [x] 2.0 Closed\n");
+        let mut state = State::default();
+        state.record(
+            "alpha",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "beta",
+            Mapping {
+                plan_path: "2.0".to_string(),
+                last_synced_title: "Closed".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let _ = build_resume_message(&plan, "startup").unwrap().unwrap();
+
+        let log_path = crate::audit::cleared_log_path_for(&default_state_path_for(&plan));
+        let log = std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|_| panic!("audit log missing at {}", log_path.display()));
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "expected 2 audit rows, got:\n{log}");
+        let mut task_ids: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                assert_eq!(v["reason"], "startup");
+                v["task_id"].as_str().unwrap().to_string()
+            })
+            .collect();
+        task_ids.sort();
+        assert_eq!(task_ids, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn resume_source_does_not_write_audit_log() {
+        // source=resume/compact preserves state — no clears happen, so
+        // no audit rows should land. Avoids polluting the log with
+        // non-events.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "t-1",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let _ = build_resume_message(&plan, "resume").unwrap().unwrap();
+
+        let log_path = crate::audit::cleared_log_path_for(&default_state_path_for(&plan));
+        assert!(
+            !log_path.exists(),
+            "audit log should not be created on resume-source; found at {}",
+            log_path.display()
+        );
+    }
+
+    #[test]
+    fn startup_seeds_pending_rehydration_with_open_plan_paths() {
+        // Phase 26.5: when resume wipes mappings on a fresh harness, it must
+        // also record the open plan_paths it just told Claude to TaskCreate
+        // so reconcile can suppress duplicate "Added [ ] … (consider
+        // TaskCreate)" drift on the next UserPromptSubmit before those
+        // TaskCreates land.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Open\n  - [ ] 1.1 Open child\n- [x] 2.0 Closed\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "1",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "2",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Open child".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "3",
+            Mapping {
+                plan_path: "2.0".to_string(),
+                last_synced_title: "Closed".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let _msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        let after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(
+            after.pending_rehydration.iter().cloned().collect::<Vec<_>>(),
+            vec!["1.0".to_string(), "1.1".to_string()],
+            "pending_rehydration should hold the open plan_paths only; got: {:?}",
+            after.pending_rehydration
+        );
+    }
+
+    #[test]
+    fn resume_source_does_not_touch_pending_rehydration() {
+        // source=resume/compact preserves the live harness task list, so
+        // there's no rehydration ask — pending_rehydration must stay empty
+        // (and stay empty in the state file).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "42",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let _msg = build_resume_message(&plan, "resume").unwrap().unwrap();
+        let after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert!(
+            after.pending_rehydration.is_empty(),
+            "resume source should not seed pending_rehydration; got: {:?}",
+            after.pending_rehydration
         );
     }
 

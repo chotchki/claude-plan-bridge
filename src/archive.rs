@@ -416,6 +416,7 @@ mod tests {
                 last_synced_title: "Done".to_string(),
                 last_synced_state: NodeState::Done,
                 last_synced_annotations: vec![],
+                ..Default::default()
             },
         );
         state.record(
@@ -425,6 +426,7 @@ mod tests {
                 last_synced_title: "x".to_string(),
                 last_synced_state: NodeState::Pending,
                 last_synced_annotations: vec![],
+                ..Default::default()
             },
         );
         state.save(&state_path).unwrap();
