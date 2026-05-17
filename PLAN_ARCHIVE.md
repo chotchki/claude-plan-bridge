@@ -234,3 +234,13 @@
   - [x] 21.3 writeback: summarize the standardize note instead of dumping every promotion
   - [x] 21.4 Phase 21 exit + bump v0.1.8 + tag + install
 
+---
+
+## 2026-05-17
+
+- [x] 22.0 Bootstrap UX from third-project shakeout: loud init, status command, oriented scaffold
+  - [x] 22.1 init: print unmissable final warning about session reload + recovery path
+  - [x] 22.2 `claude-plan-bridge status` subcommand for diagnostics
+  - [x] 22.3 init scaffold PLAN.md: add orientation comment header for human + agent readers
+  - [x] 22.4 Phase 22 exit + bump v0.1.9 + tag + install
+
