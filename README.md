@@ -99,7 +99,7 @@ Delta variants (each carries `"kind"` plus delta-specific fields when emitted as
 
 ### `plan-bridge archive`
 
-Sweep every fully-complete top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md` (newest section prepended at the top, dated `## YYYY-MM-DD`). State mappings whose `plan_path` lives inside an archived subtree are dropped.
+Sweep every fully-complete top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md` (newest section appended at the bottom, dated `## YYYY-MM-DD`, so history reads chronological-ascending). State mappings whose `plan_path` lives inside an archived subtree are dropped.
 
 ```
 plan-bridge archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]

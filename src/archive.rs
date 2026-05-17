@@ -79,7 +79,7 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     } else {
         String::new()
     };
-    let combined = prepend_archive(&archive_section, &archive_text);
+    let combined = append_archive(&archive_text, &archive_section);
 
     atomic_write(plan_path, &new_plan_text)
         .with_context(|| format!("write {}", plan_path.display()))?;
@@ -144,7 +144,7 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
     } else {
         String::new()
     };
-    let combined = prepend_archive(&archive_section, &archive_text);
+    let combined = append_archive(&archive_text, &archive_section);
 
     atomic_write(plan_path, &new_plan_text)?;
     atomic_write(&archive_path, &combined)?;
@@ -208,11 +208,14 @@ fn build_archive_section(today: &str, archived: &[Node]) -> String {
     out
 }
 
-fn prepend_archive(new_section: &str, existing: &str) -> String {
+/// Append `new_section` to the end of `existing` archive content, separated by
+/// a `---` divider. History reads chronological-ascending: oldest sweep at the
+/// top, newest at the bottom.
+fn append_archive(existing: &str, new_section: &str) -> String {
     if existing.is_empty() {
         return new_section.to_string();
     }
-    let mut combined = new_section.to_string();
+    let mut combined = existing.to_string();
     if !combined.ends_with("\n\n") {
         if combined.ends_with('\n') {
             combined.push('\n');
@@ -221,7 +224,7 @@ fn prepend_archive(new_section: &str, existing: &str) -> String {
         }
     }
     combined.push_str("---\n\n");
-    combined.push_str(existing);
+    combined.push_str(new_section);
     combined
 }
 
@@ -332,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn prepends_to_existing_archive() {
+    fn appends_to_existing_archive() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
         let archive_path = archive_path_for(&plan);
@@ -345,8 +348,30 @@ mod tests {
         let archive_text = std::fs::read_to_string(&archive_path).unwrap();
         let pos_new = archive_text.find("## 2026-05-16").expect("new section present");
         let pos_old = archive_text.find("## 2026-04-01").expect("old section preserved");
-        assert!(pos_new < pos_old, "newest should be on top");
+        assert!(pos_old < pos_new, "newest should be appended at the bottom");
         assert!(archive_text.contains("0.0 Earlier work"));
+        assert!(archive_text.contains("---"), "divider between sections");
+    }
+
+    #[test]
+    fn append_preserves_multiple_existing_sections_in_order() {
+        // Regression for Phase 7 ordering: when PLAN_ARCHIVE.md already has
+        // two dated sections, a new sweep appends *after* both — the original
+        // section order is preserved.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 9.0 Phase\n  - [x] 9.1 Done\n");
+        let archive_path = archive_path_for(&plan);
+        std::fs::write(
+            &archive_path,
+            "## 2026-01-01\n\n- [x] 1.0 First\n\n---\n\n## 2026-03-01\n\n- [x] 2.0 Second\n",
+        )
+        .unwrap();
+        archive(&plan, false, "2026-05-16").unwrap();
+        let archive_text = std::fs::read_to_string(&archive_path).unwrap();
+        let p1 = archive_text.find("## 2026-01-01").expect("section 1 preserved");
+        let p2 = archive_text.find("## 2026-03-01").expect("section 2 preserved");
+        let p3 = archive_text.find("## 2026-05-16").expect("new section present");
+        assert!(p1 < p2 && p2 < p3, "sections must read chronological-ascending; got order {p1},{p2},{p3}");
     }
 
     #[test]
