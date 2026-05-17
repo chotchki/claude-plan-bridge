@@ -222,6 +222,101 @@ mod tests {
     }
 
     #[test]
+    fn full_restart_cycle_rehydrates_cleanly() {
+        // Phase 25.5 e2e: simulate the full restart flow end-to-end.
+        //   1. Prior session: state file has 3 mappings under task_ids 5/6/7
+        //      for plan_paths 1.0/1.1/1.2; PLAN.md has those leaves.
+        //   2. Session restart: in-session task_ids are gone, but state file
+        //      persists. `build_resume_message` produces the rehydration
+        //      prompt.
+        //   3. Claude calls TaskCreate for each suggested mapping with FRESH
+        //      task_ids (101/102/103) — simulated here by invoking
+        //      writeback_create directly with the same plan_paths.
+        //   4. Post-rehydration: state file has only the new task_ids, no
+        //      zombies; PLAN.md is byte-identical.
+        use crate::writeback;
+        use crate::hook::HookPayload;
+
+        let dir = scratch_dir();
+        let plan_text = "- [ ] 1.0 Phase one\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n";
+        let plan = write_plan(&dir, plan_text);
+
+        // (1) Seed prior-session state.
+        let state_path = default_state_path_for(&plan);
+        let mut prior = State::default();
+        for (id, path, title) in [
+            ("5", "1.0", "Phase one"),
+            ("6", "1.1", "First"),
+            ("7", "1.2", "Second"),
+        ] {
+            prior.record(
+                id,
+                Mapping {
+                    plan_path: path.to_string(),
+                    last_synced_title: title.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        prior.save(&state_path).unwrap();
+
+        // (2) Resume produces a prompt listing all three.
+        let msg = build_resume_message(&plan).unwrap().expect("expected msg");
+        for path in ["1.0", "1.1", "1.2"] {
+            assert!(msg.contains(path), "resume missing {path}: {msg}");
+        }
+
+        // (3) Apply rehydration with fresh task_ids (no overlap with prior 5/6/7).
+        let plan_before = std::fs::read_to_string(&plan).unwrap();
+        for (new_id, path, title) in [
+            ("101", "1.0", "Phase one"),
+            ("102", "1.1", "First"),
+            ("103", "1.2", "Second"),
+        ] {
+            let payload = HookPayload {
+                session_id: String::new(),
+                cwd: String::new(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: "TaskCreate".to_string(),
+                tool_input: serde_json::json!({
+                    "subject": title,
+                    "description": title,
+                    "metadata": {"plan_path": path},
+                }),
+                tool_response: serde_json::json!({"id": new_id}),
+            };
+            writeback::writeback_create(&payload, &plan).unwrap();
+        }
+
+        // (4) Final state: only the new task_ids, no zombies, PLAN.md unchanged.
+        let plan_after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(plan_before, plan_after, "PLAN.md mutated during rehydration");
+
+        let final_state = State::load(&state_path).unwrap();
+        assert_eq!(final_state.mappings.len(), 3, "expected exactly 3 mappings, got {:?}", final_state.mappings);
+        assert_eq!(final_state.plan_path("101"), Some("1.0"));
+        assert_eq!(final_state.plan_path("102"), Some("1.1"));
+        assert_eq!(final_state.plan_path("103"), Some("1.2"));
+        for stale in ["5", "6", "7"] {
+            assert_eq!(
+                final_state.plan_path(stale),
+                None,
+                "stale mapping for {stale} survived rehydration"
+            );
+        }
+
+        // Resume on the rehydrated state still produces the same prompt
+        // (state file is current; resume doesn't know whether harness has
+        // already created the tasks). That's expected — subsequent
+        // TaskCreates with same task_ids would no-op via the same-path
+        // branch, so it's safe.
+        let msg2 = build_resume_message(&plan).unwrap().expect("expected msg");
+        for path in ["1.0", "1.1", "1.2"] {
+            assert!(msg2.contains(path), "resume missing {path}: {msg2}");
+        }
+    }
+
+    #[test]
     fn filters_resolved_mappings_keeps_pending() {
         let dir = scratch_dir();
         let plan = write_plan(
