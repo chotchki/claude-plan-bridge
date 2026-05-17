@@ -20,5 +20,6 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [ ] 10.3 README polish — lead with a 30-second pitch and an example transcript; trim implementation detail or fold it lower
   - [ ] 10.4 Publish v0.1.0 to crates.io — fill out Cargo.toml metadata; cargo publish --dry-run; cargo publish
   - [ ] 10.4a Draft a hotchkiss.io entry on plan-bridge — motivation, design, install/usage
+  - [ ] 10.4b Internal-prefix rename: `plan-bridge:` → `claude-plan-bridge:` in source message strings (~10 files)
   - [ ] 10.5 Phase 10 exit — all sub-boxes ticked; GH repo public; CI green on main; v0.1.0 on crates.io; README badges live
 - [ ] 11.0 Update global ~/.claude/CLAUDE.md to point at plan-bridge as the canonical PLAN.md driver

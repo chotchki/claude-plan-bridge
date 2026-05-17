@@ -114,7 +114,7 @@ fn plan_bridge_hooks() -> Value {
         "UserPromptSubmit": [{
             "hooks": [{
                 "type": "command",
-                "command": "plan-bridge reconcile",
+                "command": "claude-plan-bridge reconcile",
             }],
         }],
         "PostToolUse": [
@@ -122,14 +122,14 @@ fn plan_bridge_hooks() -> Value {
                 "matcher": "TaskCreate",
                 "hooks": [{
                     "type": "command",
-                    "command": "plan-bridge writeback --event create",
+                    "command": "claude-plan-bridge writeback --event create",
                 }],
             },
             {
                 "matcher": "TaskUpdate",
                 "hooks": [{
                     "type": "command",
-                    "command": "plan-bridge writeback --event update",
+                    "command": "claude-plan-bridge writeback --event update",
                 }],
             },
         ],
@@ -173,7 +173,7 @@ fn is_plan_bridge_entry(entry: &Value) -> bool {
     hooks.iter().any(|h| {
         h.get("command")
             .and_then(Value::as_str)
-            .is_some_and(|c| c.contains("plan-bridge"))
+            .is_some_and(|c| c.contains("claude-plan-bridge"))
     })
 }
 

@@ -1,7 +1,19 @@
 [package]
-name = "plan-bridge"
+name = "claude-plan-bridge"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Bridges Claude Code's TaskCreate task list to a canonical PLAN.md so the two systems stop fighting. Provides hooks, an MCP server, and an archive sweeper."
+readme = "README.md"
+repository = "https://github.com/chotchki/claude-plan-bridge"
+
+# Keep the library's import path as `plan_bridge` so existing `use
+# plan_bridge::...` in main.rs / tests doesn't churn. The crate published
+# to crates.io is still `claude-plan-bridge`; this only affects the Rust
+# import path within the same package.
+[lib]
+name = "plan_bridge"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.102"

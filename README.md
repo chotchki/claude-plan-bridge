@@ -1,4 +1,4 @@
-# plan-bridge
+# claude-plan-bridge
 
 Bridges Claude Code's `TaskCreate` task list to a canonical `PLAN.md` so the two systems stop fighting. Design rationale and acceptance criteria live in [SPEC.md](./SPEC.md); the implementation sequence in [PLAN.md](./PLAN.md).
 
@@ -19,37 +19,37 @@ cargo test
 cargo install --path .
 ```
 
-This produces a `plan-bridge` binary in `~/.cargo/bin`. Make sure that's on your `PATH` (`echo $PATH | grep -q ~/.cargo/bin`).
+This produces a `claude-plan-bridge` binary in `~/.cargo/bin`. Make sure that's on your `PATH` (`echo $PATH | grep -q ~/.cargo/bin`).
 
 ## Set up in a project
 
 ```
 cd your-project/
-plan-bridge init
+claude-plan-bridge init
 ```
 
 This:
 - Scaffolds a starter `PLAN.md` if you don't have one.
-- Adds `plan-bridge` hooks to `.claude/settings.json` for `UserPromptSubmit`, `PostToolUse(TaskCreate)`, and `PostToolUse(TaskUpdate)`.
+- Adds `claude-plan-bridge` hooks to `.claude/settings.json` for `UserPromptSubmit`, `PostToolUse(TaskCreate)`, and `PostToolUse(TaskUpdate)`.
 - Adds `.claude/plan-bridge-state.json` to `.gitignore`.
 
 Restart Claude Code so it picks up the new `settings.json`. From the next session, `TaskCreate` / `TaskUpdate` calls flow into `PLAN.md`, and any edits you make to `PLAN.md` between turns surface as `additionalContext` on your next message.
 
-### `plan-bridge parse`
+### `claude-plan-bridge parse`
 
 Parse a `PLAN.md` and emit its AST as pretty-printed JSON on stdout.
 
 ```
-plan-bridge parse [--plan PATH]    # PATH defaults to ./PLAN.md
+claude-plan-bridge parse [--plan PATH]    # PATH defaults to ./PLAN.md
 ```
 
-### `plan-bridge writeback`
+### `claude-plan-bridge writeback`
 
 Apply a Claude Code `PostToolUse` hook event to `PLAN.md`. Reads the hook payload as JSON on stdin; writes any updates to `PLAN.md` and the project state file (`.claude/plan-bridge-state.json`); emits a hook response JSON on stdout.
 
 ```
-plan-bridge writeback --event create [--plan PATH]
-plan-bridge writeback --event update [--plan PATH]
+claude-plan-bridge writeback --event create [--plan PATH]
+claude-plan-bridge writeback --event update [--plan PATH]
 ```
 
 **create** handles `PostToolUse(TaskCreate)`:
@@ -63,12 +63,12 @@ plan-bridge writeback --event update [--plan PATH]
 - `status: pending | in_progress` (or no status) is a no-op — those states live in `TaskCreate` only.
 - Silent no-op when the `taskId` isn't in our state map (the task wasn't created via the bridge).
 
-### `plan-bridge reconcile`
+### `claude-plan-bridge reconcile`
 
 Diff `PLAN.md` against the bridge's recorded `last_synced_*` baseline and emit any drift on stdout as a hook response. Intended for the `UserPromptSubmit` hook — runs every time the user submits a message so external edits to `PLAN.md` between turns surface in Claude's context.
 
 ```
-plan-bridge reconcile [--plan PATH]
+claude-plan-bridge reconcile [--plan PATH]
 ```
 
 Output JSON shape:
@@ -97,12 +97,12 @@ Delta variants (each carries `"kind"` plus delta-specific fields when emitted as
 | `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read the rendered text; act if needed |
 | `parent_inconsistent` | A non-leaf node is `[x]` but its subtree still has unchecked descendants | Either untick the parent, or tick the unfinished children. Archive will refuse the phase otherwise. |
 
-### `plan-bridge archive`
+### `claude-plan-bridge archive`
 
 Sweep every fully-complete top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md` (newest section appended at the bottom, dated `## YYYY-MM-DD`, so history reads chronological-ascending). State mappings whose `plan_path` lives inside an archived subtree are dropped.
 
 ```
-plan-bridge archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]
+claude-plan-bridge archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]
 ```
 
 - A phase is "fully complete" when every leaf in its subtree is `[x]`. The phase's own checkbox state is irrelevant — children determine.
@@ -110,15 +110,15 @@ plan-bridge archive [--plan PATH] [--dry-run] [--date YYYY-MM-DD]
 - Both files are written atomically (tmp + rename).
 - `--dry-run` lists what would be archived without touching the filesystem.
 
-### `plan-bridge serve` (MCP)
+### `claude-plan-bridge serve` (MCP)
 
 Run an MCP server over stdio. Lets a Claude Code session (or any MCP client) drive PLAN.md through typed tools instead of going through the hook layer.
 
 ```
-plan-bridge serve [--plan PATH]
+claude-plan-bridge serve [--plan PATH]
 ```
 
-Wire it into your MCP client config (the exact shape depends on the client; for Claude Code, point an `mcpServers` entry at `plan-bridge serve`).
+Wire it into your MCP client config (the exact shape depends on the client; for Claude Code, point an `mcpServers` entry at `claude-plan-bridge serve`).
 
 #### Tools
 

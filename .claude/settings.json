@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "plan-bridge writeback --event create",
+            "command": "claude-plan-bridge writeback --event create",
             "type": "command"
           }
         ],
@@ -13,7 +13,7 @@
       {
         "hooks": [
           {
-            "command": "plan-bridge writeback --event update",
+            "command": "claude-plan-bridge writeback --event update",
             "type": "command"
           }
         ],
@@ -24,7 +24,7 @@
       {
         "hooks": [
           {
-            "command": "plan-bridge reconcile",
+            "command": "claude-plan-bridge reconcile",
             "type": "command"
           }
         ]
