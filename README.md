@@ -1,6 +1,6 @@
 # claude-plan-bridge
 
-[![CI](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml) [![Crates.io](https://img.shields.io/crates/v/claude-plan-bridge.svg)](https://crates.io/crates/claude-plan-bridge) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Bridge Claude Code's per-session task list and a durable `PLAN.md` checked in with the code.
 
