@@ -17,6 +17,11 @@ pub struct HookPayload {
     pub tool_input: serde_json::Value,
     #[serde(default)]
     pub tool_response: serde_json::Value,
+    /// SessionStart-only: one of `startup`, `resume`, `clear`, `compact`.
+    /// `startup`/`clear` guarantee an empty harness task list — resume uses
+    /// this to drop stale pending mappings before rehydrating.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// Typed view of `TaskCreate`'s `tool_input`.

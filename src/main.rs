@@ -473,7 +473,22 @@ fn maybe_warn_missing_session_start(
 }
 
 fn run_resume(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
-    match plan_bridge::resume::build_resume_message(plan)? {
+    // SessionStart payload arrives on stdin with a `source` field
+    // (startup/resume/clear/compact). On startup/clear the harness task list
+    // is provably empty, so resume drops stale pending mappings before
+    // emitting the prompt — avoiding harness-ID collisions when Claude's
+    // fresh TaskCreates reuse low IDs. Stdin is best-effort: a missing or
+    // unreadable payload is treated as an unknown source (no clearing).
+    let source = {
+        let mut buf = String::new();
+        match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+            Ok(_) if !buf.trim().is_empty() => serde_json::from_str::<plan_bridge::hook::HookPayload>(&buf)
+                .map(|p| p.source)
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    match plan_bridge::resume::build_resume_message(plan, &source)? {
         Some(msg) => Ok(plan_bridge::hook::HookOutput::context(
             "SessionStart",
             msg,

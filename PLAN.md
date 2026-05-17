@@ -25,4 +25,8 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 25.4 Reconcile/writeback warn loudly when SessionStart hook is missing
   - [x] 25.5 e2e test: full restart cycle
   - [x] 25.6 README: document session-restart behavior
+  - [x] 25.6a Drop stale pending mappings on resume to prevent harness-ID collisions
+  - [x] 25.6b Tighten resume prompt: imperative + before-responding framing
+  - [x] 25.6c Broaden resume clear: drop all mappings on startup/clear, not just pending
+  - [x] 25.6d TaskUpdate(deleted) becomes unlink-only — never mutate PLAN.md
   - [ ] 25.7 Phase 25 exit — tests, version bump, archive

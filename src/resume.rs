@@ -5,63 +5,111 @@ use crate::ast::{NodeState, cmp_ids};
 use crate::parser;
 use crate::state::{State, default_state_path_for};
 
+/// SessionStart `source` values that guarantee the harness task list starts
+/// empty. On these, any pending mapping in the state file is stale by
+/// definition (the harness IDs it references no longer exist), so resume
+/// can safely drop them before rehydrating — preventing harness-ID
+/// collisions when Claude's fresh TaskCreates reuse low IDs starting from 1.
+fn harness_is_fresh(source: &str) -> bool {
+    matches!(source, "startup" | "clear")
+}
+
 /// Build the SessionStart additionalContext that drives Claude to rehydrate
 /// the in-session task list from the persisted state file. Returns `None`
 /// when there's nothing to rehydrate (no state file, no mappings, or every
 /// mapping points at a resolved/missing node).
 ///
+/// When `source` is `startup` or `clear` (harness task list provably empty),
+/// also drops every pending-state mapping from the state file before
+/// returning the prompt. The prompt then notes the drop so the reader
+/// doesn't mistake the lack-of-conflict-warnings for a writeback bug.
+///
 /// Contract: emit one bullet per open mapping with its `plan_path` and the
 /// live PLAN.md title. Claude is expected to `TaskCreate` each with the
-/// same `metadata.plan_path`; writeback's plan_path-dedup logic (Phase 25.3)
-/// replaces the stale `task_id` mapping in place — no PLAN.md churn.
-pub fn build_resume_message(plan_path: &Path) -> Result<Option<String>> {
+/// same `metadata.plan_path`; with stale mappings pre-cleared, writeback
+/// links the fresh harness IDs without collision.
+pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<String>> {
     let state_path = default_state_path_for(plan_path);
     if !state_path.exists() {
         return Ok(None);
     }
-    let state =
-        State::load(&state_path).with_context(|| format!("load {}", state_path.display()))?;
-    if state.mappings.is_empty() {
-        return Ok(None);
-    }
-    // PLAN.md is the source of truth for live node state; `last_synced_state`
-    // can lag if reconcile hasn't run since the last external edit.
-    let plan_text = std::fs::read_to_string(plan_path)
-        .with_context(|| format!("read {}", plan_path.display()))?;
-    let plan = parser::parse(&plan_text)
-        .with_context(|| format!("parse {}", plan_path.display()))?;
 
-    let mut open: Vec<(String, String)> = state
-        .mappings
-        .values()
-        .filter_map(|m| {
-            let node = plan.find(&m.plan_path)?;
-            if node.state != NodeState::Pending {
-                return None;
+    let state_path_for_closure = state_path.clone();
+    crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, move || {
+        let mut state = State::load(&state_path_for_closure)
+            .with_context(|| format!("load {}", state_path_for_closure.display()))?;
+        if state.mappings.is_empty() {
+            return Ok(None);
+        }
+        // PLAN.md is the source of truth for live node state; `last_synced_state`
+        // can lag if reconcile hasn't run since the last external edit.
+        let plan_text = std::fs::read_to_string(plan_path)
+            .with_context(|| format!("read {}", plan_path.display()))?;
+        let plan = parser::parse(&plan_text)
+            .with_context(|| format!("parse {}", plan_path.display()))?;
+
+        let mut open: Vec<(String, String)> = state
+            .mappings
+            .values()
+            .filter_map(|m| {
+                let node = plan.find(&m.plan_path)?;
+                if node.state != NodeState::Pending {
+                    return None;
+                }
+                Some((m.plan_path.clone(), node.title.clone()))
+            })
+            .collect();
+        if open.is_empty() {
+            return Ok(None);
+        }
+        open.sort_by(|a, b| cmp_ids(&a.0, &b.0));
+
+        // Drop ALL stale mappings when the harness is provably fresh.
+        // Every existing mapping references a task_id from a prior session
+        // that no longer exists in the harness — pending mappings would
+        // collide with rehydration TaskCreates, and done mappings are a
+        // latent destruction risk if a future TaskUpdate(*, deleted)
+        // collides with one. Cleanest to wipe and let TaskCreate
+        // re-populate. PLAN.md is unaffected (state file is just the
+        // harness-id ↔ plan_path indirection).
+        let dropped = if harness_is_fresh(source) {
+            let stale: Vec<String> = state.mappings.keys().cloned().collect();
+            for id in &stale {
+                state.remove(id);
             }
-            Some((m.plan_path.clone(), node.title.clone()))
-        })
-        .collect();
-    if open.is_empty() {
-        return Ok(None);
-    }
-    open.sort_by(|a, b| cmp_ids(&a.0, &b.0));
+            if !stale.is_empty() {
+                state.save(&state_path_for_closure)?;
+            }
+            stale.len()
+        } else {
+            0
+        };
 
-    let mut out = String::new();
-    out.push_str(
-        "claude-plan-bridge: session restart — the harness task list is empty, but PLAN.md \
-         has open tasks tracked in the state file. Please re-create them with TaskCreate using \
-         the original `plan_path` metadata so writeback can re-link cleanly.\n\n",
-    );
-    for (path, title) in &open {
-        out.push_str(&format!("  - {path} — {title}\n"));
-    }
-    out.push_str(
-        "\nPass `metadata.plan_path = \"<id>\"` on each TaskCreate. Writeback will detect \
-         the existing PLAN.md line and update the state mapping in place (no PLAN.md \
-         insertion).",
-    );
-    Ok(Some(out))
+        let mut out = String::new();
+        out.push_str(
+            "claude-plan-bridge: session restart — the harness task list is empty, but \
+             PLAN.md has open tasks tracked in the state file. Before responding to the \
+             user, call TaskCreate for each item below with `metadata.plan_path = \"<id>\"` \
+             so writeback links the new harness IDs to the existing PLAN.md lines.\n\n",
+        );
+        for (path, title) in &open {
+            out.push_str(&format!("  - {path} — {title}\n"));
+        }
+        if dropped > 0 {
+            out.push_str(&format!(
+                "\nNote: the bridge cleared {dropped} stale mapping(s) from the state \
+                 file before emitting this prompt (source=`{source}` guarantees a fresh \
+                 harness). Your TaskCreates will land cleanly — no `Refusing to silently \
+                 move` warnings expected.",
+            ));
+        } else {
+            out.push_str(
+                "\nWriteback will detect the existing PLAN.md line and update the state \
+                 mapping in place (no PLAN.md insertion).",
+            );
+        }
+        Ok(Some(out))
+    })
 }
 
 #[cfg(test)]
@@ -102,7 +150,7 @@ mod tests {
     fn returns_none_when_state_file_missing() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
-        assert!(build_resume_message(&plan).unwrap().is_none());
+        assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
 
     #[test]
@@ -110,7 +158,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
         write_state(&plan, &State::default());
-        assert!(build_resume_message(&plan).unwrap().is_none());
+        assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
 
     #[test]
@@ -135,7 +183,7 @@ mod tests {
             },
         );
         write_state(&plan, &state);
-        assert!(build_resume_message(&plan).unwrap().is_none());
+        assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
 
     #[test]
@@ -152,7 +200,7 @@ mod tests {
             },
         );
         write_state(&plan, &state);
-        assert!(build_resume_message(&plan).unwrap().is_none());
+        assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
 
     #[test]
@@ -190,7 +238,7 @@ mod tests {
         );
         write_state(&plan, &state);
 
-        let msg = build_resume_message(&plan).unwrap().unwrap();
+        let msg = build_resume_message(&plan, "").unwrap().unwrap();
         let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
         assert_eq!(bullets.len(), 3);
         assert!(bullets[0].contains("1.0 — First phase"), "got: {bullets:?}");
@@ -216,7 +264,7 @@ mod tests {
         );
         write_state(&plan, &state);
 
-        let msg = build_resume_message(&plan).unwrap().unwrap();
+        let msg = build_resume_message(&plan, "").unwrap().unwrap();
         assert!(msg.contains("Updated title"), "got: {msg}");
         assert!(!msg.contains("Stale title"), "got: {msg}");
     }
@@ -261,7 +309,7 @@ mod tests {
         prior.save(&state_path).unwrap();
 
         // (2) Resume produces a prompt listing all three.
-        let msg = build_resume_message(&plan).unwrap().expect("expected msg");
+        let msg = build_resume_message(&plan, "").unwrap().expect("expected msg");
         for path in ["1.0", "1.1", "1.2"] {
             assert!(msg.contains(path), "resume missing {path}: {msg}");
         }
@@ -284,6 +332,7 @@ mod tests {
                     "metadata": {"plan_path": path},
                 }),
                 tool_response: serde_json::json!({"id": new_id}),
+                source: String::new(),
             };
             writeback::writeback_create(&payload, &plan).unwrap();
         }
@@ -310,10 +359,165 @@ mod tests {
         // already created the tasks). That's expected — subsequent
         // TaskCreates with same task_ids would no-op via the same-path
         // branch, so it's safe.
-        let msg2 = build_resume_message(&plan).unwrap().expect("expected msg");
+        let msg2 = build_resume_message(&plan, "").unwrap().expect("expected msg");
         for path in ["1.0", "1.1", "1.2"] {
             assert!(msg2.contains(path), "resume missing {path}: {msg2}");
         }
+    }
+
+    #[test]
+    fn startup_source_drops_all_mappings_and_notes_in_prompt() {
+        // Phase 25.6a: on source=startup the harness task list is provably
+        // empty, so every existing mapping references a dead task_id —
+        // pending (collision risk on TaskCreate) AND done (destruction
+        // risk on TaskUpdate(deleted) before B′ landed; still wasteful
+        // afterwards). Wipe the lot; TaskCreate repopulates from the
+        // rehydration prompt. PLAN.md is untouched.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Open\n  - [ ] 1.1 Open child\n- [x] 2.0 Closed\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "1",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "2",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Open child".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "3",
+            Mapping {
+                plan_path: "2.0".to_string(),
+                last_synced_title: "Closed".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        // Prompt enumerates open items.
+        assert!(msg.contains("1.0 — Open"), "got: {msg}");
+        assert!(msg.contains("1.1 — Open child"), "got: {msg}");
+        // Prompt notes the drop so the reader knows what to expect.
+        assert!(msg.contains("cleared 3 stale mapping"), "got: {msg}");
+        assert!(msg.contains("source=`startup`"), "got: {msg}");
+
+        // State file: every mapping wiped (pending and done alike).
+        let after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert!(
+            after.mappings.is_empty(),
+            "state should be empty after startup clear, got: {:?}",
+            after.mappings
+        );
+    }
+
+    #[test]
+    fn clear_source_also_drops_all_mappings() {
+        // /clear empties the harness task list the same way startup does.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n- [x] 2.0 Closed\n");
+        let mut state = State::default();
+        state.record(
+            "7",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "8",
+            Mapping {
+                plan_path: "2.0".to_string(),
+                last_synced_title: "Closed".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "clear").unwrap().unwrap();
+        assert!(msg.contains("cleared 2 stale mapping"), "got: {msg}");
+        let after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert!(after.mappings.is_empty(), "got: {:?}", after.mappings);
+    }
+
+    #[test]
+    fn resume_and_compact_sources_preserve_pending_mappings() {
+        // On source=resume or source=compact the harness preserves its task
+        // list, so the existing mappings are still live. Dropping them would
+        // silently break TaskUpdate writeback for tasks still alive in the
+        // harness. The prompt is still emitted (Claude can dedup against its
+        // live TaskList) but the state file is not mutated.
+        for source in ["resume", "compact", "" /* unknown */] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                !msg.contains("cleared"),
+                "source={source} should NOT clear; got: {msg}"
+            );
+            let after = State::load(&default_state_path_for(&plan)).unwrap();
+            assert_eq!(
+                after.plan_path("42"),
+                Some("1.0"),
+                "source={source} mutated state file"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_uses_imperative_before_responding_framing() {
+        // Phase 25.6b: the prompt arrives as additionalContext without a
+        // user prompt. "Please re-create them" reads as optional FYI; the
+        // imperative "Before responding, call TaskCreate" reads as a
+        // precondition. Lock in the tightened wording so future edits don't
+        // regress it.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "5",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "").unwrap().unwrap();
+        assert!(
+            msg.contains("Before responding"),
+            "imperative framing missing: {msg}"
+        );
+        assert!(
+            !msg.contains("Please re-create"),
+            "old polite wording survived: {msg}"
+        );
     }
 
     #[test]
@@ -336,7 +540,7 @@ mod tests {
         }
         write_state(&plan, &state);
 
-        let msg = build_resume_message(&plan).unwrap().unwrap();
+        let msg = build_resume_message(&plan, "").unwrap().unwrap();
         assert!(msg.contains("1.0 — Open"), "got: {msg}");
         assert!(!msg.contains("Closed"), "got: {msg}");
         assert!(!msg.contains("Skipped"), "got: {msg}");

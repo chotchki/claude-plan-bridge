@@ -244,32 +244,23 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 }
             }
             Some("deleted") => {
-                let is_wont_do = plan
-                    .find(&node_path)
-                    .map(|n| n.state == NodeState::WontDo)
-                    .unwrap_or(false);
-                if is_wont_do {
-                    state.remove(&input.task_id);
-                    state.save(&state_path)?;
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!(
-                            "claude-plan-bridge: {node_path} is [-] in PLAN.md; mapping cleared, line preserved"
-                        ),
-                    ));
-                }
-                if plan.remove(&node_path).is_none() {
-                    state.remove(&input.task_id);
-                    state.save(&state_path)?;
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!(
-                            "claude-plan-bridge: {node_path} already removed (mapping cleared)"
-                        ),
-                    ));
-                }
+                // TaskUpdate(deleted) NEVER mutates PLAN.md content. The only
+                // path content leaves PLAN.md is archive, after a phase
+                // fully closes. Treating delete as "just unlink the
+                // harness mapping" avoids destructive blast radius from
+                // stale cross-session mappings: a fresh harness reusing a
+                // low task_id could otherwise delete a phase root and its
+                // entire subtree. Hand-edit PLAN.md or run archive when
+                // you actually want to remove a line.
                 state.remove(&input.task_id);
-                changes.push("removed".to_string());
+                state.save(&state_path)?;
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: unlinked task {} from {node_path}; PLAN.md preserved (delete via archive or hand-edit)",
+                        input.task_id
+                    ),
+                ));
             }
             _ => {} // pending / in_progress / None — subject-only path
         }
@@ -390,6 +381,7 @@ mod tests {
             tool_name: "TaskCreate".to_string(),
             tool_input,
             tool_response: serde_json::json!({"id": task_id}),
+            source: String::new(),
         }
     }
 
@@ -577,6 +569,7 @@ mod tests {
             tool_name: "TaskUpdate".to_string(),
             tool_input: serde_json::json!({"taskId": task_id, "status": status}),
             tool_response: serde_json::json!({}),
+            source: String::new(),
         }
     }
 
@@ -603,18 +596,48 @@ mod tests {
     }
 
     #[test]
-    fn update_deleted_removes_line_and_mapping() {
+    fn update_deleted_unlinks_mapping_but_preserves_plan_md() {
+        // Archive is the only legitimate path for content to leave PLAN.md.
+        // TaskUpdate(deleted) is now strictly an unlink — drops the state
+        // mapping without mutating PLAN.md. This eliminates the destruction
+        // class where a stale cross-session mapping could turn a routine
+        // delete into a phase-subtree wipe.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
+        let before = std::fs::read_to_string(&plan).unwrap();
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
-        let contents = std::fs::read_to_string(&plan).unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(before, after, "PLAN.md must be byte-identical after delete");
         assert!(
-            !contents.contains("1.1 Task"),
-            "should be gone:\n{contents}"
+            after.contains("- [ ] 1.1 Task"),
+            "leaf line should survive: {after}"
         );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
-        assert_eq!(state.plan_path("t-1"), None);
+        assert_eq!(state.plan_path("t-1"), None, "mapping should be cleared");
+    }
+
+    #[test]
+    fn update_deleted_on_phase_root_does_not_destroy_subtree() {
+        // Regression guard for the destruction class: a stale cross-session
+        // mapping pointing at a phase root would previously cause
+        // TaskUpdate(deleted) to wipe the phase and every subtask under it.
+        // Now delete is unlink-only; the subtree must survive.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Child A\n  - [ ] 1.2 Child B\n",
+        );
+        // Bridge tracks the phase root (simulates a stale mapping that
+        // points at a parent node — exactly the shape that caused the
+        // Phase 24 wipe during the 25.6a test cycle).
+        writeback_create(&payload_for_create("t-phase", "Phase", Some("1.0")), &plan).unwrap();
+        let before = std::fs::read_to_string(&plan).unwrap();
+        writeback_update(&payload_for_update("t-phase", "deleted"), &plan).unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(before, after, "phase + subtree must survive a delete");
+        assert!(after.contains("1.1 Child A"), "child A wiped: {after}");
+        assert!(after.contains("1.2 Child B"), "child B wiped: {after}");
     }
 
     #[test]
@@ -667,6 +690,7 @@ mod tests {
             tool_name: "TaskUpdate".to_string(),
             tool_input: serde_json::json!({"taskId": task_id, "subject": subject}),
             tool_response: serde_json::json!({}),
+            source: String::new(),
         }
     }
 
@@ -709,6 +733,7 @@ mod tests {
                 "status": "completed"
             }),
             tool_response: serde_json::json!({}),
+            source: String::new(),
         };
         writeback_update(&combined, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
