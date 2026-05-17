@@ -105,6 +105,14 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Emit a SessionStart additionalContext that drives Claude to rehydrate
+    /// the in-session task list from the persisted state file. Intended for
+    /// the `SessionStart` hook; safe to run any time (silent no-op when
+    /// there's nothing to rehydrate).
+    Resume {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -218,6 +226,13 @@ fn main() -> Result<()> {
         }
         Command::Status { project } => {
             run_status(&project)?;
+        }
+        Command::Resume { project } => {
+            let plan = project.plan_path();
+            let output = run_resume(&plan).unwrap_or_else(|e| {
+                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
+            });
+            println!("{}", output.to_json());
         }
         Command::Archive {
             project,
@@ -408,5 +423,15 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
             "UserPromptSubmit",
             rendered,
         ))
+    }
+}
+
+fn run_resume(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
+    match plan_bridge::resume::build_resume_message(plan)? {
+        Some(msg) => Ok(plan_bridge::hook::HookOutput::context(
+            "SessionStart",
+            msg,
+        )),
+        None => Ok(plan_bridge::hook::HookOutput::silent()),
     }
 }

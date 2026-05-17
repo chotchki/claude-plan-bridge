@@ -7,6 +7,7 @@ pub mod lock;
 pub mod mcp;
 pub mod parser;
 pub mod reconcile;
+pub mod resume;
 pub mod serializer;
 pub mod state;
 pub mod today;
