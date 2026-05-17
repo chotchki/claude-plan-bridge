@@ -13,3 +13,4 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 ---
 
 - [ ] 13.0 MCP plan_rename tool: typed-API parity with TaskUpdate(subject=...)
+- [ ] 14.0 Release workflow: also create a GitHub Release after `cargo publish` succeeds
