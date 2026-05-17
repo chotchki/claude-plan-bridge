@@ -162,3 +162,22 @@
   - [x] 12.2 README: document TaskUpdate(subject) writeback path in the writeback section
   - [x] 12.3 Phase 12 exit — cargo test green; local install picked up; README reflects new behavior
 
+---
+
+## 2026-05-17
+
+- [x] 13.0 MCP plan_rename tool: typed-API parity with TaskUpdate(subject=...)
+  - [x] 13.1 MCP plan_rename tool: impl + unit tests in src/mcp.rs
+  - [x] 13.2 README: add `plan_rename` row to the MCP tools table
+  - [x] 13.3 Phase 13 exit — cargo test green; README MCP table updated
+
+- [x] 14.0 Release workflow: also create a GitHub Release after `cargo publish` succeeds
+
+- [x] 15.0 Bug fixes from ocr_pdf_latex shakeout: stop mangling non-canonical PLAN.md
+  - [x] 15.1 writeback pre-flight: detect markdown headers attached as annotations and refuse rather than silently demote
+  - [x] 15.2 writeback: clearer parent-not-found error suggests canonical phase-checkbox format
+  - [x] 15.3 README: prominent warning that `### Phase N` section headers don't work — canonical format only
+  - [x] 15.3a Bump Cargo.toml to 0.1.2; tag v0.1.2; push tag (release workflow ships to crates.io + creates GH release)
+  - [x] 15.3b Install released v0.1.2 from crates.io to replace local dev build (dogfood the published version)
+  - [x] 15.4 Phase 15 exit — cargo test green; fixture test passes against captured ocr_pdf_latex PLAN.md format; README warns clearly
+
