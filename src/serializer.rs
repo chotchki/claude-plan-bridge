@@ -13,7 +13,13 @@ pub fn serialize(plan: &Plan) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    for phase in &plan.phases {
+    for (i, phase) in plan.phases.iter().enumerate() {
+        // Blank line between top-level phases — matches the archive section
+        // build and gives a long PLAN.md visual breathing room. Inside a
+        // phase tree the parser drops blanks anyway.
+        if i > 0 {
+            out.push('\n');
+        }
         write_node(&mut out, phase, 0);
     }
     out
@@ -40,17 +46,13 @@ fn write_node(out: &mut String, node: &Node, depth: usize) {
 fn write_annotation(out: &mut String, ann: &Annotation, inner: &str) {
     match ann {
         Annotation::Text { text, indent } => {
-            // Markdown headers preserve their *original* indent from parse
-            // time — otherwise a `## Phase history` at column 0 in source
-            // would be re-emitted at the canonical child indent, visually
-            // demoting top-level narrative under whatever checkbox the
-            // parser happened to attach it to.
-            let actual = if crate::ast::looks_like_markdown_header(text) {
-                " ".repeat(*indent)
-            } else {
-                inner.to_string()
-            };
-            out.push_str(&actual);
+            // Text annotations always preserve their *original* indent from
+            // parse time. Otherwise narrative content the user wrote at
+            // column 0 (`---` dividers, top-level prose, `## Phase history`
+            // headers) gets re-emitted indented under whatever checkbox the
+            // parser happened to attach it to. Bullets and code-blocks keep
+            // canonical-depth indent below (their meaning is structural).
+            out.push_str(&" ".repeat(*indent));
             out.push_str(text);
             out.push('\n');
         }
@@ -190,5 +192,61 @@ Prose.
         let out = serialize(&plan);
         // Annotation on 1.1 (depth 1) should be at 4-space indent.
         assert!(out.contains("    text annotation on 1.1\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn preserves_horizontal_rule_at_original_column() {
+        // Phase 21.1 — quicksight shakeout. `---` at column 0 between phases
+        // attached as annotation on the previous phase; on re-serialize it
+        // used to be demoted to canonical-child indent (4+ spaces). Now it
+        // stays at column 0.
+        let input = "\
+- [ ] 1.0 First
+  - [ ] 1.1 sub
+---
+- [ ] 2.0 Second
+";
+        let plan = parse(input).unwrap();
+        let out = serialize(&plan);
+        // The `---` should be at column 0, not indented.
+        let mut found = false;
+        for line in out.lines() {
+            if line.trim() == "---" {
+                assert!(
+                    !line.starts_with(' '),
+                    "--- got demoted to indented: {line:?}"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "--- preserved somewhere in output:\n{out}");
+    }
+
+    #[test]
+    fn inserts_blank_line_between_top_level_phases() {
+        // Phase 21.2 — readability nit. Source files commonly have blank
+        // lines between top-level phases; parser drops them. Now the
+        // serializer puts one back.
+        let plan = parse("- [ ] 1.0 A\n- [ ] 2.0 B\n- [ ] 3.0 C\n").unwrap();
+        let out = serialize(&plan);
+        // Each `- [ ] N.0 X\n` line should be followed (except last) by
+        // exactly one blank line before the next phase header.
+        assert!(
+            out.contains("- [ ] 1.0 A\n\n- [ ] 2.0 B\n"),
+            "blank between 1.0 and 2.0:\n{out}"
+        );
+        assert!(
+            out.contains("- [ ] 2.0 B\n\n- [ ] 3.0 C\n"),
+            "blank between 2.0 and 3.0:\n{out}"
+        );
+    }
+
+    #[test]
+    fn no_blank_before_first_phase_or_after_last() {
+        let plan = parse("- [ ] 1.0 Only\n").unwrap();
+        let out = serialize(&plan);
+        assert!(!out.starts_with('\n'), "shouldn't start with blank: {out:?}");
+        // Single trailing newline is fine; multiple would be excess.
+        assert!(!out.ends_with("\n\n\n"), "excess trailing blanks: {out:?}");
     }
 }

@@ -23,6 +23,22 @@ pub fn annotations_to_strings(annotations: &[Annotation]) -> Vec<String> {
     annotations.iter().map(annotation_to_string).collect()
 }
 
+/// Render a list of standardize promotion notes for inclusion in hook output.
+/// Shows first 3 inline, trailing "(+N more)" when longer. Keeps the hook
+/// context readable even when a big PLAN.md has many headers to promote.
+fn summarize_notes(notes: &[String]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let head: Vec<&str> = notes.iter().take(3).map(String::as_str).collect();
+    let trailer = if notes.len() > 3 {
+        format!(" (+{} more)", notes.len() - 3)
+    } else {
+        String::new()
+    };
+    format!(":\n  - {}{trailer}", head.join("\n  - "))
+}
+
 /// Apply a `PostToolUse(TaskCreate)` event to PLAN.md.
 ///
 /// - If `metadata.plan_path` is set, insert at that exact id; parent must
@@ -101,9 +117,9 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         );
         if !standardize_notes.is_empty() {
             message.push_str(&format!(
-                "\n\nNOTE: PLAN.md was standardized to canonical form ({} header(s) promoted to phase checkboxes):\n  - {}",
+                "\n\nNOTE: PLAN.md was standardized to canonical form ({} header(s) promoted to phase checkboxes){}",
                 standardize_notes.len(),
-                standardize_notes.join("\n  - "),
+                summarize_notes(&standardize_notes),
             ));
         }
         Ok(HookOutput::context(&payload.hook_event_name, message))
@@ -150,9 +166,11 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
         let mut changes: Vec<String> = Vec::new();
         if !standardize_notes.is_empty() {
-            for note in &standardize_notes {
-                changes.push(format!("standardized: {note}"));
-            }
+            changes.push(format!(
+                "standardized {} header(s){}",
+                standardize_notes.len(),
+                summarize_notes(&standardize_notes),
+            ));
         }
 
         // --- Subject rename (skip when also deleting — would rename then remove) ---
