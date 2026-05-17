@@ -244,3 +244,12 @@
   - [x] 22.3 init scaffold PLAN.md: add orientation comment header for human + agent readers
   - [x] 22.4 Phase 22 exit + bump v0.1.9 + tag + install
 
+---
+
+## 2026-05-17
+
+- [x] 23.0 Backflow gap: reconcile/baseline don't surface tracked-but-no-harness-task leaves so the agent can adopt them
+  - [x] 23.1 reconcile: emit advisory when state has baseline-only mappings (leaves tracked but not in TaskList)
+  - [x] 23.2 README: document TaskCreate-against-existing-line idempotency + the baseline-adopt workflow
+  - [x] 23.3 Phase 23 exit + bump v0.1.10 + tag + install
+
