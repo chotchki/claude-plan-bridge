@@ -126,24 +126,44 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         };
 
         let status = input.status.as_deref();
+        let new_subject = input.subject.as_deref();
+
+        // Bail early if there's nothing to do (no actionable status AND no subject).
+        // `pending` / `in_progress` are status no-ops; subject still counts.
+        let has_status_action = matches!(status, Some("completed") | Some("deleted"));
+        if !has_status_action && new_subject.is_none() {
+            return Ok(HookOutput::silent());
+        }
 
         let plan_text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
         let mut plan = parse(&plan_text)?;
 
-        let action = match status {
+        let mut changes: Vec<String> = Vec::new();
+
+        // --- Subject rename (skip when also deleting — would rename then remove) ---
+        if !matches!(status, Some("deleted"))
+            && let Some(new_title) = new_subject
+            && let Some(node) = plan.find_mut(&node_path)
+            && node.title != new_title
+        {
+            node.title = new_title.to_string();
+            changes.push(format!("renamed to `{new_title}`"));
+        }
+
+        // --- Status mutation ---
+        match status {
             Some("completed") => {
                 let Some(node) = plan.find_mut(&node_path) else {
+                    // Node vanished from PLAN.md. Nothing to tick. If we also
+                    // had a rename queued it won't have applied either (same
+                    // missing-node), so just silent.
                     return Ok(HookOutput::silent());
                 };
-                if node.is_done() {
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!("claude-plan-bridge: {node_path} already complete (no-op)"),
-                    ));
+                if !node.is_done() {
+                    node.state = NodeState::Done;
+                    changes.push("marked complete".to_string());
                 }
-                node.state = NodeState::Done;
-                "marked complete".to_string()
             }
             Some("deleted") => {
                 let is_wont_do = plan
@@ -171,10 +191,18 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                     ));
                 }
                 state.remove(&input.task_id);
-                "removed".to_string()
+                changes.push("removed".to_string());
             }
-            _ => return Ok(HookOutput::silent()),
-        };
+            _ => {} // pending / in_progress / None — subject-only path
+        }
+
+        if changes.is_empty() {
+            // Subject matched existing title, or status=completed on already-done leaf.
+            return Ok(HookOutput::context(
+                &payload.hook_event_name,
+                format!("claude-plan-bridge: {node_path} (no-op)"),
+            ));
+        }
 
         std::fs::write(plan_path, serialize(&plan))
             .with_context(|| format!("write {}", plan_path.display()))?;
@@ -196,7 +224,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
         Ok(HookOutput::context(
             &payload.hook_event_name,
-            format!("claude-plan-bridge: {action} {node_path}"),
+            format!("claude-plan-bridge: {} {node_path}", changes.join("; ")),
         ))
     })
 }
@@ -451,6 +479,123 @@ mod tests {
         );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-1"), None, "mapping should be cleared");
+    }
+
+    fn payload_for_update_subject(task_id: &str, subject: &str) -> HookPayload {
+        HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskUpdate".to_string(),
+            tool_input: serde_json::json!({"taskId": task_id, "subject": subject}),
+            tool_response: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn update_subject_only_renames_node() {
+        // Phase 12: TaskUpdate(subject=...) without a status change should
+        // rewrite the title in PLAN.md AND update state.last_synced_title.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-1", "Old title", Some("1.1")), &plan).unwrap();
+        writeback_update(&payload_for_update_subject("t-1", "New title"), &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("  - [ ] 1.1 New title"),
+            "PLAN.md not renamed:\n{contents}"
+        );
+        assert!(
+            !contents.contains("Old title"),
+            "old title still present:\n{contents}"
+        );
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        // state should reflect the new title so reconcile doesn't redundantly flag it.
+        // (we can't introspect mappings directly via plan_path(), so just verify the lookup still works)
+        assert_eq!(state.plan_path("t-1"), Some("1.1"));
+    }
+
+    #[test]
+    fn update_subject_with_completed_status_renames_and_ticks() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-1", "Old", Some("1.1")), &plan).unwrap();
+        let combined = HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskUpdate".to_string(),
+            tool_input: serde_json::json!({
+                "taskId": "t-1",
+                "subject": "New",
+                "status": "completed"
+            }),
+            tool_response: serde_json::json!({}),
+        };
+        writeback_update(&combined, &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("  - [x] 1.1 New"),
+            "expected ticked + renamed line:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn update_subject_on_unmapped_task_is_silent() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Untracked\n");
+        let before = std::fs::read_to_string(&plan).unwrap();
+        let out = writeback_update(
+            &payload_for_update_subject("never-created", "Anything"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(before, after, "untracked task: PLAN.md untouched");
+        assert_eq!(out.to_json(), "{}", "should be silent");
+    }
+
+    #[test]
+    fn update_subject_unchanged_is_noop() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-1", "Same", Some("1.1")), &plan).unwrap();
+        let before = std::fs::read_to_string(&plan).unwrap();
+        let out = writeback_update(&payload_for_update_subject("t-1", "Same"), &plan).unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(before, after, "identical subject: no write");
+        // Hook output should mention no-op (we changed the message wording — just
+        // assert the JSON is well-formed and includes the path).
+        assert!(out.to_json().contains("1.1"));
+    }
+
+    #[test]
+    fn update_subject_on_parent_node_renames_anyway() {
+        // Renames apply to parents-with-children just as well as leaves.
+        // (Phase 9 fix: tracked nodes that grew children stay tracked.)
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Leaf\n",
+        );
+        writeback_create(
+            &payload_for_create("t-parent", "Parent", Some("1.1")),
+            &plan,
+        )
+        .unwrap();
+        // Note: 1.1 already has 1.1.1 as a child; create is idempotent and
+        // just records the mapping when the node exists.
+        writeback_update(
+            &payload_for_update_subject("t-parent", "Renamed parent"),
+            &plan,
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.1 Renamed parent"),
+            "parent rename should land:\n{contents}"
+        );
+        assert!(contents.contains("1.1.1 Leaf"), "child preserved");
     }
 
     #[test]

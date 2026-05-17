@@ -12,4 +12,9 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 11.0 Update global ~/.claude/CLAUDE.md to point at plan-bridge as the canonical PLAN.md driver
+- [x] 11.0 Roll out the release: global CLAUDE.md guidance + dogfood crates.io install
+  - [x] 11.1 Install claude-plan-bridge v0.1.0 from crates.io to replace the local `cargo install --path .` build (dogfood the published version)
+- [x] 12.0 writeback: support TaskUpdate(subject=...) — rewrite PLAN.md title + last_synced_title without requiring a status change
+  - [x] 12.1 writeback_update: rewrite title from `input.subject` (impl + tests, independent of status)
+  - [x] 12.2 README: document TaskUpdate(subject) writeback path in the writeback section
+  - [x] 12.3 Phase 12 exit — cargo test green; local install picked up; README reflects new behavior

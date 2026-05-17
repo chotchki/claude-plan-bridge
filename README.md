@@ -48,6 +48,7 @@ From the next session, the bridge runs invisibly:
 | `TaskCreate` (any source) | Appends `- [ ] N.M new task` to `PLAN.md` (under `Inbox.0` if no `plan_path` metadata, else at the requested id) |
 | `TaskUpdate(status="completed")` | Ticks `[ ]` → `[x]` at the mapped line |
 | `TaskUpdate(status="deleted")` | Removes the line (orphaned empty parents stay; you prune by hand) |
+| `TaskUpdate(subject="...")` | Rewrites the node's title in `PLAN.md` (works with or without a status change) |
 | *you* edit `PLAN.md` between turns | Next `UserPromptSubmit` feeds the diff to Claude as `additionalContext` |
 
 When a phase is fully resolved, sweep it:
@@ -69,7 +70,7 @@ Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. `PATH` defaults 
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
 - **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set (parent must exist), else append to auto-managed `Inbox.0`. Idempotent on `task_id`.
-- **update** (`TaskUpdate`): `completed` flips `[ ]` → `[x]`; `deleted` removes the line; `pending`/`in_progress` is a no-op.
+- **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work.
 
 ### `reconcile`
 
