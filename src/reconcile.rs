@@ -252,8 +252,17 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                 ));
                 for ann in new_annotations {
                     let preview: String = ann.lines().take(3).collect::<Vec<_>>().join(" / ");
-                    let trimmed = if preview.len() > 200 {
-                        format!("{}…", &preview[..200])
+                    // Char-aware truncation: `&s[..200]` slices BYTES, which
+                    // panics if byte 200 falls inside a multi-byte UTF-8
+                    // sequence (e.g. an em-dash `—` is 3 bytes). `.chars()`
+                    // walks codepoints safely. Regression: a long bullet with
+                    // an em-dash near byte 200 used to crash reconcile, which
+                    // crashed every UserPromptSubmit since reconcile runs on
+                    // every prompt.
+                    let trimmed = if preview.chars().count() > 200 {
+                        let mut s: String = preview.chars().take(200).collect();
+                        s.push('…');
+                        s
                     } else {
                         preview
                     };
@@ -675,6 +684,29 @@ mod tests {
             "expected single bullet prefix, got: {r}"
         );
         assert!(!r.contains("- - We'll"), "double prefix leaked: {r}");
+    }
+
+    #[test]
+    fn render_annotation_truncates_on_char_boundary_with_multibyte() {
+        // Phase 16.1 regression — quicksight shakeout. A long annotation
+        // containing a multi-byte char (e.g. em-dash `—`, 3 bytes UTF-8)
+        // near the 200-byte boundary used to panic with
+        //   `end byte index 200 is not a char boundary; it is inside '—'`
+        // because the renderer did `&preview[..200]` (byte slice). Now uses
+        // char-aware truncation; ensure no panic and ellipsis appended.
+        //
+        // Build a string whose byte 198..201 straddles an em-dash.
+        let mut padded = "x".repeat(198); // 198 ASCII bytes = 198 chars
+        padded.push('—'); // 3-byte UTF-8 char at bytes 198..201
+        padded.push_str(&"x".repeat(50)); // plenty of tail so total chars > 200
+        let deltas = vec![Delta::LeafAnnotationChanged {
+            plan_path: "1.1".to_string(),
+            task_id: "t-1".to_string(),
+            new_annotations: vec![padded],
+        }];
+        let rendered = render_deltas(&deltas);
+        assert!(rendered.contains('…'), "expected ellipsis on truncation");
+        assert!(rendered.contains("1.1"), "expected plan_path in output");
     }
 
     #[test]
