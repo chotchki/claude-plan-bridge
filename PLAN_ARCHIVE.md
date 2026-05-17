@@ -181,3 +181,13 @@
   - [x] 15.3b Install released v0.1.2 from crates.io to replace local dev build (dogfood the published version)
   - [x] 15.4 Phase 15 exit — cargo test green; fixture test passes against captured ocr_pdf_latex PLAN.md format; README warns clearly
 
+---
+
+## 2026-05-17
+
+- [x] 16.0 Bug fixes from quicksight shakeout: UTF-8 panic + joined-bold-id + heading-as-parent
+  - [x] 16.1 reconcile: fix UTF-8 byte-boundary panic in render_deltas annotation preview truncation
+  - [x] 16.2 parser: tolerate joined-bold id+title format `**ID — Title.** rest`
+  - [x] 16.3 standardize: generalize `### Phase N — Title` to `### <id> — Title` so headings like `### AA.A — ...` promote to phase parents
+  - [x] 16.4 Bump + tag v0.1.3 (panic fix); cargo install --force; archive Phase 16
+
