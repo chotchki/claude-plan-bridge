@@ -118,3 +118,19 @@
   - [-] 6.3 Resource exposure (MCP `resources/*`) — deferred. v1 ships `plan_list` as a tool returning the AST text; that covers the read-PLAN.md use case. Add `resources/` when a client actually needs URI-keyed reads.
   - [x] 6.4 Unit tests (12 in `mcp` module: initialize, tools/list, each tool, error paths, malformed JSON, notification handling, archive-via-MCP).
   - [x] 6.5 Phase 6 exit — `cargo test` green (114 tests); README documents the MCP surface.
+
+---
+
+## 2026-05-17
+
+- [x] 7.0 Archive ordering: append newest sections at bottom (chronological-ascending)
+  - [x] 7.1 Flip `src/archive.rs` to append the new dated section at the bottom of PLAN_ARCHIVE.md instead of prepending
+  - [x] 7.2 Update archive unit tests for new ordering + add a regression test that an existing PLAN_ARCHIVE.md is appended-to (existing content stays at top, new section at bottom)
+  - [x] 7.3 README: change "newest section prepended at the top" to "newest section appended at the bottom" in the `plan-bridge archive` section
+  - [x] 7.4 One-time fixup of this repo's PLAN_ARCHIVE.md: move today's Phase 5/6 section below today's Phase 1–4 section so the file reads chronological-ascending
+  - [x] 7.5 Phase 7 exit — cargo test green; README + PLAN_ARCHIVE.md consistent with new ordering
+  - [x] 7.6 Reconcile renderer: don't double-prefix annotation bullets when the source line already starts with `- `
+  - [x] 7.7 Bridge: id-positional insertion so `7.5a` lands between `7.5` and `7.6` instead of always appending
+
+- [x] 9.0 Reconcile: stop emitting LeafRemoved when a tracked node becomes a parent (children added)
+

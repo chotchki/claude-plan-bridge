@@ -12,16 +12,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [x] 7.0 Archive ordering: append newest sections at bottom (chronological-ascending)
-  - [x] 7.1 Flip `src/archive.rs` to append the new dated section at the bottom of PLAN_ARCHIVE.md instead of prepending
-  - [x] 7.2 Update archive unit tests for new ordering + add a regression test that an existing PLAN_ARCHIVE.md is appended-to (existing content stays at top, new section at bottom)
-  - [x] 7.3 README: change "newest section prepended at the top" to "newest section appended at the bottom" in the `plan-bridge archive` section
-  - [x] 7.4 One-time fixup of this repo's PLAN_ARCHIVE.md: move today's Phase 5/6 section below today's Phase 1–4 section so the file reads chronological-ascending
-  - [x] 7.5 Phase 7 exit — cargo test green; README + PLAN_ARCHIVE.md consistent with new ordering
-  - [x] 7.6 Reconcile renderer: don't double-prefix annotation bullets when the source line already starts with `- `
-  - [x] 7.7 Bridge: id-positional insertion so `7.5a` lands between `7.5` and `7.6` instead of always appending
 - [ ] 8.0 Serialize concurrent writebacks with a file lock — and surface lock failure as a loud hook block, never silent data loss
-- [x] 9.0 Reconcile: stop emitting LeafRemoved when a tracked node becomes a parent (children added)
 - [ ] 10.0 Productionalize the tool — public repo, CI, packaging, README polish
   - [ ] 10.1 Public GitHub repo + LICENSE; update Cargo.toml `repository` and `license` fields
     - We'll go with an MIT license for this
