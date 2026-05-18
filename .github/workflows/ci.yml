@@ -40,3 +40,95 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
         if: matrix.os != 'windows-latest'
       - run: cargo test --all-targets
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    # Publishing the badge to the orphan `badges` branch needs write
+    # access. The lcov + html artifact upload doesn't need it.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Collect coverage
+        run: |
+          cargo llvm-cov --no-report --all-features --workspace
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --json --summary-only > coverage-summary.json
+          cargo llvm-cov report --html --output-dir coverage-html
+      - name: Build badge JSON + Step Summary
+        run: |
+          # Extract workspace line coverage % from cargo llvm-cov's summary.
+          # Schema: { data: [{ totals: { lines: {percent: <float>}, ... } }] }
+          lines=$(jq -r '.data[0].totals.lines.percent' coverage-summary.json)
+          functions=$(jq -r '.data[0].totals.functions.percent' coverage-summary.json)
+          regions=$(jq -r '.data[0].totals.regions.percent' coverage-summary.json)
+          # Two-decimal-place format for human display.
+          fmt() { printf '%.2f' "$1"; }
+          lines_pretty=$(fmt "$lines")
+          functions_pretty=$(fmt "$functions")
+          regions_pretty=$(fmt "$regions")
+          # shields.io thresholds: ≥80 brightgreen, ≥60 yellow, ≥40 orange, <40 red.
+          color=$(awk -v p="$lines" 'BEGIN {
+            if (p >= 80) print "brightgreen";
+            else if (p >= 60) print "yellow";
+            else if (p >= 40) print "orange";
+            else print "red";
+          }')
+          # Shields.io endpoint badge JSON (schemaVersion 1).
+          jq -n \
+            --arg msg "${lines_pretty}%" \
+            --arg color "$color" \
+            '{schemaVersion: 1, label: "coverage", message: $msg, color: $color}' \
+            > coverage-badge.json
+          # GHA Step Summary.
+          {
+            echo "## Coverage"
+            echo ""
+            echo "| Metric | Coverage |"
+            echo "|---|---|"
+            echo "| Lines | ${lines_pretty}% |"
+            echo "| Functions | ${functions_pretty}% |"
+            echo "| Regions | ${regions_pretty}% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage-summary.json
+            coverage-badge.json
+            coverage-html/
+          retention-days: 14
+      - name: Publish badge + HTML to `badges` branch
+        # Push:main only — don't republish on PRs from forks (token wouldn't
+        # have write access anyway) or on PR validation runs.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Build the publish bundle in a scratch dir (orphan-branch contents).
+          publish_dir=$(mktemp -d)
+          cp coverage-badge.json "$publish_dir/coverage.json"
+          cp -r coverage-html/html "$publish_dir/coverage-html"
+          # Force-push the bundle as a single commit to the orphan `badges`
+          # branch. History on that branch is intentionally rewritten each
+          # run — it's a hosting surface for the latest badge + report.
+          cd "$publish_dir"
+          git init -q -b badges
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git add .
+          git commit -q -m "coverage badge + report @ ${GITHUB_SHA::7}"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            badges

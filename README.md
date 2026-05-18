@@ -1,6 +1,6 @@
 # claude-plan-bridge
 
-[![CI](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml) [![Crates.io](https://img.shields.io/crates/v/claude-plan-bridge.svg)](https://crates.io/crates/claude-plan-bridge) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/chotchki/claude-plan-bridge/actions/workflows/ci.yml) [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fchotchki%2Fclaude-plan-bridge%2Fbadges%2Fcoverage.json)](https://github.com/chotchki/claude-plan-bridge/tree/badges/coverage-html) [![Crates.io](https://img.shields.io/crates/v/claude-plan-bridge.svg)](https://crates.io/crates/claude-plan-bridge) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Bridge Claude Code's per-session task list and a durable `PLAN.md` checked in with the code.
 
@@ -250,6 +250,21 @@ If you're not sure: prefer `[>]`. Backlog preserves the work; won't-do discards 
 ## Contributing
 
 Bug reports and PRs welcome at [github.com/chotchki/claude-plan-bridge](https://github.com/chotchki/claude-plan-bridge). The implementation sequence is documented in [PLAN.md](./PLAN.md); design rationale in [SPEC.md](./SPEC.md). The bridge that ships in the binary drives both files in this repo, so dogfooding is the default development mode.
+
+### Coverage
+
+`cargo-llvm-cov` is the coverage tool. CI runs it on every push and PR; the badge above is regenerated from the latest `main` push and lives on the orphan [`badges` branch](https://github.com/chotchki/claude-plan-bridge/tree/badges) alongside an HTML report. Color thresholds: ≥80% brightgreen, ≥60% yellow, ≥40% orange, <40% red.
+
+To run locally:
+
+```
+cargo install cargo-llvm-cov --locked   # one-time
+cargo llvm-cov --no-report --all-features --workspace
+cargo llvm-cov report --html --output-dir coverage-html
+open coverage-html/html/index.html
+```
+
+`cargo llvm-cov report --json --summary-only` produces the JSON the CI badge generator consumes. The `lcov.info` + HTML report are also uploaded as a per-run CI artifact (`coverage`, 14-day retention) — open a run on GitHub Actions to download.
 
 ## License
 
