@@ -3,6 +3,7 @@ pub mod ast;
 pub mod audit;
 pub mod backlog;
 pub mod baseline;
+pub mod canonicalize;
 pub mod hook;
 pub mod init;
 pub mod lock;

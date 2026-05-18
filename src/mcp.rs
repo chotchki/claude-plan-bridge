@@ -136,8 +136,7 @@ impl McpServer {
     fn set_state(&self, args: &Value, target: NodeState, verb: &str) -> Result<Value> {
         let id = require_string(args, "plan_path")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
-        let parsed = parse(&text)?;
-        let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
+        let mut plan = parse(&text)?;
         let node = plan
             .find_mut(&id)
             .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
@@ -153,8 +152,7 @@ impl McpServer {
         let plan_path = require_string(args, "plan_path")?;
         let subject = require_string(args, "subject")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
-        let parsed = parse(&text)?;
-        let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
+        let mut plan = parse(&text)?;
         if plan.find(&plan_path).is_some() {
             return Err(anyhow!("node `{plan_path}` already exists"));
         }
@@ -162,12 +160,30 @@ impl McpServer {
             id: plan_path.clone(),
             title: subject.clone(),
             state: NodeState::Pending,
+            id_style: crate::ast::IdStyle::Plain,
+            separator: crate::ast::Separator::Space,
             children: vec![],
             annotations: vec![],
         };
         match parent_id_for(&plan_path) {
             None => plan.phases.push(new_node),
-            Some(pid) => plan.add_child_of(&pid, new_node).map_err(|e| anyhow!(e))?,
+            Some(pid) => {
+                // Conditional canonicalize fallback: if the parent isn't found,
+                // it may be living as a `### Phase N — Title` markdown header
+                // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
+                // Promote those into checkboxes and retry. If still missing,
+                // surface the original error.
+                if plan.find(&pid).is_none() {
+                    let parsed = parse(&text)?;
+                    let (standardized, _notes) = parsed
+                        .standardize_to_canonical()
+                        .map_err(|e| anyhow!(e))?;
+                    if standardized.find(&pid).is_some() {
+                        plan = standardized;
+                    }
+                }
+                plan.add_child_of(&pid, new_node).map_err(|e| anyhow!(e))?;
+            }
         }
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&format!("added {plan_path} `{subject}`")))
@@ -205,8 +221,7 @@ impl McpServer {
         crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
             let text = std::fs::read_to_string(&self.plan_path)
                 .with_context(|| format!("read {}", self.plan_path.display()))?;
-            let parsed = parse(&text)?;
-            let (mut plan, _notes) = parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
+            let mut plan = parse(&text)?;
 
             let node = plan
                 .find_mut(&id)

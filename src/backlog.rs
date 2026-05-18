@@ -23,10 +23,7 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
     crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
         let text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
-        let parsed = parse(&text)?;
-        let (mut plan, _notes) = parsed
-            .standardize_to_canonical()
-            .map_err(anyhow::Error::msg)?;
+        let mut plan = parse(&text)?;
 
         let node = plan
             .find(id)

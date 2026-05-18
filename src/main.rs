@@ -48,12 +48,17 @@ enum Command {
     ///
     /// Reads the hook payload as JSON on stdin, writes any updates back to
     /// PLAN.md and the project state file, and emits a JSON hook response on
-    /// stdout.
+    /// stdout. `--dry-run` previews the effect: computes the mutation, writes
+    /// a unified diff to stderr, and leaves PLAN.md + the state file
+    /// untouched. Use for smoke-testing the bridge against an existing
+    /// PLAN.md before installing hooks.
     Writeback {
         #[command(flatten)]
         project: ProjectArgs,
         #[arg(long, value_enum)]
         event: WritebackEvent,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Diff PLAN.md against the bridge's recorded state and emit any drift as
     /// `additionalContext` for Claude's next turn. Intended for the
@@ -137,6 +142,18 @@ enum Command {
         #[arg(long)]
         date: Option<String>,
     },
+    /// Rewrite PLAN.md in canonical form: promote `### Phase N — Title`
+    /// markdown headers to `- [ ] N.0` checkboxes, strip bold-wrapped IDs,
+    /// normalize em-dash/hyphen separators. Routine writebacks no longer do
+    /// this implicitly (Phase 29) — adopters with bespoke conventions keep
+    /// their format until they explicitly invoke this subcommand. `--dry-run`
+    /// reports what would change without writing.
+    Canonicalize {
+        #[command(flatten)]
+        project: ProjectArgs,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -156,13 +173,21 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to parse {}", plan.display()))?;
             println!("{}", serde_json::to_string_pretty(&parsed)?);
         }
-        Command::Writeback { project, event } => {
+        Command::Writeback {
+            project,
+            event,
+            dry_run,
+        } => {
             let plan = project.plan_path();
-            let output = run_writeback(&plan, event).unwrap_or_else(|e| {
-                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
-            });
-            let output = maybe_warn_missing_session_start(&project.cwd, output, "PostToolUse");
-            println!("{}", output.to_json());
+            if dry_run {
+                run_writeback_dry_run(&plan, event)?;
+            } else {
+                let output = run_writeback(&plan, event).unwrap_or_else(|e| {
+                    plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
+                });
+                let output = maybe_warn_missing_session_start(&project.cwd, output, "PostToolUse");
+                println!("{}", output.to_json());
+            }
         }
         Command::Reconcile { project } => {
             let plan = project.plan_path();
@@ -288,6 +313,24 @@ fn main() -> Result<()> {
             let msg = plan_bridge::backlog::backlog(&plan, &plan_path, &date)?;
             println!("claude-plan-bridge: {msg}");
         }
+        Command::Canonicalize { project, dry_run } => {
+            let plan = project.plan_path();
+            let report = plan_bridge::canonicalize::canonicalize(&plan, dry_run)?;
+            let verb = match (report.dry_run, report.changed) {
+                (true, true) => "would rewrite",
+                (true, false) => "already canonical (dry-run)",
+                (false, true) => "rewrote",
+                (false, false) => "already canonical",
+            };
+            println!(
+                "claude-plan-bridge: {verb} {} ({} header promotion(s))",
+                plan.display(),
+                report.notes.len()
+            );
+            for note in &report.notes {
+                println!("  - {note}");
+            }
+        }
         Command::Archive {
             project,
             dry_run,
@@ -332,6 +375,131 @@ fn run_writeback(
         WritebackEvent::Create => plan_bridge::writeback::writeback_create(&payload, plan),
         WritebackEvent::Update => plan_bridge::writeback::writeback_update(&payload, plan),
     }
+}
+
+/// Preview a writeback against PLAN.md without mutating disk. Copies the
+/// real PLAN.md + state into a temp directory, runs the writeback there, and
+/// emits a unified-diff-ish report of what would change. Useful for adopters
+/// who want to smoke-test the bridge before installing hooks.
+fn run_writeback_dry_run(plan: &std::path::Path, event: WritebackEvent) -> Result<()> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read hook payload from stdin")?;
+    let payload: plan_bridge::hook::HookPayload =
+        serde_json::from_str(&buf).context("parse hook payload JSON")?;
+
+    let tmp = tempdir_for_dry_run()?;
+    let scratch_plan = tmp.join("PLAN.md");
+    let scratch_claude = tmp.join(".claude");
+    std::fs::create_dir_all(&scratch_claude).context("mkdir scratch .claude")?;
+    let original = std::fs::read_to_string(plan)
+        .with_context(|| format!("read {}", plan.display()))?;
+    std::fs::write(&scratch_plan, &original).context("seed scratch PLAN.md")?;
+    let real_state_path = plan_bridge::state::default_state_path_for(plan);
+    if real_state_path.exists() {
+        let state_bytes =
+            std::fs::read(&real_state_path).context("read real state file for dry-run")?;
+        std::fs::write(scratch_claude.join("plan-bridge-state.json"), state_bytes)
+            .context("seed scratch state")?;
+    }
+
+    let result = match event {
+        WritebackEvent::Create => {
+            plan_bridge::writeback::writeback_create(&payload, &scratch_plan)
+        }
+        WritebackEvent::Update => {
+            plan_bridge::writeback::writeback_update(&payload, &scratch_plan)
+        }
+    };
+    let after = std::fs::read_to_string(&scratch_plan).unwrap_or_else(|_| original.clone());
+    print_dry_run_report(&original, &after, plan, result.as_ref().ok());
+    if let Err(e) = result {
+        eprintln!("\n[dry-run] writeback returned an error: {e:#}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
+fn tempdir_for_dry_run() -> Result<std::path::PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let p = std::env::temp_dir().join(format!("plan-bridge-dryrun-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&p).context("mkdir dry-run scratch")?;
+    Ok(p)
+}
+
+fn print_dry_run_report(
+    before: &str,
+    after: &str,
+    plan_path: &std::path::Path,
+    hook_output: Option<&plan_bridge::hook::HookOutput>,
+) {
+    eprintln!("[dry-run] target: {}", plan_path.display());
+    if before == after {
+        eprintln!("[dry-run] no change (writeback was a no-op)");
+    } else {
+        let added = after.lines().count() as isize - before.lines().count() as isize;
+        eprintln!(
+            "[dry-run] would change PLAN.md ({}{} line(s))",
+            if added >= 0 { "+" } else { "" },
+            added,
+        );
+        eprintln!("[dry-run] unified diff (lines only — not byte-perfect):");
+        eprintln!("{}", line_diff(before, after));
+    }
+    if let Some(out) = hook_output {
+        eprintln!("[dry-run] hook output (additionalContext only):");
+        eprintln!("{}", out.to_json());
+    }
+}
+
+/// Minimal unified-diff-ish renderer. Marks added lines with `+`, removed
+/// with `-`, common context with two leading spaces. No diff hunks / line
+/// numbers — adopters use this for "did the bridge do anything sketchy?",
+/// not for `git apply`-grade patching.
+fn line_diff(before: &str, after: &str) -> String {
+    let mut out = String::new();
+    let mut bi = before.lines().peekable();
+    let mut ai = after.lines().peekable();
+    while bi.peek().is_some() || ai.peek().is_some() {
+        match (bi.peek(), ai.peek()) {
+            (Some(b), Some(a)) if b == a => {
+                out.push_str("  ");
+                out.push_str(b);
+                out.push('\n');
+                bi.next();
+                ai.next();
+            }
+            (Some(b), Some(a)) => {
+                out.push_str("- ");
+                out.push_str(b);
+                out.push('\n');
+                out.push_str("+ ");
+                out.push_str(a);
+                out.push('\n');
+                bi.next();
+                ai.next();
+            }
+            (Some(b), None) => {
+                out.push_str("- ");
+                out.push_str(b);
+                out.push('\n');
+                bi.next();
+            }
+            (None, Some(a)) => {
+                out.push_str("+ ");
+                out.push_str(a);
+                out.push('\n');
+                ai.next();
+            }
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 fn run_status(project: &ProjectArgs) -> Result<()> {

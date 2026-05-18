@@ -323,3 +323,18 @@
   - [x] 24.3 Note restart-test cycle in README
   - [x] 24.4 Phase 24 exit — tests, version bump, archive
 
+---
+
+## 2026-05-18
+
+- [x] 29.0 Phase 29 — Format-preserving writeback (don't mow down user PLAN.md formatting on first contact)
+  - [x] 29.1 Audit `standardize_to_canonical` call sites: confirm reconcile/archive don't rely on it as a side effect of writeback (research, not code). Identifies any callers that must keep canonicalization to function correctly.
+  - [x] 29.2 Make `standardize_to_canonical` opt-in: writeback_create / writeback_update / MCP plan_* tools stop calling it implicitly. Add a `plan-bridge canonicalize` subcommand that runs it explicitly. The canonical form is still the only output shape — we just don't reach for it on routine writes.
+  - [x] 29.3 Preserve `Annotation::Bullet` original indent in serializer (mirror `Annotation::Text` behavior). Fixes the `- **Phase N**` → `  - **Phase N**` regression observed on the dry-run artifact.
+  - [x] 29.4 Preserve bold-wrapped IDs round-trip: AST gains `id_style: IdStyle { Plain, Bold }`, parser records, serializer respects. Canonical output is still Plain — but routine writebacks preserve user choice.
+  - [x] 29.5 Preserve em-dash separator round-trip: AST gains `separator: Separator { Space, EmDash, Hyphen }`, parser records, serializer respects. Canonical output is still Space.
+  - [x] 29.6 Preserve blank lines within phase trees: parser captures consecutive blank lines as `Annotation::Blank { count }`, serializer re-emits. Drops the "trees collapse vertically" surprise.
+  - [x] 29.7 Fix bare-id leaf serializer double-space bug: `- [ ]  Make` should serialize as `- [ ] Make` when `node.id` is empty. Conditional formatting: omit the id field + its trailing space when empty.
+  - [x] 29.8 Add `plan-bridge writeback --dry-run` flag: parse + apply mutation + serialize + diff, emit unified diff to stdout, don't write. Lets adopters preview the bridge's effect on their PLAN.md before committing. Falls out cheap once 29.2-29.7 stop the mass-mutation.
+  - [x] 29.9 Phase 29 exit — tests, version bump, archive
+

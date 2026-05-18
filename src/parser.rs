@@ -62,12 +62,20 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
         }
 
         match parse_checkbox(trimmed, line_no)? {
-            CheckboxLine::Checkbox { state, id, title } => {
+            CheckboxLine::Checkbox {
+                state,
+                id,
+                title,
+                id_style,
+                separator,
+            } => {
                 saw_checkbox = true;
                 let node = Node {
                     id,
                     title,
                     state,
+                    id_style,
+                    separator,
                     children: Vec::new(),
                     annotations: Vec::new(),
                 };
@@ -84,10 +92,16 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
             }
             CheckboxLine::NotACheckbox => {
                 if raw_line.trim().is_empty() {
-                    // Preserve blank lines in preamble verbatim; ignore inside the tree.
                     if !saw_checkbox {
+                        // Preamble keeps blank lines verbatim.
                         preamble.push(raw_line.to_string());
+                        continue;
                     }
+                    // Phase 29.6: inside the tree, capture blank lines as a
+                    // single `Annotation::Blank { count }`. Coalesce
+                    // consecutive blanks so a row of 3 blank lines round-trips
+                    // as one annotation with count=3.
+                    bump_blank_on_top(&mut stack);
                     continue;
                 }
                 let annotation = classify_annotation(raw_line, indent, trimmed);
@@ -151,6 +165,11 @@ fn attach_annotation(
                 }
                 preamble.push(format!("{pad}```"));
             }
+            Annotation::Blank { count } => {
+                for _ in 0..count {
+                    preamble.push(String::new());
+                }
+            }
         }
         return;
     }
@@ -159,6 +178,20 @@ fn attach_annotation(
     } else {
         // After checkboxes started but no open node — shouldn't happen with a balanced tree.
         // Skip silently in v1.
+    }
+}
+
+/// Append a blank line to the top open node's annotations, coalescing
+/// consecutive blanks into a single `Annotation::Blank { count: n }`.
+fn bump_blank_on_top(stack: &mut [(Node, usize)]) {
+    let Some((top, _)) = stack.last_mut() else {
+        // No open node — orphan blank line; drop.
+        return;
+    };
+    if let Some(Annotation::Blank { count }) = top.annotations.last_mut() {
+        *count += 1;
+    } else {
+        top.annotations.push(Annotation::Blank { count: 1 });
     }
 }
 
@@ -171,6 +204,8 @@ enum CheckboxLine {
         state: NodeState,
         id: String,
         title: String,
+        id_style: crate::ast::IdStyle,
+        separator: crate::ast::Separator,
     },
     NotACheckbox,
 }
@@ -198,8 +233,14 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
         }
     };
 
-    let (id, title) = extract_id_and_title(rest);
-    Ok(CheckboxLine::Checkbox { state, id, title })
+    let (id, title, id_style, separator) = extract_id_title_style(rest);
+    Ok(CheckboxLine::Checkbox {
+        state,
+        id,
+        title,
+        id_style,
+        separator,
+    })
 }
 
 /// Pull an optional id off the front of the post-checkbox text.
@@ -207,19 +248,28 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
 /// Accepts:
 /// - bold-wrapped ids:  `**X.4.a.1** — title`
 /// - bare ids:          `X.4.a.1 title` or `1.0 title`
-/// - no id:             `do the thing` (returns `("", "do the thing")`)
+/// - no id:             `do the thing` (returns `("", "do the thing", Plain)`)
 ///
-/// Implemented as a winnow combinator: leading whitespace, then an `opt(alt(bold, bare))`
-/// (so an unrecognized leading token gracefully degrades to no-id), then an optional
-/// em-dash / hyphen / whitespace separator, then everything else as title. Always succeeds.
-fn extract_id_and_title(input: &str) -> (String, String) {
+/// Returns the captured `IdStyle` so the serializer can round-trip the source
+/// format. The joined-bold strategy (where the bold span wraps id + title)
+/// can't be fully preserved on round-trip; it flattens to `Plain` for now —
+/// the id and title are still parsed correctly, only the bold-wrap is lost.
+fn extract_id_title_style(
+    input: &str,
+) -> (String, String, crate::ast::IdStyle, crate::ast::Separator) {
     let mut input = input;
     id_and_title
         .parse_next(&mut input)
         .expect("id_and_title is total")
 }
 
-fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
+fn id_and_title(
+    input: &mut &str,
+) -> winnow::ModalResult<
+    (String, String, crate::ast::IdStyle, crate::ast::Separator),
+    ContextError,
+> {
+    use crate::ast::{IdStyle, Separator};
     space0.parse_next(input)?;
 
     // Strategy A — joined-bold `**id — title.**` (the bold span contains BOTH
@@ -236,20 +286,29 @@ fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), Conte
         } else {
             format!("{title_inside} {trailing}")
         };
-        return Ok((id, title));
+        // Joined-bold flattens to Plain on round-trip (the bold span covers
+        // both id + title; preserving it would require a different style enum
+        // variant). Acceptable for now — this shape is rare.
+        return Ok((id, title, IdStyle::Plain, Separator::Space));
     }
     *input = snapshot;
 
     // Strategy B — existing path: simple `**id**` or `id`, then separator,
-    // then title.
-    let id = opt(alt((bold_id, bare_id)))
-        .parse_next(input)?
-        .unwrap_or_default();
-    if !id.is_empty() {
-        skip_separator.parse_next(input)?;
-    }
+    // then title. Capture which style + separator matched so the serializer
+    // can round-trip.
+    let id_match = opt(alt((
+        bold_id.map(|id| (id, IdStyle::Bold)),
+        bare_id.map(|id| (id, IdStyle::Plain)),
+    )))
+    .parse_next(input)?;
+    let (id, id_style) = id_match.unwrap_or_else(|| (String::new(), IdStyle::Plain));
+    let separator = if id.is_empty() {
+        Separator::Space
+    } else {
+        capture_separator.parse_next(input)?
+    };
     let title = rest.parse_next(input)?.trim_end().to_string();
-    Ok((id, title))
+    Ok((id, title, id_style, separator))
 }
 
 fn bold_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
@@ -282,10 +341,20 @@ fn id_chars(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
         .parse_next(input)
 }
 
-fn skip_separator(input: &mut &str) -> winnow::ModalResult<(), ContextError> {
-    let _: &str =
+fn capture_separator(
+    input: &mut &str,
+) -> winnow::ModalResult<crate::ast::Separator, ContextError> {
+    use crate::ast::Separator;
+    let chunk: &str =
         take_while(0.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;
-    Ok(())
+    let sep = if chunk.contains('—') {
+        Separator::EmDash
+    } else if chunk.contains('-') {
+        Separator::Hyphen
+    } else {
+        Separator::Space
+    };
+    Ok(sep)
 }
 
 fn is_valid_id(s: &str) -> bool {

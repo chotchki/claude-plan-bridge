@@ -17,8 +17,38 @@ pub struct Node {
     pub title: String,
     #[serde(default)]
     pub state: NodeState,
+    /// Presentation-only: whether the id was bold-wrapped (`**1.2.3**`) in
+    /// source. Round-trip preserves this; `standardize_to_canonical` flattens
+    /// to `Plain`.
+    #[serde(default)]
+    pub id_style: IdStyle,
+    /// Presentation-only: separator between id and title in source. Round-trip
+    /// preserves this; canonical form is `Space`.
+    #[serde(default)]
+    pub separator: Separator,
     pub children: Vec<Node>,
     pub annotations: Vec<Annotation>,
+}
+
+/// Whether the id was bold-wrapped (`**1.2.3**`) in the source. Round-trip
+/// preserves this; canonical form is `Plain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IdStyle {
+    #[default]
+    Plain,
+    Bold,
+}
+
+/// Separator between id and title in the source line. Round-trip preserves
+/// this; canonical form is `Space`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Separator {
+    #[default]
+    Space,
+    EmDash,
+    Hyphen,
 }
 
 /// Checkbox state. `Pending` = `[ ]`, `Done` = `[x]`, `WontDo` = `[-]`, `Backlog` = `[>]`.
@@ -230,6 +260,14 @@ fn strip_and_collect_phase_headers(
     });
 }
 
+fn flatten_id_style(node: &mut Node) {
+    node.id_style = IdStyle::Plain;
+    node.separator = Separator::Space;
+    for child in &mut node.children {
+        flatten_id_style(child);
+    }
+}
+
 fn count_phase_headers_in_subtree(node: &Node) -> usize {
     let here = node
         .annotations
@@ -259,6 +297,8 @@ fn flush_phase_group(
             id,
             title,
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children,
             annotations: vec![],
         });
@@ -359,6 +399,13 @@ impl Plan {
         }
         flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
 
+        // Phase 29.4: canonical form strips bold-wrapped IDs. The standardize
+        // pass owns the destructive normalization; round-trip writebacks
+        // preserve `IdStyle::Bold`.
+        for phase in &mut new_phases {
+            flatten_id_style(phase);
+        }
+
         Ok((
             Plan {
                 preamble: self.preamble,
@@ -441,6 +488,8 @@ impl Plan {
                 id: "Inbox.0".to_string(),
                 title: "Inbox".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 children: vec![],
                 annotations: vec![],
             });
@@ -451,6 +500,8 @@ impl Plan {
             id: next.clone(),
             title: subject.to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         });
@@ -565,6 +616,10 @@ pub enum Annotation {
         content: String,
         indent: usize,
     },
+    /// One or more consecutive blank lines inside the phase tree. Round-trip
+    /// preserves the count so vertical whitespace the user inserted between
+    /// nodes survives.
+    Blank { count: usize },
 }
 
 #[cfg(test)]
@@ -579,6 +634,8 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 annotations: vec![Annotation::Text {
                     text: "note".to_string(),
                     indent: 2,
@@ -587,6 +644,8 @@ mod tests {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
                     state: NodeState::Done,
+                    id_style: IdStyle::Plain,
+                    separator: Separator::Space,
                     children: vec![],
                     annotations: vec![],
                 }],
@@ -616,14 +675,20 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 children: vec![Node {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
                     state: NodeState::Pending,
+                    id_style: IdStyle::Plain,
+                    separator: Separator::Space,
                     children: vec![Node {
                         id: "1.1.1".to_string(),
                         title: "Sub".to_string(),
                         state: NodeState::Done,
+                        id_style: IdStyle::Plain,
+                        separator: Separator::Space,
                         children: vec![],
                         annotations: vec![],
                     }],
@@ -647,6 +712,8 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 children: vec![],
                 annotations: vec![],
             }],
@@ -655,6 +722,8 @@ mod tests {
             id: "1.1".to_string(),
             title: "Task".to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -700,6 +769,8 @@ mod tests {
             id: "7.2a".to_string(),
             title: "between".to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -716,6 +787,8 @@ mod tests {
             id: "1.1".to_string(),
             title: "first".to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -738,6 +811,8 @@ mod tests {
             id: "2.0".to_string(),
             title: "b".to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         });
@@ -752,6 +827,8 @@ mod tests {
             id: "1.1".to_string(),
             title: "Task".to_string(),
             state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -814,11 +891,15 @@ mod tests {
                 id: "Inbox.0".to_string(),
                 title: "Inbox".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 children: vec![
                     Node {
                         id: "Inbox.1".to_string(),
                         title: "x".to_string(),
                         state: NodeState::Pending,
+                        id_style: IdStyle::Plain,
+                        separator: Separator::Space,
                         children: vec![],
                         annotations: vec![],
                     },
@@ -826,6 +907,8 @@ mod tests {
                         id: "Inbox.3".to_string(),
                         title: "y".to_string(),
                         state: NodeState::Pending,
+                        id_style: IdStyle::Plain,
+                        separator: Separator::Space,
                         children: vec![],
                         annotations: vec![],
                     },
@@ -1046,6 +1129,8 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Space,
                 children: vec![],
                 annotations: vec![Annotation::Text {
                     text: "#hashtag style not a header".to_string(),

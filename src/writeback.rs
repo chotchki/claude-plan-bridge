@@ -8,35 +8,22 @@ use std::path::Path;
 
 /// Render an annotation as a single string for `last_synced_annotations`.
 /// Keep these stable across save/load so the reconcile diff is byte-stable.
-pub fn annotation_to_string(a: &Annotation) -> String {
+/// `Blank` annotations are intentionally skipped — reconcile shouldn't drift
+/// on whitespace alone.
+pub fn annotation_to_string(a: &Annotation) -> Option<String> {
     match a {
-        Annotation::Text { text, .. } => text.clone(),
-        Annotation::Bullet { text, .. } => format!("- {text}"),
+        Annotation::Text { text, .. } => Some(text.clone()),
+        Annotation::Bullet { text, .. } => Some(format!("- {text}")),
         Annotation::CodeBlock { lang, content, .. } => {
             let l = lang.clone().unwrap_or_default();
-            format!("```{l}\n{content}```")
+            Some(format!("```{l}\n{content}```"))
         }
+        Annotation::Blank { .. } => None,
     }
 }
 
 pub fn annotations_to_strings(annotations: &[Annotation]) -> Vec<String> {
-    annotations.iter().map(annotation_to_string).collect()
-}
-
-/// Render a list of standardize promotion notes for inclusion in hook output.
-/// Shows first 3 inline, trailing "(+N more)" when longer. Keeps the hook
-/// context readable even when a big PLAN.md has many headers to promote.
-fn summarize_notes(notes: &[String]) -> String {
-    if notes.is_empty() {
-        return String::new();
-    }
-    let head: Vec<&str> = notes.iter().take(3).map(String::as_str).collect();
-    let trailer = if notes.len() > 3 {
-        format!(" (+{} more)", notes.len() - 3)
-    } else {
-        String::new()
-    };
-    format!(":\n  - {}{trailer}", head.join("\n  - "))
+    annotations.iter().filter_map(annotation_to_string).collect()
 }
 
 /// Apply a `PostToolUse(TaskCreate)` event to PLAN.md.
@@ -97,17 +84,16 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         let plan_text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
         let parsed = parse(&plan_text)?;
-        let (mut plan, standardize_notes) =
-            parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
 
-        let (assigned_path, action) = match requested_path {
+        let (plan, assigned_path, action) = match requested_path {
             Some(p) => {
-                insert_at_path(&mut plan, &p, &input.subject)?;
-                (p, "added".to_string())
+                let plan = insert_at_path(parsed, &p, &input.subject)?;
+                (plan, p, "added".to_string())
             }
             None => {
+                let mut plan = parsed;
                 let p = plan.append_to_inbox(&input.subject);
-                (p, "added to Inbox".to_string())
+                (plan, p, "added to Inbox".to_string())
             }
         };
 
@@ -219,13 +205,6 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 stale_ids.join(", ")
             ));
         }
-        if !standardize_notes.is_empty() {
-            message.push_str(&format!(
-                "\n\nNOTE: PLAN.md was standardized to canonical form ({} header(s) promoted to phase checkboxes){}",
-                standardize_notes.len(),
-                summarize_notes(&standardize_notes),
-            ));
-        }
         Ok(HookOutput::context(&payload.hook_event_name, message))
     })
 }
@@ -264,18 +243,9 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 
         let plan_text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
-        let parsed = parse(&plan_text)?;
-        let (mut plan, standardize_notes) =
-            parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
+        let mut plan = parse(&plan_text)?;
 
         let mut changes: Vec<String> = Vec::new();
-        if !standardize_notes.is_empty() {
-            changes.push(format!(
-                "standardized {} header(s){}",
-                standardize_notes.len(),
-                summarize_notes(&standardize_notes),
-            ));
-        }
 
         // --- Subject rename (skip when also deleting — would rename then remove) ---
         if !matches!(status, Some("deleted"))
@@ -389,15 +359,18 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     })
 }
 
-fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()> {
+fn insert_at_path(plan: Plan, plan_path: &str, subject: &str) -> Result<Plan> {
+    let mut plan = plan;
     if plan.find(plan_path).is_some() {
         // Already in the plan — leave it alone, just record the mapping.
-        return Ok(());
+        return Ok(plan);
     }
     let new_node = Node {
         id: plan_path.to_string(),
         title: subject.to_string(),
         state: NodeState::Pending,
+        id_style: crate::ast::IdStyle::Plain,
+        separator: crate::ast::Separator::Space,
         children: vec![],
         annotations: vec![],
     };
@@ -405,23 +378,34 @@ fn insert_at_path(plan: &mut Plan, plan_path: &str, subject: &str) -> Result<()>
         None => plan.insert_phase(new_node),
         Some(parent_id) => {
             if plan.find(&parent_id).is_none() {
-                // Most common cause: user asked for `5.2a` but `5.0` doesn't
-                // exist as a checkbox. Suggest both possible fixes.
-                anyhow::bail!(
-                    "inserting {plan_path}: parent `{parent_id}` not found in PLAN.md. \
-                     Either the parent phase doesn't exist yet (create it first with a \
-                     `- [ ] {parent_id} ...` checkbox), or your plan uses `### Phase N` \
-                     section headers instead of canonical phase checkboxes — the bridge \
-                     auto-standardizes Phase-N headers but only when the format matches \
-                     `### Phase N — Title` exactly."
-                );
+                // Conditional canonicalize fallback: if the parent isn't found,
+                // it may be living as a `### Phase N — Title` markdown header
+                // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
+                // Standardize, retry the lookup; if the parent's now visible
+                // use the standardized plan, otherwise surface a clean error
+                // (don't blow up the file just to fail).
+                let (standardized, _notes) = plan
+                    .clone()
+                    .standardize_to_canonical()
+                    .map_err(|e| anyhow!(e))?;
+                if standardized.find(&parent_id).is_some() {
+                    plan = standardized;
+                } else {
+                    anyhow::bail!(
+                        "inserting {plan_path}: parent `{parent_id}` not found in PLAN.md. \
+                         Either the parent phase doesn't exist yet (create it first with a \
+                         `- [ ] {parent_id} ...` checkbox), or your plan uses an unrecognized \
+                         section-header format. Try `plan-bridge canonicalize --dry-run` to \
+                         see how the bridge would normalize the structure."
+                    );
+                }
             }
             plan.add_child_of(&parent_id, new_node)
                 .map_err(|e| anyhow!(e))
                 .with_context(|| format!("inserting {plan_path}"))?;
         }
     }
-    Ok(())
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -633,8 +617,8 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("5.0"), "should name missing parent: {msg}");
         assert!(
-            msg.contains("section header") || msg.contains("Phase-N"),
-            "should hint at format issue: {msg}"
+            msg.contains("section-header") || msg.contains("canonicalize"),
+            "should hint at format issue + canonicalize escape hatch: {msg}"
         );
         assert!(
             msg.contains("doesn't exist yet") || msg.contains("create it first"),
@@ -1057,42 +1041,50 @@ mod tests {
     }
 
     #[test]
-    fn writeback_create_standardizes_phase_n_header_and_warns() {
-        // Phase 15.1 / ocr_pdf_latex regression. The parser captures
-        // `### Phase 1 — Build` as an annotation; standardize promotes it to
-        // a `- [ ] 1.0 Build` phase node, the bridge proceeds with the
-        // writeback, and the hook output names what changed so the user can
-        // verify the rewrite.
+    fn writeback_create_falls_back_to_canonicalize_when_parent_is_header_only() {
+        // Phase 29.2: writeback no longer canonicalizes implicitly. But if the
+        // requested plan_path's parent ONLY exists as a `### Phase N — Title`
+        // markdown header (not a checkbox), insert_at_path's conditional
+        // fallback runs standardize_to_canonical so the new task can land.
+        // This is the narrow rescue path — the alternative is failing the
+        // hook entirely on Phase-N-header projects.
         let dir = scratch_dir();
         let original = "- [x] 0.1 First\n\n### Phase 1 — Build\n\n- [ ] 1.1 Build it\n";
         let plan = write_plan(&dir, original);
 
-        // Insert a new task under the (now-promoted) 1.0 phase.
         let payload = payload_for_create("t-x", "new sub", Some("1.2"));
-        let out = writeback_create(&payload, &plan).expect("standardize+insert should succeed");
-
+        writeback_create(&payload, &plan).expect("conditional canonicalize fallback");
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
             after.contains("- [ ] 1.0 Build"),
-            "phase header promoted:\n{after}"
-        );
-        assert!(
-            after.contains("  - [ ] 1.1 Build it"),
-            "child reparented:\n{after}"
+            "phase header promoted by fallback:\n{after}"
         );
         assert!(
             after.contains("  - [ ] 1.2 new sub"),
             "new task lands under 1.0:\n{after}"
         );
-        assert!(
-            !after.contains("### Phase 1"),
-            "section header removed:\n{after}"
-        );
+    }
 
-        let hook_json = out.to_json();
+    #[test]
+    fn writeback_create_preserves_narrative_sub_headers_when_parent_already_checkbox() {
+        // Phase 29.2 (regression class). When the parent is already a
+        // checkbox phase, writeback parses + inserts without invoking
+        // standardize_to_canonical. Any `### X.4.a — Sub-section` headers
+        // that the user uses for grouping inside the phase stay verbatim.
+        let dir = scratch_dir();
+        let original =
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### X.4.a — Sub-section grouping\n\n  - [ ] 1.2 Existing\n";
+        let plan = write_plan(&dir, original);
+        let payload = payload_for_create("t-x", "new sub", Some("1.3"));
+        writeback_create(&payload, &plan).expect("clean append");
+        let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            hook_json.contains("standardized") || hook_json.contains("promoted"),
-            "hook output must announce the rewrite: {hook_json}"
+            after.contains("### X.4.a — Sub-section grouping"),
+            "sub-section header preserved verbatim:\n{after}"
+        );
+        assert!(
+            after.contains("- [ ] 1.3 new sub"),
+            "new leaf inserted:\n{after}"
         );
     }
 
@@ -1127,7 +1119,11 @@ mod tests {
     }
 
     #[test]
-    fn writeback_update_standardizes_then_applies_status_change() {
+    fn writeback_update_does_not_promote_unrelated_headers() {
+        // Phase 29.2: writeback_update ticks the mapped leaf without
+        // canonicalizing the rest of the file. A `### Phase 2 — Other work`
+        // header elsewhere in the document stays put — the user's chosen
+        // format isn't collateral damage from a routine status change.
         let dir = scratch_dir();
         let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### Phase 2 — Other work\n\n- [ ] 2.1 Other task\n";
         let plan = write_plan(&dir, original);
@@ -1144,21 +1140,16 @@ mod tests {
         );
         state.save(&default_state_path_for(&plan)).unwrap();
 
-        writeback_update(&payload_for_update("t-1", "completed"), &plan)
-            .expect("standardize + tick should succeed");
+        writeback_update(&payload_for_update("t-1", "completed"), &plan).expect("tick succeeds");
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(after.contains("  - [x] 1.1 Task"), "1.1 ticked:\n{after}");
         assert!(
-            after.contains("- [ ] 2.0 Other work"),
-            "Phase 2 promoted:\n{after}"
+            after.contains("### Phase 2 — Other work"),
+            "unrelated narrative header preserved:\n{after}"
         );
         assert!(
-            after.contains("  - [ ] 2.1 Other task"),
-            "2.1 reparented:\n{after}"
-        );
-        assert!(
-            !after.contains("### Phase 2"),
-            "section header gone:\n{after}"
+            !after.contains("- [ ] 2.0 Other work"),
+            "Phase 2 must NOT be promoted by a routine update:\n{after}"
         );
     }
 
