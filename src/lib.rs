@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod ast;
 pub mod audit;
+pub mod backlog;
 pub mod baseline;
 pub mod hook;
 pub mod init;

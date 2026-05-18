@@ -41,10 +41,33 @@ Make PLAN.md the single source of truth. TaskCreate becomes a mirror, populated 
 - Nested tasks: `  - [ ] N.M Task title`
 - Leaf subtasks: `    - [ ] N.M.K Subtask title`
 - Two-space indent per level (parser accepts 2 or 4; normalizes to 2 on write).
-- Three checkbox states: `[ ]` pending, `[x]` done, `[-]` won't-do. The parser also accepts `[~]` as an alias for won't-do on input but normalizes to `[-]` on write.
-- Archive treats `[x]` and `[-]` equivalently — both count as "resolved" for the phase-exit completeness check. The semantic difference is recorded in PLAN.md for the reader's benefit; it doesn't affect sweep behavior.
-- A phase exits only when every nested box is `[x]`. On exit, the phase is swept to `PLAN_ARCHIVE.md`.
+- Four checkbox states: `[ ]` pending, `[x]` done, `[-]` won't-do, `[>]` backlog. The parser also accepts `[~]` as an alias for won't-do on input but normalizes to `[-]` on write.
+- Archive treats `[x]`, `[-]`, and `[>]` equivalently — all three count as "resolved" for the phase-exit completeness check. The semantic differences are recorded in PLAN.md for the reader's benefit; they don't affect sweep behavior.
+- A phase exits only when every nested box is resolved. On exit, the phase (including any `[>]` lines) is swept to `PLAN_ARCHIVE.md`. The deferred work isn't lost: backlogging a leaf also appends a bullet under `## Backlog (not yet phased)` at the top of PLAN.md, which survives the sweep.
 - Sibling bullets without checkboxes are notes/context, not tasks.
+
+### Backlog state (`[>]`) semantics
+
+`[>]` marks a leaf that was real planned work but is being **consciously deferred from its current phase** — distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active). Use it when you want to ship the phase without dragging unfinished work along, but the deferred item is worth remembering for later.
+
+- **On-disk marker**: `[>]` in PLAN.md (canonical). Parser accepts only `[>]`.
+- **Human-facing output**: the bridge renders all four states with emoji in `additionalContext`, status output, reconcile drift, and hook prompts: ✅ done, ❌ won't-do, 🔜 backlog, ⬜ pending. The raw bracket form stays in PLAN.md itself; the emoji translation is presentation-only.
+- **Backlog-section promotion**: when a leaf transitions Pending → Backlog (via `TaskUpdate(deleted)`, the `plan_backlog` MCP tool, or the `backlog` CLI subcommand), the bridge appends a bullet under `## Backlog (not yet phased)` recording the title, the source `plan_path`, and the date. This bullet outlives the phase sweep.
+- **Archive equivalence**: `[>]` doesn't block phase exit. The phase-fully-done check treats it as resolved, and the entire phase (including `[>]` lines) is swept to PLAN_ARCHIVE.md. The Backlog section in PLAN.md remains as the durable record of deferred work.
+- **Reconcile**: Pending ↔ Backlog transitions surface as `LeafStateChanged { old, new }`, same as other state flips. External edits to PLAN.md that introduce `[>]` reconcile on the next prompt.
+
+### TaskUpdate(deleted) flow (post-Phase 28)
+
+Calling `TaskUpdate(status="deleted")` against a mapped leaf has state-dependent behavior:
+
+| Current PLAN.md state | What `TaskUpdate(deleted)` does |
+|---|---|
+| `[ ]` Pending | Flips the line to `[>]`, appends a bullet under `## Backlog (not yet phased)`, drops the state mapping. **Never hard-deletes a pending leaf.** |
+| `[-]` Won't-do | Keeps the line, drops the state mapping. (Same as pre-Phase 28.) |
+| `[x]` Done | Keeps the line, drops the state mapping. |
+| `[>]` Backlog | No-op on the line, drops the state mapping if present. |
+
+Rationale: hard-deletes via TaskUpdate were error-prone — an accidental "remove task" click in the harness UI silently deleted plan content. Backlogging instead preserves the work and forces explicit `Edit`/`Write` against PLAN.md for true removal.
 
 ### Tolerated input variants (read-only liberality)
 
@@ -92,7 +115,7 @@ Single binary, multiple subcommands:
 |---|---|---|---|
 | `UserPromptSubmit` | — | `plan-bridge reconcile --task-list "$(claude-task-list)"` | Surface PLAN.md state + drift before each Claude turn. |
 | `PostToolUse` | `TaskCreate` | `plan-bridge writeback --event create` | Append a checkbox if the new task isn't already in PLAN.md; record taskId↔plan_path. |
-| `PostToolUse` | `TaskUpdate` | `plan-bridge writeback --event update` | Toggle `[ ]`/`[x]` based on status. `deleted` removes the line. |
+| `PostToolUse` | `TaskUpdate` | `plan-bridge writeback --event update` | Toggle `[ ]`/`[x]` based on status. `deleted` flips Pending → `[>]` (backlog) and promotes the leaf to the `## Backlog (not yet phased)` section; for non-Pending leaves, drops the mapping and leaves the line alone. See "TaskUpdate(deleted) flow" above. |
 | `PostToolUse` | `Edit\|Write` | `plan-bridge reconcile` (only when path ends in `PLAN.md`) | Re-derive task list when Claude edits PLAN.md directly. |
 
 Hook output uses `hookSpecificOutput.additionalContext` to feed PLAN.md state back into Claude's next turn. `decision: "block"` is reserved for hard failures (malformed PLAN.md, write conflict).
@@ -117,13 +140,13 @@ plan-bridge init
 
 All commands read/write `PLAN.md` in the current working directory unless `--plan <PATH>` is passed.
 
-## MCP surface (deferred to Phase 3+)
+## MCP surface
 
 Same binary, `plan-bridge serve` entry point. Exposes:
 
-- `plan_add`, `plan_check`, `plan_uncheck`, `plan_archive`, `plan_list`, `plan_phase_exit`.
+- `plan_add`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_backlog`, `plan_archive`, `plan_list`, `plan_phase_exit`, `plan_rename`.
 
-Useful when TaskCreate's flat model is too lossy — e.g., explicit reordering, phase-exit gates, querying archival. Adds Claude-callable tools that operate on PLAN.md natively without going through TaskCreate at all.
+Useful when TaskCreate's flat model is too lossy — e.g., explicit reordering, phase-exit gates, querying archival, deferring without going through `TaskUpdate(deleted)`. Adds Claude-callable tools that operate on PLAN.md natively without going through TaskCreate at all.
 
 ## Language / tooling
 
@@ -156,3 +179,5 @@ Useful when TaskCreate's flat model is too lossy — e.g., explicit reordering, 
 - User manually edits PLAN.md to tick `1.1.1`; next UserPromptSubmit emits a delta telling Claude to `TaskUpdate` the matching task to completed.
 - `plan-bridge archive` moves any phase whose entire subtree is `[x]` into `PLAN_ARCHIVE.md` with a timestamped header, and removes it from PLAN.md.
 - End-to-end: a fresh project + `plan-bridge init` + a Claude session that creates and completes a small plan produces a clean PLAN.md and PLAN_ARCHIVE.md, with TaskCreate state matching at every point.
+- `TaskUpdate(taskId=X, status="deleted")` against a `[ ]` leaf flips it to `[>]`, appends a bullet under `## Backlog (not yet phased)` referencing the source `plan_path` and date, and drops the state mapping. The leaf does NOT get hard-deleted from PLAN.md.
+- `plan-bridge archive` (or `plan_phase_exit` MCP) succeeds on a phase whose remaining leaves are a mix of `[x]`, `[-]`, and `[>]`; the entire phase is moved to `PLAN_ARCHIVE.md` and the `## Backlog` entries promoted earlier remain in PLAN.md.

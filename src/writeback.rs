@@ -302,14 +302,37 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 }
             }
             Some("deleted") => {
-                // TaskUpdate(deleted) NEVER mutates PLAN.md content. The only
-                // path content leaves PLAN.md is archive, after a phase
-                // fully closes. Treating delete as "just unlink the
-                // harness mapping" avoids destructive blast radius from
-                // stale cross-session mappings: a fresh harness reusing a
-                // low task_id could otherwise delete a phase root and its
-                // entire subtree. Hand-edit PLAN.md or run archive when
-                // you actually want to remove a line.
+                // TaskUpdate(deleted) NEVER hard-deletes a PLAN.md line. Per
+                // Phase 28: on a Pending leaf, flip it to `[>]` (backlog) and
+                // append a bullet under `## Backlog (not yet phased)`. On
+                // non-Pending (Done / WontDo / Backlog) or missing leaves,
+                // just unlink the harness mapping — the prior contract.
+                // Hand-edit PLAN.md or run archive to actually remove a line.
+                let pending_leaf = plan
+                    .find(&node_path)
+                    .map(|n| n.state == NodeState::Pending && n.is_leaf())
+                    .unwrap_or(false);
+                if pending_leaf {
+                    let title = plan
+                        .find(&node_path)
+                        .map(|n| n.title.clone())
+                        .unwrap_or_default();
+                    if let Some(node) = plan.find_mut(&node_path) {
+                        node.state = NodeState::Backlog;
+                    }
+                    plan.append_backlog_entry(&node_path, &title, &crate::today::today_utc());
+                    std::fs::write(plan_path, serialize(&plan))
+                        .with_context(|| format!("write {}", plan_path.display()))?;
+                    state.remove(&input.task_id);
+                    state.save(&state_path)?;
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: backlogged {node_path} (flipped to [>], promoted to ## Backlog); unlinked task {}",
+                            input.task_id
+                        ),
+                    ));
+                }
                 state.remove(&input.task_id);
                 state.save(&state_path)?;
                 return Ok(HookOutput::context(
@@ -821,41 +844,44 @@ mod tests {
     }
 
     #[test]
-    fn update_deleted_unlinks_mapping_but_preserves_plan_md() {
-        // Archive is the only legitimate path for content to leave PLAN.md.
-        // TaskUpdate(deleted) is now strictly an unlink — drops the state
-        // mapping without mutating PLAN.md. This eliminates the destruction
-        // class where a stale cross-session mapping could turn a routine
-        // delete into a phase-subtree wipe.
+    fn update_deleted_on_pending_leaf_flips_to_backlog() {
+        // Phase 28: TaskUpdate(deleted) on a Pending leaf flips the line
+        // to `[>]` and appends a bullet under `## Backlog (not yet phased)`.
+        // The mapping is dropped from state. The line is never hard-deleted.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
-        let before = std::fs::read_to_string(&plan).unwrap();
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert_eq!(before, after, "PLAN.md must be byte-identical after delete");
         assert!(
-            after.contains("- [ ] 1.1 Task"),
-            "leaf line should survive: {after}"
+            after.contains("- [>] 1.1 Task"),
+            "leaf should flip to [>]: {after}"
+        );
+        assert!(
+            after.contains("## Backlog (not yet phased)"),
+            "Backlog section should be created: {after}"
+        );
+        assert!(
+            after.contains("- **Task** — deferred from 1.1 on"),
+            "Backlog entry should be appended: {after}"
         );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-1"), None, "mapping should be cleared");
     }
 
     #[test]
-    fn update_deleted_on_phase_root_does_not_destroy_subtree() {
+    fn update_deleted_on_non_leaf_unlinks_only() {
         // Regression guard for the destruction class: a stale cross-session
-        // mapping pointing at a phase root would previously cause
-        // TaskUpdate(deleted) to wipe the phase and every subtask under it.
-        // Now delete is unlink-only; the subtree must survive.
+        // mapping pointing at a phase root previously caused TaskUpdate(deleted)
+        // to wipe the phase and every subtask under it. The Phase 28 backlog
+        // flip is leaf-only — non-leaves fall back to unlink-only behavior so
+        // a stale mapping can't turn into a destructive backlog flip on a
+        // parent node.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
             "- [ ] 1.0 Phase\n  - [ ] 1.1 Child A\n  - [ ] 1.2 Child B\n",
         );
-        // Bridge tracks the phase root (simulates a stale mapping that
-        // points at a parent node — exactly the shape that caused the
-        // Phase 24 wipe during the 25.6a test cycle).
         writeback_create(&payload_for_create("t-phase", "Phase", Some("1.0")), &plan).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
         writeback_update(&payload_for_update("t-phase", "deleted"), &plan).unwrap();
@@ -863,6 +889,10 @@ mod tests {
         assert_eq!(before, after, "phase + subtree must survive a delete");
         assert!(after.contains("1.1 Child A"), "child A wiped: {after}");
         assert!(after.contains("1.2 Child B"), "child B wiped: {after}");
+        assert!(
+            !after.contains("[>]"),
+            "non-leaf must not flip to backlog: {after}"
+        );
     }
 
     #[test]

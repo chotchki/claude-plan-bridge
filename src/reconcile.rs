@@ -238,13 +238,9 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                 title,
                 state,
             } => {
-                let mark = match state {
-                    NodeState::Done => "[x]",
-                    NodeState::WontDo => "[-]",
-                    NodeState::Pending => "[ ]",
-                };
                 out.push_str(&format!(
-                    "  + Added {mark} {plan_path} {title}  (consider TaskCreate)\n"
+                    "  + Added {mark} {plan_path} {title}  (consider TaskCreate)\n",
+                    mark = state.emoji(),
                 ));
             }
             Delta::LeafRemoved { plan_path, task_id } => {
@@ -263,18 +259,24 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                     (_, NodeState::WontDo) => {
                         "consider TaskUpdate status=deleted (the [-] line stays in PLAN.md)"
                     }
+                    (_, NodeState::Backlog) => {
+                        "consider TaskUpdate status=deleted (auto-flips Pending → [>] and promotes to ## Backlog)"
+                    }
                     (NodeState::Done, NodeState::Pending) => {
                         "no TaskUpdate revives a completed task; informational"
                     }
                     (NodeState::WontDo, NodeState::Pending) => {
                         "task was previously skipped; consider TaskCreate to re-introduce"
                     }
+                    (NodeState::Backlog, NodeState::Pending) => {
+                        "task was deferred; consider TaskCreate to re-activate"
+                    }
                     _ => "informational",
                 };
                 out.push_str(&format!(
-                    "  ~ State {plan_path} ({state_old:?} → {state_new:?}) (task {task_id} — {suggestion})\n",
-                    state_old = old,
-                    state_new = new,
+                    "  ~ State {plan_path} ({state_old} → {state_new}) (task {task_id} — {suggestion})\n",
+                    state_old = old.emoji(),
+                    state_new = new.emoji(),
                 ));
             }
             Delta::LeafTitleChanged {
@@ -671,6 +673,40 @@ mod tests {
     }
 
     #[test]
+    fn detects_leaf_backlogged() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [>] 1.1 Deferred\n");
+        write_state(&plan, &[("t-1", mapping("1.1", "Deferred", false, &[]))]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            Delta::LeafStateChanged {
+                new: NodeState::Backlog,
+                old: NodeState::Pending,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn detects_leaf_un_backlogged() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Revived\n");
+        let mut m = mapping("1.1", "Revived", false, &[]);
+        m.last_synced_state = NodeState::Backlog;
+        write_state(&plan, &[("t-1", m)]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            Delta::LeafStateChanged {
+                new: NodeState::Pending,
+                old: NodeState::Backlog,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn detects_title_change() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Renamed task\n");
@@ -934,5 +970,28 @@ mod tests {
         assert!(r.contains("1.3"));
         assert!(r.contains("State"));
         assert!(r.contains("1.1"));
+    }
+
+    #[test]
+    fn render_uses_emoji_for_states() {
+        let deltas = vec![
+            Delta::LeafAdded {
+                plan_path: "1.3".to_string(),
+                title: "Deferred new".to_string(),
+                state: NodeState::Backlog,
+            },
+            Delta::LeafStateChanged {
+                plan_path: "1.1".to_string(),
+                task_id: "t-1".to_string(),
+                old: NodeState::Pending,
+                new: NodeState::Backlog,
+            },
+        ];
+        let r = render_deltas(&deltas);
+        assert!(r.contains("🔜"), "Backlog emoji expected in: {r}");
+        assert!(r.contains("⬜"), "Pending emoji expected in transition: {r}");
+        // The transition's old/new states render as emojis, not Debug-form
+        // enum names. Check the specific `(X → Y)` arrow pattern.
+        assert!(r.contains("(⬜ → 🔜)"), "expected emoji transition arrow: {r}");
     }
 }

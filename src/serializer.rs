@@ -30,6 +30,7 @@ fn write_node(out: &mut String, node: &Node, depth: usize) {
     let mark = match node.state {
         NodeState::Done => "x",
         NodeState::WontDo => "-",
+        NodeState::Backlog => ">",
         NodeState::Pending => " ",
     };
     out.push_str(&format!("{indent}- [{mark}] {} {}\n", node.id, node.title));
@@ -112,6 +113,12 @@ mod tests {
     fn wont_do_phase_round_trips_with_dash() {
         let plan = parse("- [-] 1.0 Skipped\n").unwrap();
         assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
+    }
+
+    #[test]
+    fn backlog_phase_round_trips_with_gt() {
+        let plan = parse("- [>] 1.0 Deferred\n").unwrap();
+        assert_eq!(serialize(&plan), "- [>] 1.0 Deferred\n");
     }
 
     #[test]

@@ -122,6 +122,21 @@ enum Command {
         #[arg(long, default_value = ".")]
         cwd: PathBuf,
     },
+    /// Defer a pending leaf: flip its checkbox to `[>]` (Backlog) and append
+    /// a bullet under `## Backlog (not yet phased)` recording the source
+    /// plan_path + date. Drops any state mapping pointing at this path.
+    /// Archive treats Backlog like resolved, so the next phase exit sweeps
+    /// the deferred leaf with the rest — the Backlog-section bullet survives
+    /// to record the deferred work.
+    Backlog {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// Plan path to defer (e.g. `28.7`).
+        plan_path: String,
+        /// Override the date stamp (YYYY-MM-DD); defaults to today UTC.
+        #[arg(long)]
+        date: Option<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -262,6 +277,16 @@ fn main() -> Result<()> {
             eprintln!("▎   updated hook set (notably SessionStart, which rehydrates the task");
             eprintln!("▎   list from PLAN.md) to take effect.");
             eprintln!();
+        }
+        Command::Backlog {
+            project,
+            plan_path,
+            date,
+        } => {
+            let plan = project.plan_path();
+            let date = date.unwrap_or_else(plan_bridge::today::today_utc);
+            let msg = plan_bridge::backlog::backlog(&plan, &plan_path, &date)?;
+            println!("claude-plan-bridge: {msg}");
         }
         Command::Archive {
             project,

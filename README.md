@@ -69,7 +69,7 @@ When a phase is fully resolved, sweep it:
 claude-plan-bridge archive
 ```
 
-…moves every fully-`[x]` (or `[-]`) top-level phase into `PLAN_ARCHIVE.md` under a dated section, and drops the associated state mappings.
+…moves every fully-resolved (`[x]`, `[-]`, or `[>]`) top-level phase into `PLAN_ARCHIVE.md` under a dated section, and drops the associated state mappings.
 
 ## CLI reference
 
@@ -114,7 +114,7 @@ Delta variants Claude can act on:
 |---|---|---|
 | `leaf_added` | New checkbox in `PLAN.md` with no state mapping | `TaskCreate` to mirror |
 | `leaf_removed` | Tracked task missing from `PLAN.md` | `TaskUpdate(status="deleted")` |
-| `leaf_state_changed` | Checkbox flipped between `[ ]`/`[x]`/`[-]` | `TaskUpdate` matching the new state |
+| `leaf_state_changed` | Checkbox flipped between `[ ]`/`[x]`/`[-]`/`[>]` | `TaskUpdate` matching the new state |
 | `leaf_title_changed` | Title text edited | `TaskUpdate(subject=...)` |
 | `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read; act if needed |
 | `parent_inconsistent` | A parent is `[x]` but a descendant leaf isn't | Resolve before archive — sweep refuses inconsistent phases |
@@ -137,7 +137,7 @@ Seed the state file with synthetic `baseline:<plan_path>` mappings for every lea
 
 Run an MCP server over stdio that exposes typed plan-mutation tools. Useful when you'd rather drive plans through a structured API than through markdown editing.
 
-Tools: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_add`, `plan_rename`, `plan_archive`, `plan_phase_exit`. Errors surface as JSON-RPC error responses (`code: -32603`); unknown tools and missing args produce clean errors the client can show. `plan_rename(plan_path, new_subject)` mirrors writeback's `TaskUpdate(subject=...)` and refreshes the synced baseline so reconcile is quiet next turn.
+Tools: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_backlog`, `plan_add`, `plan_rename`, `plan_archive`, `plan_phase_exit`. Errors surface as JSON-RPC error responses (`code: -32603`); unknown tools and missing args produce clean errors the client can show. `plan_rename(plan_path, new_subject)` mirrors writeback's `TaskUpdate(subject=...)` and refreshes the synced baseline so reconcile is quiet next turn.
 
 Wire it into your MCP client config — for Claude Code, point an `mcpServers` entry at `claude-plan-bridge serve`.
 
@@ -180,8 +180,9 @@ Sidecar `.claude/plan-bridge-cleared.jsonl` is an append-only JSON Lines audit l
 
 ## Canonical `PLAN.md` format
 
-- Checkboxes: `- [ ]` / `- [x]` / `- [-]` followed by a dotted id and the title. No bold wrapping, plain-space separator.
-- Three states: `[ ]` pending, `[x]` done, `[-]` won't-do (the parser also accepts `[~]` on read, always writes `[-]`).
+- Checkboxes: `- [ ]` / `- [x]` / `- [-]` / `- [>]` followed by a dotted id and the title. No bold wrapping, plain-space separator.
+- Four states: `[ ]` pending, `[x]` done, `[-]` won't-do, `[>]` backlog (deferred — see [Backlog state](#backlog-state-) below). The parser also accepts `[~]` on read for won't-do; always writes `[-]`.
+- Human-facing output renders state as emoji: ⬜ pending, ✅ done, ❌ won't-do, 🔜 backlog. PLAN.md itself always uses the bracket form.
 - IDs are project-scoped and stable across archive sweeps. Suffix-positioning works: `7.2a` slots between `7.2` and `7.3` without renumbering.
 - Two-space indent per tree level.
 - Code-block fences re-emit at the normalized indent; their content is preserved verbatim.
@@ -198,7 +199,7 @@ The parser also tolerates several human-friendly variants (bold-wrapped ids, em-
     {
       "id": "1.0",            // dotted-decimal, project-scoped
       "title": "Phase title",
-      "state": "pending",     // "pending" | "done" | "wont_do"
+      "state": "pending",     // "pending" | "done" | "wont_do" | "backlog"
       "children": [ /* same Node shape, nested */ ],
       "annotations": [ /* tagged unions, see below */ ]
     }
@@ -217,6 +218,25 @@ Annotations:
 Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == parse(x)` holds, but source format (bold wrapping, em-dash separator, etc.) is intentionally normalized away.
 
 </details>
+
+## Backlog state (`[>]` 🔜)
+
+`[>]` marks a leaf as **deferred from its current phase** — work you've consciously decided not to ship as part of this phase, but want to remember for later. Distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active).
+
+Three ways to enter the state:
+
+1. **`TaskUpdate(taskId=X, status="deleted")` against a pending leaf** — the hook flips the line to `[>]` and appends a bullet under `## Backlog (not yet phased)` recording the source plan_path + date. State mapping is dropped. **Pending leaves are never hard-deleted from PLAN.md via `TaskUpdate`** — this is the safety contract. To actually remove a line, edit PLAN.md by hand or let archive sweep it.
+2. **MCP `plan_backlog(plan_path, date?)`** — same effect, callable directly without going through the harness task list. Useful when there's no active mapping (e.g., baselined plan).
+3. **CLI `plan-bridge backlog <plan_path>`** — same effect from the shell.
+
+What happens at phase exit: archive treats `[>]` like `[x]` and `[-]` — all three count as "resolved" for the `phase_fully_done` gate. When the phase sweeps to `PLAN_ARCHIVE.md`, the `[>]` lines go with it. But the `## Backlog (not yet phased)` bullet you got at deferral time **stays in PLAN.md**, so the deferred work is preserved as a durable record.
+
+When to use `[>]` vs `[-]`:
+
+- `[-]` (won't-do): "we evaluated this and decided not to do it." Final.
+- `[>]` (backlog): "this is real work; we're punting it out of THIS phase." Re-introduce later by hand-adding to a new phase or `TaskCreate` against a new plan_path.
+
+If you're not sure: prefer `[>]`. Backlog preserves the work; won't-do discards it.
 
 ## Contributing
 

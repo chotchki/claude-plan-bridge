@@ -21,11 +21,12 @@ pub struct Node {
     pub annotations: Vec<Annotation>,
 }
 
-/// Checkbox state. `Pending` = `[ ]`, `Done` = `[x]`, `WontDo` = `[-]`.
+/// Checkbox state. `Pending` = `[ ]`, `Done` = `[x]`, `WontDo` = `[-]`, `Backlog` = `[>]`.
 ///
-/// `Done` and `WontDo` are both "resolved" — archive treats them
-/// equivalently — but they're semantically distinct in PLAN.md: `WontDo`
-/// captures *we decided not to do this*, which is information worth keeping.
+/// `Done`, `WontDo`, and `Backlog` are all "resolved" — archive treats them
+/// equivalently — but they're semantically distinct in PLAN.md:
+/// - `WontDo` = *we decided not to do this*
+/// - `Backlog` = *deferred from this phase; worth keeping for later*
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeState {
@@ -33,13 +34,29 @@ pub enum NodeState {
     Pending,
     Done,
     WontDo,
+    Backlog,
 }
 
 impl NodeState {
-    /// True when this leaf is no longer active work — either done or
-    /// explicitly skipped. Archive uses this; reconcile draws a finer line.
+    /// True when this leaf is no longer active work — done, skipped, or
+    /// deferred. Archive uses this; reconcile draws a finer line.
     pub fn is_resolved(self) -> bool {
-        matches!(self, NodeState::Done | NodeState::WontDo)
+        matches!(
+            self,
+            NodeState::Done | NodeState::WontDo | NodeState::Backlog
+        )
+    }
+
+    /// Single-glyph rendering for human-facing surfaces — reconcile drift,
+    /// hook additionalContext, status output. The serializer (PLAN.md on disk)
+    /// always uses bracket form; this is presentation-only.
+    pub fn emoji(self) -> &'static str {
+        match self {
+            NodeState::Pending => "⬜",
+            NodeState::Done => "✅",
+            NodeState::WontDo => "❌",
+            NodeState::Backlog => "🔜",
+        }
     }
 }
 
@@ -364,6 +381,56 @@ impl Plan {
             }
         }
         None
+    }
+
+    /// Append a deferred-work entry under `## Backlog (not yet phased)` in
+    /// the preamble. Creates the section at the end of the preamble if it
+    /// doesn't already exist. Idempotent: a bullet referencing the same
+    /// `plan_path` won't be added twice.
+    ///
+    /// Format: `- **<title>** — deferred from <plan_path> on <date>.`
+    pub fn append_backlog_entry(&mut self, plan_path: &str, title: &str, date: &str) {
+        let entry = format!("- **{title}** — deferred from {plan_path} on {date}.");
+        let needle = format!("deferred from {plan_path} on");
+        if self.preamble.iter().any(|line| line.contains(&needle)) {
+            return;
+        }
+        let header_idx = self
+            .preamble
+            .iter()
+            .position(|line| line.trim_start().starts_with("## Backlog"));
+        match header_idx {
+            Some(idx) => {
+                // Find the last bullet under this section (consecutive `- `
+                // lines, possibly interleaved with blank lines, until we hit
+                // another `##`/`#` header or `---` separator).
+                let mut last_bullet = idx;
+                let mut i = idx + 1;
+                while i < self.preamble.len() {
+                    let trimmed = self.preamble[i].trim_start();
+                    if trimmed.starts_with("##") || trimmed.starts_with("---") {
+                        break;
+                    }
+                    if trimmed.starts_with("- ") {
+                        last_bullet = i;
+                    }
+                    i += 1;
+                }
+                self.preamble.insert(last_bullet + 1, entry);
+            }
+            None => {
+                // No section yet — append one at the end of the preamble.
+                if !self.preamble.is_empty()
+                    && !self.preamble.last().map(|s| s.is_empty()).unwrap_or(true)
+                {
+                    self.preamble.push(String::new());
+                }
+                self.preamble.push("## Backlog (not yet phased)".to_string());
+                self.preamble.push(String::new());
+                self.preamble.push(entry);
+                self.preamble.push(String::new());
+            }
+        }
     }
 
     /// Find the existing Inbox phase (id `Inbox.0`) or create one at the end of
@@ -988,6 +1055,46 @@ mod tests {
         };
         let (_, notes) = plan.standardize_to_canonical().unwrap();
         assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn append_backlog_entry_inserts_under_existing_section() {
+        let mut plan = parse_for_test(
+            "# Title\n\n## Backlog (not yet phased)\n\n- **Existing item** — context.\n\n---\n\n- [ ] 1.0 Phase\n",
+        );
+        plan.append_backlog_entry("28.7", "Test entry", "2026-05-17");
+        let serialized = crate::serializer::serialize(&plan);
+        assert!(
+            serialized.contains("- **Test entry** — deferred from 28.7 on 2026-05-17."),
+            "got: {serialized}"
+        );
+        // Existing item still there.
+        assert!(serialized.contains("- **Existing item** — context."));
+        // Inserted before the `---` separator.
+        let backlog_pos = serialized.find("- **Test entry**").unwrap();
+        let dashes_pos = serialized.find("\n---\n").unwrap();
+        assert!(backlog_pos < dashes_pos);
+    }
+
+    #[test]
+    fn append_backlog_entry_creates_section_when_missing() {
+        let mut plan = parse_for_test("# Title\n\n- [ ] 1.0 Phase\n");
+        plan.append_backlog_entry("28.7", "Bootstrap entry", "2026-05-17");
+        let serialized = crate::serializer::serialize(&plan);
+        assert!(serialized.contains("## Backlog (not yet phased)"));
+        assert!(serialized.contains("- **Bootstrap entry** — deferred from 28.7 on 2026-05-17."));
+    }
+
+    #[test]
+    fn append_backlog_entry_idempotent_on_same_plan_path() {
+        let mut plan = parse_for_test(
+            "## Backlog (not yet phased)\n\n- **First** — deferred from 28.7 on 2026-05-17.\n\n---\n\n- [ ] 1.0 Phase\n",
+        );
+        plan.append_backlog_entry("28.7", "Second attempt", "2026-05-18");
+        let serialized = crate::serializer::serialize(&plan);
+        // Second call shouldn't add a new entry (same plan_path needle).
+        let count = serialized.matches("deferred from 28.7 on").count();
+        assert_eq!(count, 1, "got: {serialized}");
     }
 
     #[test]

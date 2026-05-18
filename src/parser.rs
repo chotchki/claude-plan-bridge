@@ -189,6 +189,7 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
         " " => NodeState::Pending,
         "x" | "X" => NodeState::Done,
         "-" | "~" => NodeState::WontDo,
+        ">" => NodeState::Backlog,
         other => {
             return Err(ParseError::BadCheckboxState {
                 line: line_no,
@@ -361,6 +362,14 @@ mod tests {
     fn parses_tilde_as_wont_do_alias() {
         let plan = parse("- [~] 1.0 Skipped via tilde\n").unwrap();
         assert_eq!(plan.phases[0].state, NodeState::WontDo);
+    }
+
+    #[test]
+    fn parses_backlog_checkbox() {
+        let plan = parse("- [>] 1.0 Deferred phase\n").unwrap();
+        assert_eq!(plan.phases[0].state, NodeState::Backlog);
+        assert!(!plan.phases[0].is_done());
+        assert!(plan.phases[0].is_resolved());
     }
 
     #[test]

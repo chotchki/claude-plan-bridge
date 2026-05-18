@@ -332,6 +332,26 @@ mod tests {
     }
 
     #[test]
+    fn backlog_leaves_count_as_resolved_for_archive() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "\
+- [ ] 1.0 Mixed-resolved phase
+  - [x] 1.1 Done
+  - [-] 1.2 Skipped
+  - [>] 1.3 Deferred
+",
+        );
+        let report = archive(&plan, false, "2026-05-17").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("1.0 Mixed-resolved phase"));
+        let archive_text = std::fs::read_to_string(archive_path_for(&plan)).unwrap();
+        assert!(archive_text.contains("- [>] 1.3 Deferred"));
+    }
+
+    #[test]
     fn parent_unchecked_but_children_all_done_still_archives() {
         // Bridge doesn't auto-tick parents; a phase whose box reads `[ ]` but
         // whose subtree is fully `[x]` should archive based on subtree state.

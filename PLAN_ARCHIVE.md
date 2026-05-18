@@ -294,3 +294,22 @@
   - [x] 27.5 README: document leaves-only rehydration + parent-tick-is-validation
   - [x] 27.6 Phase 27 exit — tests, version bump, archive
 
+---
+
+## 2026-05-18
+
+- [x] 28.0 Phase 28 — Backlog state marker (`[>]` on disk, 🔜 in human-facing output)
+  - [x] 28.1 Restart test: validate Phase 27 leaves-only + parent-headers + source-aware prompt
+  - [x] 28.2 SPEC.md: define Backlog state semantics + on-disk vs output markers + metadata-driven TaskUpdate flow
+  - [x] 28.3 AST: add NodeState::Backlog (mirrors WontDo pattern)
+  - [x] 28.4 Parser + serializer: accept and emit `[>]` for Backlog
+  - [x] 28.5 Archive: treat Backlog as resolved in phase_fully_done
+  - [x] 28.6 Reconcile: surface Pending↔Backlog transitions as LeafStateChanged
+  - [x] 28.7 Writeback: TaskUpdate(deleted) on a Pending leaf flips PLAN.md to `[>]` and drops state mapping (no opt-in needed)
+  - [x] 28.7a Writeback + CLI/MCP: appending a backlog entry also adds a bullet under `## Backlog (not yet phased)` with source plan_path + date
+  - [x] 28.8 MCP `plan_backlog` tool + CLI `backlog <plan_path>` subcommand
+  - [x] 28.9 Translate `[>]` → 🔜 in human-facing output (status, plan_list, reconcile drift, hook prompts)
+  - [x] 28.9a Translate other checkbox states to emoji in human-facing output (`[x]` → ✅, `[-]` → ❌)
+  - [x] 28.10 README + SPEC.md: document the marker, when to use vs `[-]`, and the auto-flip + Backlog-section-promotion behavior
+  - [x] 28.11 Phase 28 exit — tests, version bump, archive
+

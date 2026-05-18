@@ -87,6 +87,7 @@ impl McpServer {
             "plan_check" => self.tool_plan_check(&args),
             "plan_uncheck" => self.tool_plan_uncheck(&args),
             "plan_skip" => self.tool_plan_skip(&args),
+            "plan_backlog" => self.tool_plan_backlog(&args),
             "plan_add" => self.tool_plan_add(&args),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
@@ -113,6 +114,23 @@ impl McpServer {
 
     fn tool_plan_skip(&self, args: &Value) -> Result<Value> {
         self.set_state(args, NodeState::WontDo, "marked won't-do")
+    }
+
+    /// Defer a node: flip to `[>]` (Backlog) and append a bullet under
+    /// `## Backlog (not yet phased)` recording the source plan_path + date.
+    /// Also drops any state mapping pointing at this path so the harness UI
+    /// stops tracking the deferred task. Optional `date` argument overrides
+    /// the default (today UTC) for reproducibility.
+    fn tool_plan_backlog(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "plan_path")?;
+        let date = args
+            .get("date")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(crate::today::today_utc);
+        crate::backlog::backlog(&self.plan_path, &id, &date)
+            .map(|msg| tool_text_result(&msg))
+            .map_err(|e| anyhow!(e))
     }
 
     fn set_state(&self, args: &Value, target: NodeState, verb: &str) -> Result<Value> {
@@ -329,6 +347,19 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_backlog",
+                "description": "Defer the node with `plan_path`: flip to [>] (Backlog) and append a bullet under `## Backlog (not yet phased)` recording the source plan_path + date. Drops any state mapping pointing at this path. Archive treats Backlog like resolved. No-op if already deferred; errors if the node is already [x] or [-].",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_path": {"type": "string"},
+                        "date": {"type": "string", "description": "YYYY-MM-DD for the backlog bullet. Defaults to today."}
+                    },
+                    "required": ["plan_path"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_phase_exit",
                 "description": "Exit a specific phase: validate every leaf in its subtree is resolved ([x] or [-]), then archive just that phase to PLAN_ARCHIVE.md. Errors out if the subtree still has [ ] leaves.",
                 "inputSchema": {
@@ -490,11 +521,28 @@ mod tests {
             "plan_list",
             "plan_check",
             "plan_uncheck",
+            "plan_skip",
+            "plan_backlog",
             "plan_add",
             "plan_archive",
+            "plan_phase_exit",
+            "plan_rename",
         ] {
             assert!(names.contains(expected), "missing {expected}: {names:?}");
         }
+    }
+
+    #[test]
+    fn plan_backlog_flips_pending_leaf() {
+        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 90, "method": "tools/call", "params": {"name": "plan_backlog", "arguments": {"plan_path": "1.1", "date": "2026-05-17"}}}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(after.contains("- [>] 1.1 Task"), "got: {after}");
+        assert!(after.contains("- **Task** — deferred from 1.1 on 2026-05-17."));
     }
 
     #[test]
