@@ -265,10 +265,8 @@ fn extract_id_title_style(
 
 fn id_and_title(
     input: &mut &str,
-) -> winnow::ModalResult<
-    (String, String, crate::ast::IdStyle, crate::ast::Separator),
-    ContextError,
-> {
+) -> winnow::ModalResult<(String, String, crate::ast::IdStyle, crate::ast::Separator), ContextError>
+{
     use crate::ast::{IdStyle, Separator};
     space0.parse_next(input)?;
 
@@ -341,9 +339,7 @@ fn id_chars(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
         .parse_next(input)
 }
 
-fn capture_separator(
-    input: &mut &str,
-) -> winnow::ModalResult<crate::ast::Separator, ContextError> {
+fn capture_separator(input: &mut &str) -> winnow::ModalResult<crate::ast::Separator, ContextError> {
     use crate::ast::Separator;
     let chunk: &str =
         take_while(0.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;

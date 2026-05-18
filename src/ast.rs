@@ -472,7 +472,8 @@ impl Plan {
                 {
                     self.preamble.push(String::new());
                 }
-                self.preamble.push("## Backlog (not yet phased)".to_string());
+                self.preamble
+                    .push("## Backlog (not yet phased)".to_string());
                 self.preamble.push(String::new());
                 self.preamble.push(entry);
                 self.preamble.push(String::new());

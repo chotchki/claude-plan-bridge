@@ -187,7 +187,8 @@ pub fn missing_session_start_warning(cwd: &Path) -> Option<String> {
     Some(
         "claude-plan-bridge: ⚠ SessionStart hook missing from .claude/settings.json — \
          task list won't rehydrate automatically when you restart Claude Code. Run \
-         `claude-plan-bridge upgrade-hooks` to add it (idempotent).".to_string(),
+         `claude-plan-bridge upgrade-hooks` to add it (idempotent)."
+            .to_string(),
     )
 }
 
@@ -309,7 +310,10 @@ mod tests {
         )
         .unwrap();
         let hooks = settings.get("hooks").unwrap();
-        assert!(hooks.get("SessionStart").is_some(), "SessionStart hook missing");
+        assert!(
+            hooks.get("SessionStart").is_some(),
+            "SessionStart hook missing"
+        );
         assert!(hooks.get("UserPromptSubmit").is_some());
         assert!(hooks.get("PostToolUse").is_some());
 
@@ -337,8 +341,7 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|hs| {
                     hs.iter().any(|h| {
-                        h.get("command")
-                            .and_then(Value::as_str)
+                        h.get("command").and_then(Value::as_str)
                             == Some("claude-plan-bridge resume")
                     })
                 })
@@ -413,7 +416,10 @@ mod tests {
         init(&dir, false).unwrap();
         // PLAN.md and gitignore got created by init; upgrade should be a no-op.
         let report = upgrade_hooks(&dir).unwrap();
-        assert!(report.no_change, "expected no_change report on already-current settings");
+        assert!(
+            report.no_change,
+            "expected no_change report on already-current settings"
+        );
         assert!(!report.created_settings);
         assert!(!report.updated_settings);
     }
@@ -469,8 +475,14 @@ mod tests {
         .unwrap();
         assert!(settings.pointer("/hooks/SessionStart").is_some());
         // upgrade_hooks must NOT scaffold PLAN.md or .gitignore.
-        assert!(!dir.join("PLAN.md").exists(), "upgrade_hooks scaffolded PLAN.md");
-        assert!(!dir.join(".gitignore").exists(), "upgrade_hooks scaffolded .gitignore");
+        assert!(
+            !dir.join("PLAN.md").exists(),
+            "upgrade_hooks scaffolded PLAN.md"
+        );
+        assert!(
+            !dir.join(".gitignore").exists(),
+            "upgrade_hooks scaffolded .gitignore"
+        );
     }
 
     #[test]

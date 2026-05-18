@@ -144,8 +144,7 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                 // told Claude to TaskCreate it; reconcile re-flagging the
                 // same path as "Added (consider TaskCreate)" on the next
                 // UserPromptSubmit is pure double-nudge.
-                if leaf.state == NodeState::Pending
-                    && !state.pending_rehydration.contains(&leaf.id)
+                if leaf.state == NodeState::Pending && !state.pending_rehydration.contains(&leaf.id)
                 {
                     deltas.push(Delta::LeafAdded {
                         plan_path: leaf.id.clone(),
@@ -550,12 +549,8 @@ mod tests {
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
-        state
-            .pending_rehydration
-            .insert("1.0".to_string());
-        state
-            .pending_rehydration
-            .insert("1.1".to_string());
+        state.pending_rehydration.insert("1.0".to_string());
+        state.pending_rehydration.insert("1.1".to_string());
         state.save(&state_path).unwrap();
 
         let deltas = reconcile(&plan).unwrap();
@@ -989,9 +984,15 @@ mod tests {
         ];
         let r = render_deltas(&deltas);
         assert!(r.contains("🔜"), "Backlog emoji expected in: {r}");
-        assert!(r.contains("⬜"), "Pending emoji expected in transition: {r}");
+        assert!(
+            r.contains("⬜"),
+            "Pending emoji expected in transition: {r}"
+        );
         // The transition's old/new states render as emojis, not Debug-form
         // enum names. Check the specific `(X → Y)` arrow pattern.
-        assert!(r.contains("(⬜ → 🔜)"), "expected emoji transition arrow: {r}");
+        assert!(
+            r.contains("(⬜ → 🔜)"),
+            "expected emoji transition arrow: {r}"
+        );
     }
 }

@@ -47,8 +47,7 @@ pub fn append_cleared(state_path: &Path, entries: &[ClearedEntry]) -> Result<()>
     }
     let log_path = cleared_log_path_for(state_path);
     if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut file = OpenOptions::new()
         .create(true)

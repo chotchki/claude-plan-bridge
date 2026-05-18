@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -32,5 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Phase 30.2: rust-cache restore consistently crashes the Windows
+      # runner mid-restore (no error output, half a second between
+      # "Restoring cache..." and "Post job cleanup"). Skip caching on
+      # Windows until the upstream issue is resolved; Linux/macOS keep
+      # the cache. Build cost on Windows: ~30s longer; correctness wins.
+      - uses: Swatinem/rust-cache@v2.9.1
+        if: matrix.os != 'windows-latest'
       - run: cargo test --all-targets

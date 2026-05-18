@@ -23,7 +23,10 @@ pub fn annotation_to_string(a: &Annotation) -> Option<String> {
 }
 
 pub fn annotations_to_strings(annotations: &[Annotation]) -> Vec<String> {
-    annotations.iter().filter_map(annotation_to_string).collect()
+    annotations
+        .iter()
+        .filter_map(annotation_to_string)
+        .collect()
 }
 
 /// Apply a `PostToolUse(TaskCreate)` event to PLAN.md.
@@ -560,12 +563,16 @@ mod tests {
         // task_id semantics with "retarget"; better to warn than silently
         // rewrite the mapping.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
         writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
         let state_before = State::load(&default_state_path_for(&plan)).unwrap();
 
-        let out = writeback_create(&payload_for_create("t-1", "First", Some("1.2")), &plan).unwrap();
+        let out =
+            writeback_create(&payload_for_create("t-1", "First", Some("1.2")), &plan).unwrap();
 
         let after = std::fs::read_to_string(&plan).unwrap();
         let state_after = State::load(&default_state_path_for(&plan)).unwrap();
@@ -652,7 +659,10 @@ mod tests {
         let mut dupe = payload_for_create("t-second", "Task", Some("1.1"));
         dupe.session_id = "sess-A".to_string();
         let out = writeback_create(&dupe, &plan).unwrap().to_json();
-        assert!(out.contains("WARNING"), "expected refusal warning, got: {out}");
+        assert!(
+            out.contains("WARNING"),
+            "expected refusal warning, got: {out}"
+        );
         assert!(
             out.contains("t-first") && out.contains("t-second"),
             "warning should name both tasks, got: {out}"
@@ -708,7 +718,10 @@ mod tests {
         // the bridge detect rehydration completion when the set drains to
         // empty (foundation for the 26.7 confirmation signal).
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
         let state_path = default_state_path_for(&plan);
         let mut seed = State::default();
         seed.pending_rehydration.insert("1.1".to_string());
@@ -746,7 +759,10 @@ mod tests {
         // user see the end-to-end success signal. Intermediate
         // TaskCreates stay quiet.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n");
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
         let state_path = default_state_path_for(&plan);
         let mut seed = State::default();
         seed.pending_rehydration.insert("1.1".to_string());
@@ -1072,8 +1088,7 @@ mod tests {
         // standardize_to_canonical. Any `### X.4.a — Sub-section` headers
         // that the user uses for grouping inside the phase stay verbatim.
         let dir = scratch_dir();
-        let original =
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### X.4.a — Sub-section grouping\n\n  - [ ] 1.2 Existing\n";
+        let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### X.4.a — Sub-section grouping\n\n  - [ ] 1.2 Existing\n";
         let plan = write_plan(&dir, original);
         let payload = payload_for_create("t-x", "new sub", Some("1.3"));
         writeback_create(&payload, &plan).expect("clean append");

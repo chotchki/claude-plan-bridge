@@ -194,8 +194,7 @@ fn main() -> Result<()> {
             let output = run_reconcile(&plan).unwrap_or_else(|e| {
                 plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
             });
-            let output =
-                maybe_warn_missing_session_start(&project.cwd, output, "UserPromptSubmit");
+            let output = maybe_warn_missing_session_start(&project.cwd, output, "UserPromptSubmit");
             println!("{}", output.to_json());
         }
         Command::Serve { project } => {
@@ -393,8 +392,8 @@ fn run_writeback_dry_run(plan: &std::path::Path, event: WritebackEvent) -> Resul
     let scratch_plan = tmp.join("PLAN.md");
     let scratch_claude = tmp.join(".claude");
     std::fs::create_dir_all(&scratch_claude).context("mkdir scratch .claude")?;
-    let original = std::fs::read_to_string(plan)
-        .with_context(|| format!("read {}", plan.display()))?;
+    let original =
+        std::fs::read_to_string(plan).with_context(|| format!("read {}", plan.display()))?;
     std::fs::write(&scratch_plan, &original).context("seed scratch PLAN.md")?;
     let real_state_path = plan_bridge::state::default_state_path_for(plan);
     if real_state_path.exists() {
@@ -405,12 +404,8 @@ fn run_writeback_dry_run(plan: &std::path::Path, event: WritebackEvent) -> Resul
     }
 
     let result = match event {
-        WritebackEvent::Create => {
-            plan_bridge::writeback::writeback_create(&payload, &scratch_plan)
-        }
-        WritebackEvent::Update => {
-            plan_bridge::writeback::writeback_update(&payload, &scratch_plan)
-        }
+        WritebackEvent::Create => plan_bridge::writeback::writeback_create(&payload, &scratch_plan),
+        WritebackEvent::Update => plan_bridge::writeback::writeback_update(&payload, &scratch_plan),
     };
     let after = std::fs::read_to_string(&scratch_plan).unwrap_or_else(|_| original.clone());
     print_dry_run_report(&original, &after, plan, result.as_ref().ok());
@@ -675,17 +670,16 @@ fn run_resume(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
     let source = {
         let mut buf = String::new();
         match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
-            Ok(_) if !buf.trim().is_empty() => serde_json::from_str::<plan_bridge::hook::HookPayload>(&buf)
-                .map(|p| p.source)
-                .unwrap_or_default(),
+            Ok(_) if !buf.trim().is_empty() => {
+                serde_json::from_str::<plan_bridge::hook::HookPayload>(&buf)
+                    .map(|p| p.source)
+                    .unwrap_or_default()
+            }
             _ => String::new(),
         }
     };
     match plan_bridge::resume::build_resume_message(plan, &source)? {
-        Some(msg) => Ok(plan_bridge::hook::HookOutput::context(
-            "SessionStart",
-            msg,
-        )),
+        Some(msg) => Ok(plan_bridge::hook::HookOutput::context("SessionStart", msg)),
         None => Ok(plan_bridge::hook::HookOutput::silent()),
     }
 }

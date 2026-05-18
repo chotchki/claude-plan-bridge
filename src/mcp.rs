@@ -175,9 +175,8 @@ impl McpServer {
                 // surface the original error.
                 if plan.find(&pid).is_none() {
                     let parsed = parse(&text)?;
-                    let (standardized, _notes) = parsed
-                        .standardize_to_canonical()
-                        .map_err(|e| anyhow!(e))?;
+                    let (standardized, _notes) =
+                        parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
                     if standardized.find(&pid).is_some() {
                         plan = standardized;
                     }

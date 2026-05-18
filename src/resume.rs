@@ -45,8 +45,8 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         // can lag if reconcile hasn't run since the last external edit.
         let plan_text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
-        let plan = parser::parse(&plan_text)
-            .with_context(|| format!("parse {}", plan_path.display()))?;
+        let plan =
+            parser::parse(&plan_text).with_context(|| format!("parse {}", plan_path.display()))?;
 
         // Phase 27.1: leaves-only rehydration. Parent phase nodes represent
         // goal-validation gates the user owns (see `parent-tick-is-validation`
@@ -158,13 +158,10 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         for (path, title) in &open {
             let parent_id = crate::ast::parent_id_for(path);
             if parent_id != current_parent {
-                if let Some(ref pid) = parent_id {
-                    if let Some(parent_node) = plan.find(pid) {
-                        out.push_str(&format!(
-                            "\n## {} {}\n",
-                            parent_node.id, parent_node.title
-                        ));
-                    }
+                if let Some(ref pid) = parent_id
+                    && let Some(parent_node) = plan.find(pid)
+                {
+                    out.push_str(&format!("\n## {} {}\n", parent_node.id, parent_node.title));
                 }
                 current_parent = parent_id;
             }
@@ -326,7 +323,11 @@ mod tests {
 
         let msg = build_resume_message(&plan, "").unwrap().unwrap();
         let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
-        assert_eq!(bullets.len(), 3, "expected 3 leaf bullets, got: {bullets:?}");
+        assert_eq!(
+            bullets.len(),
+            3,
+            "expected 3 leaf bullets, got: {bullets:?}"
+        );
         assert!(bullets[0].contains("1.1 First task"), "got: {bullets:?}");
         assert!(bullets[1].contains("1.2 Second task"), "got: {bullets:?}");
         assert!(bullets[2].contains("2.0 Second phase"), "got: {bullets:?}");
@@ -392,7 +393,11 @@ mod tests {
         // when the announced TaskCreates land).
         let after = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(
-            after.pending_rehydration.iter().cloned().collect::<Vec<_>>(),
+            after
+                .pending_rehydration
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
             vec!["1.1".to_string(), "1.2".to_string()],
             "pending_rehydration should be leaves only: {:?}",
             after.pending_rehydration
@@ -596,7 +601,10 @@ mod tests {
 
         // (4) Final state: only leaf task_ids, no parent, no zombies, PLAN.md unchanged.
         let plan_after = std::fs::read_to_string(&plan).unwrap();
-        assert_eq!(plan_before, plan_after, "PLAN.md mutated during rehydration");
+        assert_eq!(
+            plan_before, plan_after,
+            "PLAN.md mutated during rehydration"
+        );
 
         let final_state = State::load(&state_path).unwrap();
         assert_eq!(
@@ -1055,7 +1063,11 @@ mod tests {
         // prompt — leaves only. Parent 1.0 is filtered upstream so it never
         // lands here.
         assert_eq!(
-            after.pending_rehydration.iter().cloned().collect::<Vec<_>>(),
+            after
+                .pending_rehydration
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
             vec!["1.1".to_string()],
             "pending_rehydration should hold open leaves only; got: {:?}",
             after.pending_rehydration
@@ -1097,7 +1109,11 @@ mod tests {
             "- [ ] 1.0 Open\n- [x] 2.0 Closed\n- [-] 3.0 Skipped\n",
         );
         let mut state = State::default();
-        for (id, path, title) in [("5", "1.0", "Open"), ("6", "2.0", "Closed"), ("7", "3.0", "Skipped")] {
+        for (id, path, title) in [
+            ("5", "1.0", "Open"),
+            ("6", "2.0", "Closed"),
+            ("7", "3.0", "Skipped"),
+        ] {
             state.record(
                 id,
                 Mapping {
