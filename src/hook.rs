@@ -133,6 +133,25 @@ impl HookOutput {
     }
 }
 
+/// Wrap a hook handler so a missing PLAN.md degrades gracefully:
+///   - File absent → silent no-op (the bridge stays out of projects without a plan).
+///   - Handler returns `Err` → non-blocking `additionalContext` carrying the
+///     error text (visible but doesn't wall the user off).
+/// Never emits `decision: "block"`. Originated from a session implode where
+/// Claude `cd`'d mid-session, the hook subprocess inherited a wrong cwd, and
+/// `./PLAN.md` not found became a hard block on every subsequent prompt
+/// including `ls`. The contract: the bridge is a peripheral that decorates
+/// context; it must not gate prompts even when its own state is broken.
+pub fn guard_missing_plan<F>(plan: &std::path::Path, event: &str, f: F) -> HookOutput
+where
+    F: FnOnce() -> anyhow::Result<HookOutput>,
+{
+    if !plan.exists() {
+        return HookOutput::silent();
+    }
+    f().unwrap_or_else(|e| HookOutput::context(event, format!("claude-plan-bridge: {e:#}")))
+}
+
 /// Pull a task id out of `tool_response`. Real-world shapes seen in Claude Code:
 ///   TaskUpdate → `{"taskId": "1", ...}` (flat)
 ///   TaskCreate → `{"task": {"id": "2", ...}}` (nested under `task`)
@@ -274,6 +293,72 @@ mod tests {
             warn_pos < payload_pos,
             "warning should precede payload: {json}"
         );
+    }
+
+    #[test]
+    fn guard_missing_plan_silent_on_missing_file() {
+        let p = std::env::temp_dir().join(format!(
+            "plan-bridge-guard-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!p.exists(), "scratch path should not exist");
+        let out = guard_missing_plan(&p, "UserPromptSubmit", || {
+            panic!("handler must not be invoked when PLAN.md is missing")
+        });
+        assert_eq!(out.to_json(), "{}", "expected silent no-op");
+    }
+
+    #[test]
+    fn guard_missing_plan_passes_through_ok() {
+        let dir = std::env::temp_dir().join(format!(
+            "plan-bridge-guard-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("PLAN.md");
+        std::fs::write(&plan, "# plan\n").unwrap();
+        let out = guard_missing_plan(&plan, "UserPromptSubmit", || {
+            Ok(HookOutput::context("UserPromptSubmit", "real payload"))
+        });
+        assert!(out.to_json().contains("real payload"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guard_missing_plan_converts_err_to_context_not_block() {
+        let dir = std::env::temp_dir().join(format!(
+            "plan-bridge-guard-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("PLAN.md");
+        std::fs::write(&plan, "# plan\n").unwrap();
+        let out = guard_missing_plan(&plan, "PostToolUse", || {
+            Err(anyhow::anyhow!("synthetic parse failure"))
+        });
+        let json = out.to_json();
+        assert!(
+            !json.contains("\"decision\":\"block\""),
+            "must not block: {json}"
+        );
+        assert!(json.contains("synthetic parse failure"), "got: {json}");
+        assert!(
+            json.contains("\"hookEventName\":\"PostToolUse\""),
+            "got: {json}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

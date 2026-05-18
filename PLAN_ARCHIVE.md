@@ -354,3 +354,31 @@
   - [x] 30.9 README: document the coverage workflow + how to run `cargo llvm-cov` locally in the "Contributing" section. Note color thresholds + how to regen the badge after a coverage drop.
   - [x] 30.10 Phase 30 exit — tests, version bump, archive
 
+---
+
+## 2026-05-18
+
+- [ ] 31.0 Phase 31 anchor
+  - [x] 31.1 Strip stray `\"`/`\\` escape sequences from incoming TaskCreate/TaskUpdate subjects so PLAN.md never gets `Build \"/blog\" page` and reconcile doesn't drift forever when the user hand-cleans the file
+  - [x] 31.2 Auto-create the `N.0` phase anchor when the first TaskCreate(plan_path=`N.X`) arrives and no parent exists — prefer `metadata.plan_phase` for the anchor's title, else synthesize `Phase N`
+  - [x] 31.3 Refuse to silently parent a `N.X` TaskCreate under a misplaced `N.0` (e.g. one indented under another phase). The bridge should treat `N.0` as a top-level phase root; an `N.0` found at non-top-level should be either relocated or refused with a clear error
+  - [x] 31.4 Exclude column-0 markdown section headers (`## ...`, `### ...`) from the leaf annotation diff so a `## Phase 10 — Title` divider between leaves doesn't surface as `LeafAnnotationChanged` on the previous leaf every turn
+  - [x] 31.5 Suppress `LeafAdded` drift for top-level `N.0` phase anchors. A manually-added phase root isn't a tracked task; nagging the agent to `TaskCreate` it forever creates persistent noise
+  - [x] 31.6 Update SPEC.md + README.md for the new ergonomics (auto-anchor, header filter, escape normalization)
+  - [x] 31.7 Release v0.1.19 — bump Cargo.toml, sweep Phase 31 to PLAN_ARCHIVE.md
+---
+
+
+Adopter session imploded with `read ./PLAN.md: No such file or directory` blocking every prompt (including `ls`). Root cause: Claude `cd`'d into a subdirectory mid-session, the hook subprocess inherited that cwd, and `./PLAN.md` (relative because `init` writes `--cwd` default `.`) didn't resolve. The bridge then converted the I/O error into `decision: "block"`, walling off the user. Two-layer fix: (a) hooks bake the absolute project root so subprocess cwd is irrelevant; (b) missing PLAN.md is **never** a blocking error — at most a non-blocking warning.
+
+
+- [ ] 32.0 Hook cwd robustness (post-session-implode)
+  - [x] 32.0 Phase 32 — Hook cwd robustness (post-session-implode)
+    - [x] 32.1 Defensive: missing PLAN.md must never produce `decision: block` — reconcile, writeback, and resume gracefully degrade (silent no-op or non-blocking warning) so a misrouted hook can't wall off every prompt
+    - [x] 32.2 Bake absolute `--cwd /abs/path` into `init`-installed hook commands so the subprocess cwd (which can drift if Claude `cd`s mid-session) doesn't determine where the bridge looks for PLAN.md
+    - [x] 32.3 `upgrade-hooks` rewrites legacy relative-cwd hook entries to absolute `--cwd` form so existing installs (including this repo's `.claude/settings.json`) self-heal on next upgrade
+    - [x] 32.4 Tests: missing-PLAN.md path is silent/non-blocking for reconcile, writeback(create/update), and resume; `init` writes absolute --cwd; `upgrade-hooks` migrates relative→absolute and is idempotent
+    - [x] 32.5 Update SPEC.md and README.md to document the new hook-install behavior (absolute --cwd) and the missing-PLAN.md non-blocking contract
+    - [x] 32.6 Release v0.1.20 — bump Cargo.toml, `cargo install --path .`, run `upgrade-hooks` on this project, sweep Phase 32 to PLAN_ARCHIVE.md
+    - [x] 32.7 Auto-detect outdated hook entries (relative `--cwd`) and prepend a one-time `additionalContext` warning telling the user to run `upgrade-hooks` — same pattern as the existing missing-SessionStart-hook nag
+

@@ -9,10 +9,20 @@ use std::path::Path;
 /// Render an annotation as a single string for `last_synced_annotations`.
 /// Keep these stable across save/load so the reconcile diff is byte-stable.
 /// `Blank` annotations are intentionally skipped — reconcile shouldn't drift
-/// on whitespace alone.
+/// on whitespace alone. Phase 31.4: column-0 markdown section headers (`## …`,
+/// `### …`) are also skipped — they're document-structural elements that
+/// happened to attach to whichever leaf the parser had open. Including them
+/// in the leaf's annotation set causes spurious `LeafAnnotationChanged` drift
+/// every turn for the last leaf before each header.
 pub fn annotation_to_string(a: &Annotation) -> Option<String> {
     match a {
-        Annotation::Text { text, .. } => Some(text.clone()),
+        Annotation::Text { text, indent } => {
+            if *indent == 0 && crate::ast::looks_like_markdown_header(text) {
+                None
+            } else {
+                Some(text.clone())
+            }
+        }
         Annotation::Bullet { text, .. } => Some(format!("- {text}")),
         Annotation::CodeBlock { lang, content, .. } => {
             let l = lang.clone().unwrap_or_default();
@@ -29,6 +39,23 @@ pub fn annotations_to_strings(annotations: &[Annotation]) -> Vec<String> {
         .collect()
 }
 
+/// Strip stray backslash-escape sequences from a TaskCreate/TaskUpdate subject
+/// that have no quoting meaning in markdown. The shakeout case: Claude (or
+/// some upstream layer) over-escapes a title like `Build "/blog" page` into
+/// `Build \"/blog\" page` before sending it through the hook JSON. The two
+/// extra `\` chars then live in PLAN.md and in `last_synced_title`, so the
+/// title round-trips fine — UNTIL the user hand-edits PLAN.md to clean up the
+/// ugly backslashes, at which point reconcile flags spurious title drift on
+/// every prompt forever.
+///
+/// Normalizing on the way IN keeps PLAN.md (and state) free of the unwanted
+/// escapes from the start. Markdown doesn't need `\"` escaping, so this is
+/// safe: any `\"` sequence in a title was an over-escape artifact, not
+/// content the user wanted.
+pub fn normalize_subject(s: &str) -> String {
+    s.replace("\\\"", "\"")
+}
+
 /// Apply a `PostToolUse(TaskCreate)` event to PLAN.md.
 ///
 /// - If `metadata.plan_path` is set, insert at that exact id; parent must
@@ -39,8 +66,12 @@ pub fn annotations_to_strings(annotations: &[Annotation]) -> Vec<String> {
 ///
 /// Idempotent: re-running with the same `task_id` is a no-op.
 pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookOutput> {
-    let input: TaskCreateInput = serde_json::from_value(payload.tool_input.clone())
+    let mut input: TaskCreateInput = serde_json::from_value(payload.tool_input.clone())
         .context("parse TaskCreate tool_input")?;
+    // Phase 31.1: clean upstream over-escaping (`\"` → `"`) so PLAN.md and
+    // state both store the clean form. Without this, hand-cleaning quotes out
+    // of PLAN.md creates eternal title drift.
+    input.subject = normalize_subject(&input.subject);
     let task_id = extract_task_id(&payload.tool_response)
         .ok_or_else(|| anyhow!("tool_response is missing a task id"))?;
     let state_path = default_state_path_for(plan_path);
@@ -88,15 +119,23 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             .with_context(|| format!("read {}", plan_path.display()))?;
         let parsed = parse(&plan_text)?;
 
-        let (plan, assigned_path, action) = match requested_path {
+        let plan_phase_hint = input
+            .metadata
+            .as_ref()
+            .and_then(|m| m.plan_phase.as_deref());
+
+        let (plan, assigned_path, action, anchor_created) = match requested_path {
             Some(p) => {
-                let plan = insert_at_path(parsed, &p, &input.subject)?;
-                (plan, p, "added".to_string())
+                let InsertResult {
+                    plan,
+                    anchor_created,
+                } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
+                (plan, p, "added".to_string(), anchor_created)
             }
             None => {
                 let mut plan = parsed;
                 let p = plan.append_to_inbox(&input.subject);
-                (plan, p, "added to Inbox".to_string())
+                (plan, p, "added to Inbox".to_string(), None)
             }
         };
 
@@ -197,6 +236,11 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             assigned_path,
             plan_path.display()
         );
+        if let Some(anchor_id) = anchor_created {
+            message.push_str(&format!(
+                " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
+            ));
+        }
         if let Some(n) = rehydration_total {
             message.push_str(&format!(
                 "\nrehydration complete: {n}/{n} mapped — state file synced"
@@ -223,8 +267,14 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 /// task wasn't created via the bridge in the first place, so we have nothing
 /// to write back.
 pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookOutput> {
-    let input: TaskUpdateInput = serde_json::from_value(payload.tool_input.clone())
+    let mut input: TaskUpdateInput = serde_json::from_value(payload.tool_input.clone())
         .context("parse TaskUpdate tool_input")?;
+    // Phase 31.1: same escape-normalization the create path does — strip
+    // stray `\"` from rename subjects so PLAN.md doesn't pick up ugly
+    // backslashes on a TaskUpdate(subject=...).
+    if let Some(ref subj) = input.subject {
+        input.subject = Some(normalize_subject(subj));
+    }
     let state_path = default_state_path_for(plan_path);
 
     crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
@@ -362,11 +412,28 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     })
 }
 
-fn insert_at_path(plan: Plan, plan_path: &str, subject: &str) -> Result<Plan> {
+/// Result of `insert_at_path`. `anchor_created` is `Some(parent_id)` when the
+/// bridge auto-synthesized the top-level phase anchor for this insert (Phase
+/// 31.2), so the hook output can announce it. `None` when no anchor synthesis
+/// happened.
+struct InsertResult {
+    plan: Plan,
+    anchor_created: Option<String>,
+}
+
+fn insert_at_path(
+    plan: Plan,
+    plan_path: &str,
+    subject: &str,
+    plan_phase: Option<&str>,
+) -> Result<InsertResult> {
     let mut plan = plan;
     if plan.find(plan_path).is_some() {
         // Already in the plan — leave it alone, just record the mapping.
-        return Ok(plan);
+        return Ok(InsertResult {
+            plan,
+            anchor_created: None,
+        });
     }
     let new_node = Node {
         id: plan_path.to_string(),
@@ -377,6 +444,7 @@ fn insert_at_path(plan: Plan, plan_path: &str, subject: &str) -> Result<Plan> {
         children: vec![],
         annotations: vec![],
     };
+    let mut anchor_created: Option<String> = None;
     match parent_id_for(plan_path) {
         None => plan.insert_phase(new_node),
         Some(parent_id) => {
@@ -385,30 +453,81 @@ fn insert_at_path(plan: Plan, plan_path: &str, subject: &str) -> Result<Plan> {
                 // it may be living as a `### Phase N — Title` markdown header
                 // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
                 // Standardize, retry the lookup; if the parent's now visible
-                // use the standardized plan, otherwise surface a clean error
-                // (don't blow up the file just to fail).
+                // use the standardized plan. Otherwise, if the missing parent
+                // is itself a top-level phase anchor (`parent_id_for` returns
+                // None for it), auto-synthesize it (Phase 31.2). For deeper
+                // nesting that's still missing, bail with the structural-error
+                // guidance — auto-creating intermediate non-phase parents
+                // would invent structure the user didn't ask for.
                 let (standardized, _notes) = plan
                     .clone()
                     .standardize_to_canonical()
                     .map_err(|e| anyhow!(e))?;
                 if standardized.find(&parent_id).is_some() {
                     plan = standardized;
+                } else if parent_id_for(&parent_id).is_none() {
+                    let anchor_title = plan_phase
+                        .map(str::to_string)
+                        .unwrap_or_else(|| synthesize_anchor_title(&parent_id));
+                    let anchor = Node {
+                        id: parent_id.clone(),
+                        title: anchor_title,
+                        state: NodeState::Pending,
+                        id_style: crate::ast::IdStyle::Plain,
+                        separator: crate::ast::Separator::Space,
+                        children: vec![],
+                        annotations: vec![],
+                    };
+                    plan.insert_phase(anchor);
+                    anchor_created = Some(parent_id.clone());
                 } else {
                     anyhow::bail!(
                         "inserting {plan_path}: parent `{parent_id}` not found in PLAN.md. \
-                         Either the parent phase doesn't exist yet (create it first with a \
+                         Either the parent doesn't exist yet (create it first with a \
                          `- [ ] {parent_id} ...` checkbox), or your plan uses an unrecognized \
                          section-header format. Try `plan-bridge canonicalize --dry-run` to \
                          see how the bridge would normalize the structure."
                     );
                 }
+            } else if parent_id_for(&parent_id).is_none()
+                && !plan.phases.iter().any(|p| p.id == parent_id)
+            {
+                // Phase 31.3: parent has the top-level shape (e.g. `10.0`,
+                // `Inbox.0`) but was found nested under another node — usually
+                // because the user hand-added `- [ ] 10.0 ...` at the wrong
+                // indent. Refuse rather than silently parenting the new task
+                // under whatever leaf the misplaced anchor wound up beneath
+                // (the shakeout symptom: 10.1–10.13 landed indented under
+                // `6.13 Staging / beta deployment`).
+                anyhow::bail!(
+                    "inserting {plan_path}: parent `{parent_id}` exists in PLAN.md but is \
+                     nested inside another phase. `{parent_id}` has top-level phase shape \
+                     and must live at column 0. Move it to the top level (remove the leading \
+                     indent) and retry — or delete it and let the bridge synthesize a fresh \
+                     anchor on the next TaskCreate."
+                );
             }
             plan.add_child_of(&parent_id, new_node)
                 .map_err(|e| anyhow!(e))
                 .with_context(|| format!("inserting {plan_path}"))?;
         }
     }
-    Ok(plan)
+    Ok(InsertResult {
+        plan,
+        anchor_created,
+    })
+}
+
+/// Title for an auto-synthesized phase anchor when the TaskCreate didn't
+/// carry `metadata.plan_phase`. The output is deliberately bland — Claude can
+/// `TaskUpdate(plan_path=N.0, subject=...)` later to give the phase a real
+/// title without renaming the children.
+fn synthesize_anchor_title(parent_id: &str) -> String {
+    match parent_id.strip_suffix(".0") {
+        Some("Inbox") => "Inbox".to_string(),
+        Some(prefix) => format!("Phase {prefix}"),
+        None => format!("Phase {parent_id}"),
+    }
 }
 
 #[cfg(test)]
@@ -613,16 +732,18 @@ mod tests {
 
     #[test]
     fn missing_parent_error_mentions_canonical_format_hint() {
-        // Phase 15.2: when the user requests a plan_path whose parent doesn't
-        // exist, the error should mention BOTH possible fixes — creating the
-        // parent phase OR converting section headers. The hint catches both
-        // the typo case and the format-mismatch case.
+        // Phase 31.2 narrowed this contract: a missing TOP-LEVEL phase anchor
+        // (`5.0` shape) auto-creates instead of erroring. The clean error path
+        // still fires for missing INTERMEDIATE parents — e.g. a `1.2.3` whose
+        // `1.2` doesn't exist — which is the original target of this test
+        // (typo / structural-mismatch surface). Drop a request through that
+        // path and check the hint text.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
-        let payload = payload_for_create("t-1", "new mid-seq", Some("5.2a"));
+        let payload = payload_for_create("t-1", "nested sub", Some("1.2.3"));
         let err = writeback_create(&payload, &plan).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("5.0"), "should name missing parent: {msg}");
+        assert!(msg.contains("1.2"), "should name missing parent: {msg}");
         assert!(
             msg.contains("section-header") || msg.contains("canonicalize"),
             "should hint at format issue + canonicalize escape hatch: {msg}"
@@ -1234,5 +1355,165 @@ mod tests {
         assert_eq!(count, 1, "PLAN.md got duplicated:\n{new_contents}");
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-new"), Some("1.1"));
+    }
+
+    // ----- Phase 31 fixes -----
+
+    #[test]
+    fn normalize_subject_strips_backslash_quote() {
+        // Phase 31.1: bare unit on the helper.
+        assert_eq!(
+            normalize_subject("Build \\\"/blog\\\" page"),
+            "Build \"/blog\" page"
+        );
+        assert_eq!(normalize_subject("no quotes here"), "no quotes here");
+        assert_eq!(
+            normalize_subject("\\\"only escapes\\\""),
+            "\"only escapes\""
+        );
+    }
+
+    #[test]
+    fn create_normalizes_subject_with_escaped_quotes() {
+        // Phase 31.1: Claude over-escapes `"` in a TaskCreate subject. Bridge
+        // should store the clean form in PLAN.md AND state, so when the user
+        // hand-cleans the file it doesn't drift forever.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let payload = payload_for_create("t-1", "Build \\\"/blog\\\" listing", Some("1.1"));
+        writeback_create(&payload, &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.1 Build \"/blog\" listing"),
+            "PLAN.md should have clean quotes:\n{contents}"
+        );
+        assert!(
+            !contents.contains("\\\""),
+            "no backslash-quote should survive:\n{contents}"
+        );
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        let mapping = state.mappings.get("t-1").unwrap();
+        assert_eq!(mapping.last_synced_title, "Build \"/blog\" listing");
+    }
+
+    #[test]
+    fn update_subject_normalizes_escaped_quotes() {
+        // Phase 31.1: same escape-stripping on rename.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-1", "Old", Some("1.1")), &plan).unwrap();
+        let rename = HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskUpdate".to_string(),
+            tool_input: serde_json::json!({
+                "taskId": "t-1",
+                "subject": "Build \\\"/blog\\\" listing",
+            }),
+            tool_response: serde_json::json!({}),
+            source: String::new(),
+        };
+        writeback_update(&rename, &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.1 Build \"/blog\" listing"),
+            "rename should clean quotes:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn create_auto_creates_top_level_phase_anchor_when_missing() {
+        // Phase 31.2: TaskCreate(plan_path="10.1") with no `10.0` in PLAN.md
+        // used to bail with "parent 10.0 not found". Now the bridge synthesizes
+        // the anchor at top level.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let payload = payload_for_create("t-1", "First task of phase 10", Some("10.1"));
+        let out = writeback_create(&payload, &plan).expect("auto-anchor should not bail");
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 10.0 Phase 10"),
+            "auto-anchor should land at top level:\n{contents}"
+        );
+        assert!(
+            contents.contains("  - [ ] 10.1 First task of phase 10"),
+            "child should land under auto-anchor:\n{contents}"
+        );
+        let json = out.to_json();
+        assert!(
+            json.contains("auto-created"),
+            "hook output should announce the anchor: {json}"
+        );
+    }
+
+    #[test]
+    fn create_anchor_uses_plan_phase_metadata_when_provided() {
+        // Phase 31.2: the optional `metadata.plan_phase` field becomes the
+        // anchor title so the agent can spell out the real phase name.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 First\n");
+        let payload = HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskCreate".to_string(),
+            tool_input: serde_json::json!({
+                "subject": "Audit existing dropdowns",
+                "description": "10.1",
+                "metadata": {
+                    "plan_path": "10.1",
+                    "plan_phase": "Dropdown audit pass"
+                }
+            }),
+            tool_response: serde_json::json!({"id": "t-1"}),
+            source: String::new(),
+        };
+        writeback_create(&payload, &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 10.0 Dropdown audit pass"),
+            "plan_phase should drive anchor title:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn create_refuses_misplaced_phase_anchor_as_parent() {
+        // Phase 31.3: the user hand-added `- [ ] 10.0 ...` at the wrong indent,
+        // so it ended up nested under `1.5`. Bridge should refuse to use it
+        // as a parent rather than silently dropping 10.1 under the nesting.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 First phase\n  - [ ] 1.5 some leaf\n    - [ ] 10.0 misplaced anchor\n",
+        );
+        let payload = payload_for_create("t-1", "First", Some("10.1"));
+        let err = writeback_create(&payload, &plan).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("nested") || msg.contains("top-level"),
+            "error should explain the structural problem: {msg}"
+        );
+        // PLAN.md untouched.
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            !after.contains("- [ ] 10.1"),
+            "no leaf should have been written: {after}"
+        );
+    }
+
+    #[test]
+    fn create_still_uses_top_level_anchor_when_present() {
+        // Phase 31.3 sanity: a correctly-placed top-level `10.0` is still
+        // accepted (the refusal is narrow — only fires when N.0 is nested).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 First\n- [ ] 10.0 Hand-added anchor\n");
+        let payload = payload_for_create("t-1", "First child", Some("10.1"));
+        writeback_create(&payload, &plan).expect("top-level anchor should be accepted");
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("  - [ ] 10.1 First child"),
+            "child should land under existing top-level anchor:\n{contents}"
+        );
     }
 }

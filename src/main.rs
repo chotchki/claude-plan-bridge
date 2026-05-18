@@ -182,8 +182,8 @@ fn main() -> Result<()> {
             if dry_run {
                 run_writeback_dry_run(&plan, event)?;
             } else {
-                let output = run_writeback(&plan, event).unwrap_or_else(|e| {
-                    plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
+                let output = plan_bridge::hook::guard_missing_plan(&plan, "PostToolUse", || {
+                    run_writeback(&plan, event)
                 });
                 let output = maybe_warn_missing_session_start(&project.cwd, output, "PostToolUse");
                 println!("{}", output.to_json());
@@ -191,8 +191,8 @@ fn main() -> Result<()> {
         }
         Command::Reconcile { project } => {
             let plan = project.plan_path();
-            let output = run_reconcile(&plan).unwrap_or_else(|e| {
-                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
+            let output = plan_bridge::hook::guard_missing_plan(&plan, "UserPromptSubmit", || {
+                run_reconcile(&plan)
             });
             let output = maybe_warn_missing_session_start(&project.cwd, output, "UserPromptSubmit");
             println!("{}", output.to_json());
@@ -280,8 +280,8 @@ fn main() -> Result<()> {
         }
         Command::Resume { project } => {
             let plan = project.plan_path();
-            let output = run_resume(&plan).unwrap_or_else(|e| {
-                plan_bridge::hook::HookOutput::block(format!("claude-plan-bridge: {e:#}"))
+            let output = plan_bridge::hook::guard_missing_plan(&plan, "SessionStart", || {
+                run_resume(&plan)
             });
             println!("{}", output.to_json());
         }
@@ -562,24 +562,38 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                 hooks_installed = count >= 3;
                 if hooks_installed {
                     println!();
-                    let want = [
-                        ("SessionStart", "claude-plan-bridge resume"),
-                        ("UserPromptSubmit", "claude-plan-bridge reconcile"),
-                        (
-                            "PostToolUse(TaskCreate)",
-                            "claude-plan-bridge writeback --event create",
-                        ),
-                        (
-                            "PostToolUse(TaskUpdate)",
-                            "claude-plan-bridge writeback --event update",
-                        ),
+                    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+                    let want: [(&str, &str); 4] = [
+                        ("SessionStart", "resume"),
+                        ("UserPromptSubmit", "reconcile"),
+                        ("PostToolUse(TaskCreate)", "writeback"),
+                        ("PostToolUse(TaskUpdate)", "writeback"),
                     ];
-                    for (label, cmd) in want {
-                        let mark = if text.contains(cmd) { "✓" } else { "✗" };
-                        if mark == "✗" {
+                    for (label, subcmd) in want {
+                        // Map the friendly label back to the hook event name
+                        // for the JSON walker.
+                        let event = label.split('(').next().unwrap_or(label);
+                        let present = parsed
+                            .as_ref()
+                            .map(|s| {
+                                plan_bridge::init::hook_command_present(s, event, subcmd)
+                            })
+                            .unwrap_or(false);
+                        let mark = if present { "✓" } else { "✗" };
+                        if !present {
                             all_good = false;
                         }
-                        println!("  {mark} {label} → {cmd}");
+                        println!("  {mark} {label} → claude-plan-bridge ... {subcmd}");
+                    }
+                    if let Some(s) = parsed.as_ref() {
+                        if !plan_bridge::init::hooks_have_absolute_cwd(s) {
+                            println!(
+                                "  ⚠ hook entries are using a relative --cwd (or none) — \
+                                 run `claude-plan-bridge upgrade-hooks` to bake the absolute \
+                                 project root so a mid-session `cd` can't break PLAN.md lookup."
+                            );
+                            all_good = false;
+                        }
                     }
                 } else {
                     all_good = false;
@@ -644,16 +658,21 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
     }
 }
 
-/// Splice a "SessionStart hook missing" warning onto the front of `output`
-/// when the project lacks the SessionStart → resume entry. Keeps the real
-/// hook payload intact; just prepends a yell so a user on a pre-25.2 install
-/// can't ignore the drift. `hook_event` is the event we're responding to,
-/// used only when `output` is silent (we need to label the new context).
+/// Splice a "SessionStart hook missing" warning AND a "hook --cwd is
+/// relative" warning onto the front of `output` when either condition is
+/// detected. Keeps the real hook payload intact; just prepends a yell so a
+/// user on a pre-25.2 (SessionStart) or pre-32 (relative --cwd) install can't
+/// ignore the drift. `hook_event` is the event we're responding to, used
+/// only when `output` is silent (we need to label the new context).
 fn maybe_warn_missing_session_start(
     cwd: &std::path::Path,
     output: plan_bridge::hook::HookOutput,
     hook_event: &str,
 ) -> plan_bridge::hook::HookOutput {
+    let output = match plan_bridge::init::outdated_hook_cwd_warning(cwd) {
+        Some(warning) => output.prepend_context(hook_event, warning),
+        None => output,
+    };
     match plan_bridge::init::missing_session_start_warning(cwd) {
         Some(warning) => output.prepend_context(hook_event, warning),
         None => output,

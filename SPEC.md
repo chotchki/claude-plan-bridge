@@ -85,13 +85,28 @@ This is intentionally lossy on format (bold/em-dash → plain) so the canonical 
 
 - Every **leaf node** (no nested `- [ ]` children) becomes exactly one TaskCreate item.
 - Non-leaf nodes (phases, intermediate tasks) live only in PLAN.md and are **never** represented as TaskCreate items. The bridge does NOT auto-tick parents when all children complete — parent ticking is a deliberate validation step ("did the children meet this phase's goal?") that the user/agent owns. Archive operates on subtree state, so leaving a parent box unticked doesn't block phase sweeping; the parent box ticked vs. unticked is signal about whether the phase was *validated*, not whether the work was *done*.
+- **Top-level phase anchors (`N.0` form) are not tracked tasks either.** They're document-structural — the parent for a phase's children. The bridge does NOT emit `LeafAdded` drift for them (Phase 31.5): a manually-edited or auto-synthesized `- [ ] 10.0 Phase 10` won't nag the agent to `TaskCreate` it. Phases stay user/agent-owned by convention.
 - TaskCreate fields the bridge cares about:
-  - `subject`: leaf title (without the `N.M.K` prefix).
+  - `subject`: leaf title (without the `N.M.K` prefix). Subjects are normalized on the way in — stray `\"` sequences (an over-escape pattern markdown doesn't need) get stripped to plain `"` before storage so PLAN.md never holds the ugly form.
   - `metadata.plan_path`: dotted address (e.g., `"1.2.3"`).
+  - `metadata.plan_phase`: optional human-readable phase title. Used as the title when the bridge auto-synthesizes a missing top-level anchor (Phase 31.2). Fallback when absent: `Phase N` (e.g. `Phase 10` for a `10.0` synthesis).
   - `status`: `pending` for `[ ]`, `completed` for `[x]`. (`in_progress` is set by Claude during active work; it doesn't reflect to PLAN.md until completion.)
 - TaskCreate fields the bridge does **not** read (Claude may set them freely for harness UI ergonomics):
   - `description` — recommended value is the `plan_path` itself, since the bridge ignores it and using the plan_path keeps the harness UI from showing the same text as `subject` twice.
 - `blocks` / `blockedBy` dependencies are **not** auto-populated. PLAN.md only encodes parent-child nesting and document order, not explicit "this depends on that" — inferring dependencies from nesting alone would be guessing. Adding explicit dependency syntax to PLAN.md is a possible future direction, not a v1 concern.
+
+### Anchor handling on first-child insert (Phase 31)
+
+When `TaskCreate(plan_path=N.X)` arrives for a phase that doesn't yet have an `N.0` anchor:
+
+| State of `N.0` | Bridge behavior |
+|---|---|
+| Missing entirely | Synthesizes `- [ ] N.0 <plan_phase or "Phase N">` at top level, then inserts `N.X` under it. Hook output announces the auto-creation. |
+| Exists at top level | Inserts `N.X` as a child of the existing anchor (the canonical path). |
+| Exists nested under another phase | Refuses with a clear "move it to column 0" error. Refusing is deliberate — silently parenting children under a misplaced anchor was the Phase 31.3 shakeout bug (10.1–10.13 landed under `6.13 Staging / beta deployment`). |
+| Lives only as a `### Phase N — Title` markdown header | Falls back to `standardize_to_canonical()` to promote the header into a checkbox, then inserts. (Pre-Phase-31 fallback, preserved.) |
+
+Missing **intermediate** parents (e.g. `1.2` blocking a `1.2.3` insert) still error with the canonicalize hint — auto-creating non-anchor structure would invent nesting the user didn't ask for.
 
 ## Bridge components
 
@@ -118,14 +133,16 @@ Single binary, multiple subcommands:
 | `PostToolUse` | `TaskUpdate` | `plan-bridge writeback --event update` | Toggle `[ ]`/`[x]` based on status. `deleted` flips Pending → `[>]` (backlog) and promotes the leaf to the `## Backlog (not yet phased)` section; for non-Pending leaves, drops the mapping and leaves the line alone. See "TaskUpdate(deleted) flow" above. |
 | `PostToolUse` | `Edit\|Write` | `plan-bridge reconcile` (only when path ends in `PLAN.md`) | Re-derive task list when Claude edits PLAN.md directly. |
 
-Hook output uses `hookSpecificOutput.additionalContext` to feed PLAN.md state back into Claude's next turn. `decision: "block"` is reserved for hard failures (malformed PLAN.md, write conflict).
+Hook output uses `hookSpecificOutput.additionalContext` to feed PLAN.md state back into Claude's next turn. The bridge **never** emits `decision: "block"` — see Hook contract below.
+
+Hook commands written by `init` / `upgrade-hooks` carry an absolute `--cwd <project root>` so the subprocess CWD (which can drift if Claude `cd`s mid-session) doesn't determine where the bridge looks for PLAN.md. Legacy installs without `--cwd` are auto-detected and nagged via `additionalContext` until the user runs `claude-plan-bridge upgrade-hooks` (Phase 32).
 
 ## Hook contract
 
 - Hooks receive Claude Code's standard hook JSON via stdin (`session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_response`).
 - Hooks emit JSON via stdout. v1 fields used:
   - `hookSpecificOutput.additionalContext`: free-form text shown to Claude before its next response.
-  - `decision`: `"block"` only on malformed PLAN.md or write conflict; never to suppress TaskCreate as a category.
+- **No `decision: "block"`, ever.** The bridge is a peripheral that decorates context; it must not gate the user's ability to submit prompts. Missing PLAN.md → silent no-op. Handler errors → non-blocking `additionalContext` carrying the error text. (Phase 32: an adopter session imploded with every prompt — including `ls` — blocked because an inherited wrong cwd made `./PLAN.md` unreadable, and the bridge converted the I/O error into `decision: "block"`. Never again.)
 - Hooks **never** call Claude tools directly. They emit guidance; Claude executes.
 
 ## CLI surface (v1, stable)
@@ -162,10 +179,10 @@ Useful when TaskCreate's flat model is too lossy — e.g., explicit reordering, 
 - **`UserPromptSubmit` reconcile cost.** Re-parsing PLAN.md every prompt is cheap (small file, line-oriented). Re-emitting full state in `additionalContext` is the bigger concern — should emit a compact delta, not the whole tree.
 
   The delta MUST cover, at minimum:
-  - Leaves added, removed, or moved.
+  - Leaves added, removed, or moved. (Top-level `N.0` phase anchors are excluded from the `LeafAdded` channel — they're not tracked tasks; see Phase 31.5.)
   - Box-state flips (`[ ]` ↔ `[x]`).
   - Leaf title edits.
-  - **Sub-leaf annotations** — any non-checkbox bullet, indented note, or trailing prose attached to a leaf. Common case: user adds context under an existing item between turns and tells Claude "go look." Reconcile must surface the new annotation text, not just structural diffs.
+  - **Sub-leaf annotations** — any non-checkbox bullet, indented note, or trailing prose attached to a leaf. Common case: user adds context under an existing item between turns and tells Claude "go look." Reconcile must surface the new annotation text, not just structural diffs. Column-0 markdown section headers (`## Phase 10 — …` between phase blocks) are filtered out of the diff: the parser attaches them to whichever leaf was open, but they're document-structural dividers, not leaf-scoped content (Phase 31.4).
   - **Parent-child consistency**: a non-leaf node marked `[x]` whose subtree still has `[ ]` descendants. Reconcile surfaces this loudly (the user may have ticked a parent prematurely). Archive enforces the same invariant by refusing to sweep an inconsistent phase, so the two checks form a layered safety net.
 - **Indent / numbering ambiguity.** Parser should tolerate `1`/`1.0`, `1.1`/`1.1.0`, 2- or 4-space indent. Writer always normalizes.
 - **Concurrent edits.** If Claude edits PLAN.md and the user edits PLAN.md in the same second, the hook race is unresolved. Acceptable in v1; document the constraint.

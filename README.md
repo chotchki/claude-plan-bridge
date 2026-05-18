@@ -89,8 +89,11 @@ Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-lev
 
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
-- **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set (parent must exist), else append to auto-managed `Inbox.0`. Idempotent on `task_id`.
-- **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work.
+- **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set, else append to auto-managed `Inbox.0`. Idempotent on `task_id`.
+  - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level `N.0` exists, the bridge synthesizes the anchor for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback). No more manual "add the 10.0 row, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
+  - **Top-level enforcement.** If an `N.0` exists but is nested under another phase (e.g. hand-added at the wrong indent), the bridge refuses the insert rather than silently parking children under the misplaced anchor. Fix the indent and retry.
+  - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
+- **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work. Same `\"` → `"` normalization as create.
 
 ### `resume`
 
@@ -121,11 +124,11 @@ Delta variants Claude can act on:
 
 | Kind | Meaning | Suggested response |
 |---|---|---|
-| `leaf_added` | New checkbox in `PLAN.md` with no state mapping | `TaskCreate` to mirror |
+| `leaf_added` | New checkbox in `PLAN.md` with no state mapping | `TaskCreate` to mirror (top-level `N.0` phase anchors are skipped — they're document structure, not tasks) |
 | `leaf_removed` | Tracked task missing from `PLAN.md` | `TaskUpdate(status="deleted")` |
 | `leaf_state_changed` | Checkbox flipped between `[ ]`/`[x]`/`[-]`/`[>]` | `TaskUpdate` matching the new state |
 | `leaf_title_changed` | Title text edited | `TaskUpdate(subject=...)` |
-| `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read; act if needed |
+| `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read; act if needed. Column-0 markdown section headers (`## Phase 10 …`) are excluded — they're document dividers, not leaf-scoped content |
 | `parent_inconsistent` | A parent is `[x]` but a descendant leaf isn't | Resolve before archive — sweep refuses inconsistent phases |
 
 ### `archive [--dry-run] [--date YYYY-MM-DD]`
@@ -154,9 +157,19 @@ Wire it into your MCP client config — for Claude Code, point an `mcpServers` e
 
 Scaffold a new project. Creates a starter `PLAN.md`, merges the four hooks into `.claude/settings.json` (preserving any other hooks you've configured), and appends the state file + lock file to `.gitignore`. Idempotent. `--force` overwrites an existing `PLAN.md` with the template.
 
+Each installed hook command bakes the **absolute project root** as `--cwd '/abs/path'`. This makes the subprocess CWD irrelevant — if Claude `cd`s into a subdirectory mid-session, the hook still finds the right `PLAN.md`. (Added in Phase 32 after a session imploded with every prompt blocked because an inherited wrong cwd made `./PLAN.md` unreadable.)
+
 ### `upgrade-hooks [--cwd PATH]`
 
-Re-merge the latest hook set into an existing `.claude/settings.json` without touching `PLAN.md` or `.gitignore`. Use after upgrading the bridge binary on a project installed with an older version — notably anything predating the `SessionStart` hook (added in v0.1.11). Idempotent: a no-op when the file is already current. The `reconcile` and `writeback` hooks yell a one-line warning on every fire when the `SessionStart` hook is missing, so you'll notice quickly without having to remember to check.
+Re-merge the latest hook set into an existing `.claude/settings.json` without touching `PLAN.md` or `.gitignore`. Use after upgrading the bridge binary on a project installed with an older version — notably anything predating the `SessionStart` hook (added in v0.1.11) or the absolute `--cwd` baking (added in v0.1.20). Idempotent: a no-op when the file is already current. The `reconcile` and `writeback` hooks yell a one-line warning on every fire when either the `SessionStart` hook is missing or the installed commands lack absolute `--cwd`, so you'll notice quickly without having to remember to check.
+
+## Troubleshooting
+
+**Symptom**: every prompt blocked with `claude-plan-bridge: read ./PLAN.md: No such file or directory (os error 2)`, including innocuous commands like `ls`.
+
+**Cause** (pre-v0.1.20): hook commands resolved `./PLAN.md` against the subprocess CWD. If Claude `cd`'d into a subdirectory mid-session, the hook inherited that cwd and couldn't find the plan, and the bridge converted the I/O error into `decision: "block"`.
+
+**Fix**: upgrade to v0.1.20+ (`cargo install --force claude-plan-bridge`) and run `claude-plan-bridge upgrade-hooks` in the affected project. Hooks are rewritten with absolute `--cwd`, and v0.1.20 also drops the `decision: "block"` path entirely — missing `PLAN.md` is now a silent no-op no matter how the bridge gets misrouted.
 
 ## State file
 

@@ -1,4 +1,4 @@
-use crate::ast::{Node, NodeState, Plan};
+use crate::ast::{Node, NodeState, Plan, looks_like_markdown_header};
 use crate::parser::parse;
 use crate::state::{State, default_state_path_for};
 use crate::writeback::annotations_to_strings;
@@ -6,6 +6,20 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// Phase 31.4: drop legacy `last_synced_annotations` strings that look like
+/// column-0 markdown section headers. `annotations_to_strings` now filters
+/// them at write-time, but existing state files captured before the upgrade
+/// still carry header lines on whichever leaf the parser had open when the
+/// header appeared. Without this defensive filter on read, the first reconcile
+/// after upgrade would flag every such leaf as `LeafAnnotationChanged`.
+fn drop_section_headers(strings: &[String]) -> Vec<String> {
+    strings
+        .iter()
+        .filter(|s| !looks_like_markdown_header(s))
+        .cloned()
+        .collect()
+}
 
 /// One drift event between PLAN.md (canonical) and the bridge's last-known
 /// state for a given task. Reconcile emits a `Vec<Delta>`; the renderer turns
@@ -91,6 +105,18 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
         collect_all_paths(phase, &mut all_node_paths);
     }
 
+    // Phase 31.5: a leaf is a "phase anchor" when it sits at top level and its
+    // id ends in `.0` (e.g. `10.0`, `Inbox.0`). Phase anchors aren't tracked
+    // tasks — the user/agent maintains them by convention. Suppress
+    // `LeafAdded` drift for them so a manually-added or auto-synthesized
+    // anchor doesn't nag forever with "consider TaskCreate".
+    let phase_anchor_ids: HashSet<&str> = plan
+        .phases
+        .iter()
+        .filter(|p| p.id.ends_with(".0"))
+        .map(|p| p.id.as_str())
+        .collect();
+
     for leaf in leaves {
         // Phase 18: skip empty-id leaves (bare checkboxes without a dotted id).
         // They share plan_path="" which collapses in path_to_task — the bridge
@@ -122,7 +148,12 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                     });
                 }
                 let current = annotations_to_strings(&leaf.annotations);
-                if current != mapping.last_synced_annotations {
+                // Phase 31.4: defensively filter legacy section-header entries
+                // from `last_synced_annotations` before comparing. New writes
+                // never include them (annotations_to_strings drops them too),
+                // but older state files predating the change still carry them.
+                let stored_filtered = drop_section_headers(&mapping.last_synced_annotations);
+                if current != stored_filtered {
                     deltas.push(Delta::LeafAnnotationChanged {
                         plan_path: leaf.id.clone(),
                         task_id: task_id.to_string(),
@@ -144,7 +175,13 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
                 // told Claude to TaskCreate it; reconcile re-flagging the
                 // same path as "Added (consider TaskCreate)" on the next
                 // UserPromptSubmit is pure double-nudge.
-                if leaf.state == NodeState::Pending && !state.pending_rehydration.contains(&leaf.id)
+                //
+                // Phase 31.5: also skip top-level phase-anchor leaves
+                // (`N.0` form at top level). They're document structure, not
+                // tracked tasks.
+                if leaf.state == NodeState::Pending
+                    && !state.pending_rehydration.contains(&leaf.id)
+                    && !phase_anchor_ids.contains(leaf.id.as_str())
                 {
                     deltas.push(Delta::LeafAdded {
                         plan_path: leaf.id.clone(),
@@ -542,14 +579,17 @@ mod tests {
         // TaskCreate them — reconcile must NOT also flag them as
         // "Added [ ] … (consider TaskCreate)". Pending leaves NOT in the
         // set still emit drift (they're genuinely new since rehydration).
+        //
+        // (Phase 31.5 also suppresses LeafAdded for top-level `N.0` phase
+        // anchors. Pick child leaves so this test isolates the rehydration
+        // suppression mechanism.)
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Already announced\n  - [ ] 1.1 Already announced\n- [ ] 2.0 Brand new\n",
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Already announced\n  - [ ] 1.2 Brand new\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
-        state.pending_rehydration.insert("1.0".to_string());
         state.pending_rehydration.insert("1.1".to_string());
         state.save(&state_path).unwrap();
 
@@ -564,9 +604,9 @@ mod tests {
         assert_eq!(
             added.len(),
             1,
-            "expected only 2.0 to drift; rehydration set should suppress 1.0/1.1: {deltas:?}"
+            "expected only 1.2 to drift; rehydration set should suppress 1.1: {deltas:?}"
         );
-        assert_eq!(added[0], "2.0");
+        assert_eq!(added[0], "1.2");
     }
 
     #[test]
@@ -965,6 +1005,145 @@ mod tests {
         assert!(r.contains("1.3"));
         assert!(r.contains("State"));
         assert!(r.contains("1.1"));
+    }
+
+    #[test]
+    fn section_headers_in_legacy_state_no_longer_emit_annotation_drift() {
+        // Phase 31.4: an upgrade-from-older-state file scenario. Legacy state
+        // captured `## Phase 10 — ...` (a column-0 markdown header) as part
+        // of a leaf's `last_synced_annotations`. After the upgrade, the same
+        // PLAN.md's reconcile run filters the header out of `current` —
+        // without the read-side defensive filter this would diff and emit
+        // spurious `LeafAnnotationChanged` for every leaf that had a header
+        // attached. Defensive filter ensures both sides agree.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
+        );
+        // Legacy state: header captured into last_synced_annotations.
+        let m = Mapping {
+            plan_path: "1.1".to_string(),
+            last_synced_title: "Task".to_string(),
+            last_synced_state: NodeState::Pending,
+            last_synced_annotations: vec!["## Phase 10 — Next".to_string()],
+            ..Default::default()
+        };
+        write_state(&plan, &[("t-1", m)]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafAnnotationChanged { .. })),
+            "legacy header in state should not drift: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn column_zero_section_header_does_not_create_annotation_drift() {
+        // Phase 31.4: clean install. A `## Phase 10 — Next` header between
+        // leaves attaches to whichever leaf was open at parse time. The fresh
+        // state doesn't carry it (annotations_to_strings filters at the
+        // source). Reconcile sees current AND stored as the same filtered
+        // set → no drift.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
+        );
+        let m = Mapping {
+            plan_path: "1.1".to_string(),
+            last_synced_title: "Task".to_string(),
+            last_synced_state: NodeState::Pending,
+            last_synced_annotations: vec![],
+            ..Default::default()
+        };
+        write_state(&plan, &[("t-1", m)]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafAnnotationChanged { .. })),
+            "column-0 header should not drift: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn indented_section_header_still_drifts_when_added() {
+        // Sanity: the column-0 filter is narrow. A header indented inside the
+        // tree (the user genuinely sectioned the leaf's content) still counts
+        // as a real annotation — drift fires so Claude knows the user added
+        // something to look at.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n    ## Indented heading\n",
+        );
+        let m = Mapping {
+            plan_path: "1.1".to_string(),
+            last_synced_title: "Task".to_string(),
+            last_synced_state: NodeState::Pending,
+            last_synced_annotations: vec![],
+            ..Default::default()
+        };
+        write_state(&plan, &[("t-1", m)]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafAnnotationChanged { .. })),
+            "indented header should be tracked as a leaf annotation: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn suppresses_leaf_added_for_top_level_phase_anchors() {
+        // Phase 31.5: a hand-added `- [ ] 10.0 ...` at top level used to spam
+        // `+ Added ⬜ 10.0 ... (consider TaskCreate)` every prompt forever.
+        // Phase anchors aren't tracked tasks — the bridge skips them.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 First phase\n  - [ ] 1.1 Real task\n- [ ] 10.0 Phase 10 anchor\n",
+        );
+        // Only 1.1 is in state; both 1.0 and 10.0 are mapping-less leaves.
+        write_state(&plan, &[("t-1", mapping("1.1", "Real task", false, &[]))]);
+        let deltas = reconcile(&plan).unwrap();
+        let added_paths: Vec<&str> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                Delta::LeafAdded { plan_path, .. } => Some(plan_path.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Neither 1.0 nor 10.0 should show as Added — both are phase anchors.
+        assert!(
+            !added_paths.contains(&"1.0"),
+            "phase anchor 1.0 should be suppressed: {deltas:?}"
+        );
+        assert!(
+            !added_paths.contains(&"10.0"),
+            "phase anchor 10.0 should be suppressed: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn non_phase_anchor_leaves_still_drift_added() {
+        // Phase 31.5 sanity: only top-level `N.0` ids are suppressed.
+        // A normal mid-tree leaf without state mapping should still drift.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Tracked\n  - [ ] 1.2 Untracked\n",
+        );
+        write_state(&plan, &[("t-1", mapping("1.1", "Tracked", false, &[]))]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, Delta::LeafAdded { plan_path, .. } if plan_path == "1.2")),
+            "1.2 should still drift: {deltas:?}"
+        );
     }
 
     #[test]
