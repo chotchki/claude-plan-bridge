@@ -750,12 +750,13 @@ Some prose.
 
     #[test]
     fn parses_this_repos_plan_md() {
-        // e2e smoke test: the live PLAN.md in this repo should always parse.
-        // It will drift as work progresses; we only check it parses and has phases.
+        // e2e smoke test: the live PLAN.md in this repo must always PARSE.
+        // No assertion on content — between a phase exit and the next plan
+        // entry, PLAN.md is legitimately empty of phases, and we don't want
+        // archive sweeps to break the release pipeline.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("PLAN.md");
         let input = std::fs::read_to_string(&path).expect("PLAN.md exists");
-        let plan = parse(&input).expect("PLAN.md must parse cleanly");
-        assert!(!plan.phases.is_empty(), "PLAN.md should declare phases");
+        parse(&input).expect("PLAN.md must parse cleanly");
     }
 
     #[test]
