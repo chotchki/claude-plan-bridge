@@ -104,6 +104,15 @@ SessionStart hook handler. Reads the state file and emits a rehydration prompt s
 
 The first line of the prompt itself shows the call shape `TaskCreate(subject=<title>, description=<plan_path>, metadata={"plan_path": <plan_path>})` so the agent doesn't accidentally embed the `plan_path` in `subject` or duplicate the title into `description`. The bridge ignores `description`; using the plan_path keeps the harness UI from showing the same text twice.
 
+**Restart-test workflow.** When changing rehydration behavior (the SessionStart prompt, state-clear logic, source-aware framing), exercise the live cycle in addition to unit tests:
+
+1. From within Claude Code, run `/clear` (forces a `source=clear` SessionStart).
+2. The hook fires immediately on the next prompt; ask Claude "did the rehydration prompt arrive and did you reload the tasks?"
+3. Confirm: the listed leaves match open PLAN.md leaves, parents appear only as `## N.M Title` context headers (no TaskCreate ask), and the footer notes how many stale mappings were cleared (source-aware).
+4. Watch Claude `TaskCreate` each leaf — writeback should report "rehydration complete: N/N mapped" on the final one, and the harness task list should match PLAN.md leaf-for-leaf.
+
+The unit tests in `resume.rs` cover the prompt-shape contract; the manual loop catches integration regressions the unit tests can't see (hook wiring, ToolSearch deferral, Claude's actual response shape).
+
 ### `reconcile`
 
 UserPromptSubmit hook handler. Diffs `PLAN.md` against the bridge's `last_synced_*` baselines and emits any drift as `additionalContext`. Output is `{}` when there's no drift.

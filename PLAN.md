@@ -12,8 +12,3 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 
 ---
 
-- [ ] 24.0 Phase 24 — Restart-test README note + parent-inference fix
-  - [ ] 24.1 Add failing test for bare-N phase root
-  - [ ] 24.2 Fix parent-inference to accept bare N
-  - [ ] 24.3 Note restart-test cycle in README
-  - [ ] 24.4 Phase 24 exit — tests, version bump, archive

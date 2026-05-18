@@ -313,3 +313,13 @@
   - [x] 28.10 README + SPEC.md: document the marker, when to use vs `[-]`, and the auto-flip + Backlog-section-promotion behavior
   - [x] 28.11 Phase 28 exit — tests, version bump, archive
 
+---
+
+## 2026-05-18
+
+- [x] 24.0 Phase 24 — Restart-test README note + parent-inference fix
+  - [x] 24.1 Add failing test for bare-N phase root
+  - [x] 24.2 Fix parent-inference to accept bare N
+  - [x] 24.3 Note restart-test cycle in README
+  - [x] 24.4 Phase 24 exit — tests, version bump, archive
+
