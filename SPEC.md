@@ -61,14 +61,14 @@ This is intentionally lossy on format (bold/em-dash → plain) so the canonical 
 ## PLAN.md → TaskCreate mapping
 
 - Every **leaf node** (no nested `- [ ]` children) becomes exactly one TaskCreate item.
-- Non-leaf nodes (phases, intermediate tasks) live only in PLAN.md. They auto-tick when all their children tick — never represented in TaskCreate directly.
-- TaskCreate fields:
+- Non-leaf nodes (phases, intermediate tasks) live only in PLAN.md and are **never** represented as TaskCreate items. The bridge does NOT auto-tick parents when all children complete — parent ticking is a deliberate validation step ("did the children meet this phase's goal?") that the user/agent owns. Archive operates on subtree state, so leaving a parent box unticked doesn't block phase sweeping; the parent box ticked vs. unticked is signal about whether the phase was *validated*, not whether the work was *done*.
+- TaskCreate fields the bridge cares about:
   - `subject`: leaf title (without the `N.M.K` prefix).
-  - `description`: leaf title + any inline notes captured immediately below the leaf line.
   - `metadata.plan_path`: dotted address (e.g., `"1.2.3"`).
-  - `metadata.plan_phase`: phase title (e.g., `"Phase 1: Core parser"`).
   - `status`: `pending` for `[ ]`, `completed` for `[x]`. (`in_progress` is set by Claude during active work; it doesn't reflect to PLAN.md until completion.)
-- `blocks` / `blockedBy` dependencies are **not** auto-populated in v1. The hierarchical structure of PLAN.md is the only ordering signal.
+- TaskCreate fields the bridge does **not** read (Claude may set them freely for harness UI ergonomics):
+  - `description` — recommended value is the `plan_path` itself, since the bridge ignores it and using the plan_path keeps the harness UI from showing the same text as `subject` twice.
+- `blocks` / `blockedBy` dependencies are **not** auto-populated. PLAN.md only encodes parent-child nesting and document order, not explicit "this depends on that" — inferring dependencies from nesting alone would be guessing. Adding explicit dependency syntax to PLAN.md is a possible future direction, not a v1 concern.
 
 ## Bridge components
 

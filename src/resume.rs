@@ -48,12 +48,21 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         let plan = parser::parse(&plan_text)
             .with_context(|| format!("parse {}", plan_path.display()))?;
 
+        // Phase 27.1: leaves-only rehydration. Parent phase nodes represent
+        // goal-validation gates the user owns (see `parent-tick-is-validation`
+        // memory) — they should never come back as harness tasks on restart.
+        // Archive already operates on subtree state, so leaving parent boxes
+        // unticked doesn't block phase sweeping. A newly-stubbed phase with no
+        // children is itself a leaf by `is_leaf()` and still emits.
         let mut open: Vec<(String, String)> = state
             .mappings
             .values()
             .filter_map(|m| {
                 let node = plan.find(&m.plan_path)?;
                 if node.state != NodeState::Pending {
+                    return None;
+                }
+                if !node.is_leaf() {
                     return None;
                 }
                 Some((m.plan_path.clone(), node.title.clone()))
@@ -111,19 +120,55 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             0
         };
 
+        // Phase 27.3: source-aware ToolSearch framing. On `startup`/`clear`
+        // the harness process is fresh — no prior tool history — so
+        // TaskCreate IS deferred and MUST be fetched via ToolSearch before
+        // it can be called. On `resume`/`compact` the prior tool history is
+        // preserved, so TaskCreate is almost always already loaded and the
+        // fetch is only a defensive fallback.
+        let tool_search_hint = if harness_is_fresh(source) {
+            "TaskCreate is deferred on a fresh harness — fetch it first with \
+             `ToolSearch query=\"select:TaskCreate\"`."
+        } else {
+            "If TaskCreate isn't loaded yet, fetch with \
+             `ToolSearch query=\"select:TaskCreate\"`."
+        };
+
         let mut out = String::new();
         out.push_str(
             "claude-plan-bridge: session restart — the harness task list is empty, but \
              PLAN.md has open tasks tracked in the state file. Before responding to the \
-             user, call TaskCreate for each item below with `metadata.plan_path = \"<id>\"` \
-             so writeback links the new harness IDs to the existing PLAN.md lines.\n\n\
-             If TaskCreate isn't loaded yet, fetch it first with \
-             `ToolSearch query=\"select:TaskCreate\"`. The bulleted title can be reused \
-             for both `subject` and `description`. All TaskCreate calls are independent — \
-             batch them in a single tool-call block.\n\n",
+             user, call TaskCreate for each leaf below.\n\n\
+             Each indented bullet has the shape `<plan_path> <title>` (matching PLAN.md). \
+             For each, call `TaskCreate(subject=<title>, description=<plan_path>, \
+             metadata={\"plan_path\": <plan_path>})` — the leading `N.M` token goes into \
+             `metadata.plan_path` AND `description` (the bridge ignores `description`; \
+             using the plan_path keeps the harness UI clean instead of duplicating the \
+             title). `## <plan_path> <title>` lines are \
+             parent-phase headers shown for goal context; do NOT TaskCreate them — parent \
+             ticking is a deliberate validation step you take after confirming the leaves \
+             met the phase goal. ",
         );
+        out.push_str(tool_search_hint);
+        out.push_str(
+            " All TaskCreate calls are independent — batch them in a single tool-call \
+             block.\n",
+        );
+        let mut current_parent: Option<String> = None;
         for (path, title) in &open {
-            out.push_str(&format!("  - {path} — {title}\n"));
+            let parent_id = crate::ast::parent_id_for(path);
+            if parent_id != current_parent {
+                if let Some(ref pid) = parent_id {
+                    if let Some(parent_node) = plan.find(pid) {
+                        out.push_str(&format!(
+                            "\n## {} {}\n",
+                            parent_node.id, parent_node.title
+                        ));
+                    }
+                }
+                current_parent = parent_id;
+            }
+            out.push_str(&format!("  - {path} {title}\n"));
         }
         if dropped > 0 {
             out.push_str(&format!(
@@ -234,11 +279,14 @@ mod tests {
     }
 
     #[test]
-    fn emits_bullet_per_open_mapping_sorted_by_id() {
+    fn emits_bullet_per_open_leaf_mapping_sorted_by_id() {
+        // Phase 27.1: parent phase nodes are filtered (1.0 has children); only
+        // leaves (1.1, 1.2, 2.0) are emitted. A phase with no children
+        // (e.g., 2.0) is itself a leaf and survives.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First phase\n  - [ ] 1.1 First task\n- [ ] 2.0 Second phase\n",
+            "- [ ] 1.0 First phase\n  - [ ] 1.1 First task\n  - [ ] 1.2 Second task\n- [ ] 2.0 Second phase\n",
         );
         let mut state = State::default();
         // Insert in non-sorted order to verify cmp_ids sort.
@@ -247,6 +295,14 @@ mod tests {
             Mapping {
                 plan_path: "2.0".to_string(),
                 last_synced_title: "Second phase".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "7",
+            Mapping {
+                plan_path: "1.2".to_string(),
+                last_synced_title: "Second task".to_string(),
                 ..Default::default()
             },
         );
@@ -270,12 +326,178 @@ mod tests {
 
         let msg = build_resume_message(&plan, "").unwrap().unwrap();
         let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
-        assert_eq!(bullets.len(), 3);
-        assert!(bullets[0].contains("1.0 — First phase"), "got: {bullets:?}");
-        assert!(bullets[1].contains("1.1 — First task"), "got: {bullets:?}");
+        assert_eq!(bullets.len(), 3, "expected 3 leaf bullets, got: {bullets:?}");
+        assert!(bullets[0].contains("1.1 First task"), "got: {bullets:?}");
+        assert!(bullets[1].contains("1.2 Second task"), "got: {bullets:?}");
+        assert!(bullets[2].contains("2.0 Second phase"), "got: {bullets:?}");
         assert!(
-            bullets[2].contains("2.0 — Second phase"),
-            "got: {bullets:?}"
+            !bullets.iter().any(|b| b.contains("First phase")),
+            "parent phase 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+        );
+    }
+
+    #[test]
+    fn filters_parent_phases_keeps_only_leaves() {
+        // Phase 27.1: leaves-only rehydration. Even when a parent node has a
+        // state mapping, it should be filtered out of the rehydration prompt —
+        // parents represent goal-validation gates the user owns, not harness
+        // tasks. The state-file drop on `startup`/`clear` still wipes the
+        // parent mapping (no zombie state); the parent simply doesn't get
+        // re-announced as a TaskCreate ask.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Parent phase\n  - [ ] 1.1 Leaf one\n  - [ ] 1.2 Leaf two\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "1",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Parent phase".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "2",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Leaf one".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "3",
+            Mapping {
+                plan_path: "1.2".to_string(),
+                last_synced_title: "Leaf two".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
+
+        // Only leaf bullets emitted; parent appears as context header, not bullet.
+        assert!(msg.contains("1.1 Leaf one"), "leaf 1.1 missing: {msg}");
+        assert!(msg.contains("1.2 Leaf two"), "leaf 1.2 missing: {msg}");
+        assert!(
+            !bullets.iter().any(|b| b.contains("Parent phase")),
+            "parent 1.0 should not be a TaskCreate bullet: {bullets:?}"
+        );
+
+        // pending_rehydration should hold leaves only (matters for the
+        // rehydration-complete signal — Phase 26.7 expects the set to drain
+        // when the announced TaskCreates land).
+        let after = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(
+            after.pending_rehydration.iter().cloned().collect::<Vec<_>>(),
+            vec!["1.1".to_string(), "1.2".to_string()],
+            "pending_rehydration should be leaves only: {:?}",
+            after.pending_rehydration
+        );
+        assert_eq!(
+            after.rehydration_announced, 2,
+            "announced count should match leaf count, got {}",
+            after.rehydration_announced
+        );
+    }
+
+    #[test]
+    fn groups_leaves_under_parent_phase_header() {
+        // Phase 27.1a: leaves are grouped under their parent phase using a
+        // `## <plan_path> <title>` header line so the agent sees the phase
+        // goal at restart time (the validation cue that leaves-only
+        // rehydration would otherwise lose). Headers are context, NOT
+        // TaskCreate asks — the prompt instructs accordingly.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 First phase\n  - [ ] 1.1 First task\n  - [ ] 1.2 Second task\n\
+             - [ ] 3.0 Third phase\n  - [ ] 3.1 Lone task\n\
+             - [ ] 5.0 Standalone phase\n",
+        );
+        let mut state = State::default();
+        for (id, path, title) in [
+            ("a", "1.1", "First task"),
+            ("b", "1.2", "Second task"),
+            ("c", "3.1", "Lone task"),
+            ("d", "5.0", "Standalone phase"),
+        ] {
+            state.record(
+                id,
+                Mapping {
+                    plan_path: path.to_string(),
+                    last_synced_title: title.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+
+        // Parent headers appear for grouped leaves; childless top-level
+        // leaf (5.0) has no header (parent_id_for returns None).
+        assert!(
+            msg.contains("## 1.0 First phase"),
+            "missing parent header for 1.0: {msg}"
+        );
+        assert!(
+            msg.contains("## 3.0 Third phase"),
+            "missing parent header for 3.0: {msg}"
+        );
+        assert!(
+            !msg.contains("## 5.0 Standalone phase"),
+            "5.0 is itself a leaf (no parent), should not get a header: {msg}"
+        );
+
+        // Header position: each parent header precedes its leaves.
+        let pos_h10 = msg.find("## 1.0").expect("header 1.0");
+        let pos_11 = msg.find("  - 1.1").expect("leaf 1.1");
+        let pos_12 = msg.find("  - 1.2").expect("leaf 1.2");
+        let pos_h30 = msg.find("## 3.0").expect("header 3.0");
+        let pos_31 = msg.find("  - 3.1").expect("leaf 3.1");
+        assert!(
+            pos_h10 < pos_11 && pos_11 < pos_12,
+            "1.0 header should precede its leaves: header@{pos_h10} 1.1@{pos_11} 1.2@{pos_12}"
+        );
+        assert!(
+            pos_12 < pos_h30 && pos_h30 < pos_31,
+            "3.0 header should appear after 1.x leaves and before 3.1"
+        );
+
+        // Instruction makes clear that `## ` lines are not TaskCreate asks.
+        assert!(
+            msg.contains("do NOT TaskCreate them"),
+            "missing parent-header exclusion instruction: {msg}"
+        );
+    }
+
+    #[test]
+    fn childless_phase_node_is_treated_as_leaf() {
+        // A phase stubbed with no children (e.g., a freshly-added `- [ ] 5.0
+        // Future phase` with nothing under it) IS a leaf by `is_leaf()` and
+        // should rehydrate — otherwise newly-stubbed phases would silently
+        // vanish from the harness on restart.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 5.0 Future phase\n");
+        let mut state = State::default();
+        state.record(
+            "1",
+            Mapping {
+                plan_path: "5.0".to_string(),
+                last_synced_title: "Future phase".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        assert!(
+            msg.contains("5.0 Future phase"),
+            "childless phase should emit as leaf: {msg}"
         );
     }
 
@@ -301,25 +523,26 @@ mod tests {
 
     #[test]
     fn full_restart_cycle_rehydrates_cleanly() {
-        // Phase 25.5 e2e: simulate the full restart flow end-to-end.
-        //   1. Prior session: state file has 3 mappings under task_ids 5/6/7
-        //      for plan_paths 1.0/1.1/1.2; PLAN.md has those leaves.
-        //   2. Session restart: in-session task_ids are gone, but state file
-        //      persists. `build_resume_message` produces the rehydration
-        //      prompt.
-        //   3. Claude calls TaskCreate for each suggested mapping with FRESH
-        //      task_ids (101/102/103) — simulated here by invoking
-        //      writeback_create directly with the same plan_paths.
-        //   4. Post-rehydration: state file has only the new task_ids, no
-        //      zombies; PLAN.md is byte-identical.
-        use crate::writeback;
+        // Phase 25.5 e2e (updated for 27.1 leaves-only): simulate the full
+        // restart flow end-to-end.
+        //   1. Prior session: state file has 3 mappings — parent 1.0 (task_id
+        //      5) plus leaves 1.1/1.2 (task_ids 6/7).
+        //   2. Session restart: in-session task_ids are gone. `build_resume_
+        //      message` produces the rehydration prompt with LEAVES ONLY (1.0
+        //      filtered as parent); state file's parent mapping is also
+        //      dropped on `startup` source.
+        //   3. Claude TaskCreates only the announced leaves with FRESH task_ids
+        //      (102/103). The parent never comes back into the harness.
+        //   4. Post-rehydration: state file has only the new leaf task_ids,
+        //      no parent mapping, no zombies; PLAN.md byte-identical.
         use crate::hook::HookPayload;
+        use crate::writeback;
 
         let dir = scratch_dir();
         let plan_text = "- [ ] 1.0 Phase one\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n";
         let plan = write_plan(&dir, plan_text);
 
-        // (1) Seed prior-session state.
+        // (1) Seed prior-session state with parent + 2 leaves.
         let state_path = default_state_path_for(&plan);
         let mut prior = State::default();
         for (id, path, title) in [
@@ -338,19 +561,23 @@ mod tests {
         }
         prior.save(&state_path).unwrap();
 
-        // (2) Resume produces a prompt listing all three.
-        let msg = build_resume_message(&plan, "").unwrap().expect("expected msg");
-        for path in ["1.0", "1.1", "1.2"] {
-            assert!(msg.contains(path), "resume missing {path}: {msg}");
+        // (2) Resume on `startup` emits leaves only; parent appears as
+        // context header but never as a TaskCreate bullet.
+        let msg = build_resume_message(&plan, "startup")
+            .unwrap()
+            .expect("expected msg");
+        let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
+        for path in ["1.1", "1.2"] {
+            assert!(msg.contains(path), "resume missing leaf {path}: {msg}");
         }
+        assert!(
+            !bullets.iter().any(|b| b.contains("Phase one")),
+            "parent 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+        );
 
-        // (3) Apply rehydration with fresh task_ids (no overlap with prior 5/6/7).
+        // (3) Apply rehydration with fresh task_ids for the leaves only.
         let plan_before = std::fs::read_to_string(&plan).unwrap();
-        for (new_id, path, title) in [
-            ("101", "1.0", "Phase one"),
-            ("102", "1.1", "First"),
-            ("103", "1.2", "Second"),
-        ] {
+        for (new_id, path, title) in [("102", "1.1", "First"), ("103", "1.2", "Second")] {
             let payload = HookPayload {
                 session_id: String::new(),
                 cwd: String::new(),
@@ -367,13 +594,17 @@ mod tests {
             writeback::writeback_create(&payload, &plan).unwrap();
         }
 
-        // (4) Final state: only the new task_ids, no zombies, PLAN.md unchanged.
+        // (4) Final state: only leaf task_ids, no parent, no zombies, PLAN.md unchanged.
         let plan_after = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(plan_before, plan_after, "PLAN.md mutated during rehydration");
 
         let final_state = State::load(&state_path).unwrap();
-        assert_eq!(final_state.mappings.len(), 3, "expected exactly 3 mappings, got {:?}", final_state.mappings);
-        assert_eq!(final_state.plan_path("101"), Some("1.0"));
+        assert_eq!(
+            final_state.mappings.len(),
+            2,
+            "expected exactly 2 leaf mappings, got {:?}",
+            final_state.mappings
+        );
         assert_eq!(final_state.plan_path("102"), Some("1.1"));
         assert_eq!(final_state.plan_path("103"), Some("1.2"));
         for stale in ["5", "6", "7"] {
@@ -382,16 +613,6 @@ mod tests {
                 None,
                 "stale mapping for {stale} survived rehydration"
             );
-        }
-
-        // Resume on the rehydrated state still produces the same prompt
-        // (state file is current; resume doesn't know whether harness has
-        // already created the tasks). That's expected — subsequent
-        // TaskCreates with same task_ids would no-op via the same-path
-        // branch, so it's safe.
-        let msg2 = build_resume_message(&plan, "").unwrap().expect("expected msg");
-        for path in ["1.0", "1.1", "1.2"] {
-            assert!(msg2.contains(path), "resume missing {path}: {msg2}");
         }
     }
 
@@ -437,10 +658,17 @@ mod tests {
         write_state(&plan, &state);
 
         let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
-        // Prompt enumerates open items.
-        assert!(msg.contains("1.0 — Open"), "got: {msg}");
-        assert!(msg.contains("1.1 — Open child"), "got: {msg}");
-        // Prompt notes the drop so the reader knows what to expect.
+        let bullets: Vec<&str> = msg.lines().filter(|l| l.starts_with("  - ")).collect();
+        // Prompt enumerates open LEAVES (Phase 27.1: parents filtered from
+        // TaskCreate bullets; Phase 27.1a: parent may still appear as a `## `
+        // context header).
+        assert!(msg.contains("1.1 Open child"), "got: {msg}");
+        assert!(
+            !bullets.iter().any(|b| b.contains("1.0 Open")),
+            "parent 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+        );
+        // Prompt notes the drop so the reader knows what to expect — drop
+        // still iterates all mappings (parent + child + closed = 3).
         assert!(msg.contains("cleared 3 stale mapping"), "got: {msg}");
         assert!(msg.contains("source=`startup`"), "got: {msg}");
 
@@ -575,14 +803,134 @@ mod tests {
             msg.contains("ToolSearch") && msg.contains("select:TaskCreate"),
             "26.1 ToolSearch hint missing: {msg}"
         );
+        // Phase 27.2: subject/description guidance is embedded in an
+        // explicit `TaskCreate(subject=<title>, description=<plan_path>, ...)`
+        // call shape. Phase 27.4 narrowed description to the plan_path so the
+        // harness UI doesn't show the subject twice.
         assert!(
-            msg.contains("`subject`") && msg.contains("`description`"),
-            "26.3 subject/description hint missing: {msg}"
+            msg.contains("subject=<title>") && msg.contains("description=<plan_path>"),
+            "26.3/27.4 subject/description hint missing: {msg}"
         );
         assert!(
             msg.contains("batch") && msg.contains("single tool-call block"),
             "26.4 parallel-batch hint missing: {msg}"
         );
+    }
+
+    #[test]
+    fn prompt_suggests_plan_path_as_description() {
+        // Phase 27.4: description should be the plan_path, not the title.
+        // Locks in the change so future edits don't revert to the duplicated
+        // subject=description=<title> shape.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "5",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        assert!(
+            msg.contains("description=<plan_path>"),
+            "should suggest plan_path as description: {msg}"
+        );
+        assert!(
+            !msg.contains("description=<title>"),
+            "should NOT suggest title-as-description (duplicates subject): {msg}"
+        );
+        assert!(
+            msg.contains("bridge ignores `description`"),
+            "should explain why description is freely chosen: {msg}"
+        );
+    }
+
+    #[test]
+    fn startup_source_uses_assertive_toolsearch_wording() {
+        // Phase 27.3: on a fresh harness, TaskCreate is provably deferred —
+        // the prompt should state that flatly, not as a conditional. Locks in
+        // the assertive wording so future edits don't soften it back.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "5",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
+        assert!(
+            msg.contains("TaskCreate is deferred on a fresh harness"),
+            "startup should use assertive wording: {msg}"
+        );
+        assert!(
+            !msg.contains("If TaskCreate isn't loaded yet"),
+            "startup should NOT use conditional wording: {msg}"
+        );
+    }
+
+    #[test]
+    fn clear_source_uses_assertive_toolsearch_wording() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let mut state = State::default();
+        state.record(
+            "5",
+            Mapping {
+                plan_path: "1.0".to_string(),
+                last_synced_title: "Open".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "clear").unwrap().unwrap();
+        assert!(
+            msg.contains("TaskCreate is deferred on a fresh harness"),
+            "clear should use assertive wording: {msg}"
+        );
+    }
+
+    #[test]
+    fn resume_compact_sources_use_conditional_toolsearch_wording() {
+        // Phase 27.3: on resume/compact the prior tool history is preserved,
+        // so TaskCreate is almost always already loaded. Keep the hint as a
+        // light conditional fallback rather than an assertion that would be
+        // misleading 99% of the time.
+        for source in ["resume", "compact"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "5",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                msg.contains("If TaskCreate isn't loaded yet"),
+                "source={source} should use conditional wording: {msg}"
+            );
+            assert!(
+                !msg.contains("TaskCreate is deferred on a fresh harness"),
+                "source={source} should NOT use the fresh-harness assertion: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -703,10 +1051,13 @@ mod tests {
 
         let _msg = build_resume_message(&plan, "startup").unwrap().unwrap();
         let after = State::load(&default_state_path_for(&plan)).unwrap();
+        // Phase 27.1: pending_rehydration mirrors what was *announced* in the
+        // prompt — leaves only. Parent 1.0 is filtered upstream so it never
+        // lands here.
         assert_eq!(
             after.pending_rehydration.iter().cloned().collect::<Vec<_>>(),
-            vec!["1.0".to_string(), "1.1".to_string()],
-            "pending_rehydration should hold the open plan_paths only; got: {:?}",
+            vec!["1.1".to_string()],
+            "pending_rehydration should hold open leaves only; got: {:?}",
             after.pending_rehydration
         );
     }
@@ -759,7 +1110,7 @@ mod tests {
         write_state(&plan, &state);
 
         let msg = build_resume_message(&plan, "").unwrap().unwrap();
-        assert!(msg.contains("1.0 — Open"), "got: {msg}");
+        assert!(msg.contains("1.0 Open"), "got: {msg}");
         assert!(!msg.contains("Closed"), "got: {msg}");
         assert!(!msg.contains("Skipped"), "got: {msg}");
     }

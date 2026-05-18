@@ -268,3 +268,29 @@
   - [x] 26.8 Audit log for cleared state mappings
   - [x] 26.9 Phase 26 exit — tests, version bump, archive
 
+---
+
+## 2026-05-18
+
+- [x] 25.0 Phase 25 — Session-restart rehydration via SessionStart hook
+  - [x] 25.1 Add `plan-bridge resume` subcommand
+  - [x] 25.2 Wire SessionStart hook into installer + add `upgrade-hooks` subcommand
+  - [x] 25.3 Writeback: dedup mappings by plan_path on TaskCreate
+  - [x] 25.4 Reconcile/writeback warn loudly when SessionStart hook is missing
+  - [x] 25.5 e2e test: full restart cycle
+  - [x] 25.6 README: document session-restart behavior
+  - [x] 25.6a Drop stale pending mappings on resume to prevent harness-ID collisions
+  - [x] 25.6b Tighten resume prompt: imperative + before-responding framing
+  - [x] 25.6c Broaden resume clear: drop all mappings on startup/clear, not just pending
+  - [x] 25.6d TaskUpdate(deleted) becomes unlink-only — never mutate PLAN.md
+  - [x] 25.7 Phase 25 exit — tests, version bump, archive
+
+- [x] 27.0 Phase 27 — Rehydration prompt polish + leaves-only parent filter
+  - [x] 27.1 Filter non-leaf nodes from build_resume_message (leaves-only rehydration)
+  - [x] 27.1a Group leaves under parent phase header in rehydration prompt
+  - [x] 27.2 Bullet format: PLAN.md-style `id title` + explicit plan_path-vs-subject instruction
+  - [x] 27.3 Source-aware ToolSearch framing: assertive on startup/clear, light on resume/compact
+  - [x] 27.4 Suggest minimal description (e.g., plan_path) in rehydration prompt
+  - [x] 27.5 README: document leaves-only rehydration + parent-tick-is-validation
+  - [x] 27.6 Phase 27 exit — tests, version bump, archive
+

@@ -56,7 +56,7 @@ From the next session, the bridge runs invisibly:
 
 | Claude does… | The bridge does… |
 |---|---|
-| Starts a new session | `SessionStart` hook emits a rehydration prompt listing every open `plan_path` so Claude re-`TaskCreate`s them into the fresh task list (writeback re-links to existing PLAN.md lines, no duplicates) |
+| Starts a new session | `SessionStart` hook emits a rehydration prompt listing every open *leaf* `plan_path` (parents shown only as context headers) so Claude re-`TaskCreate`s them into the fresh task list (writeback re-links to existing PLAN.md lines, no duplicates) |
 | `TaskCreate` (any source) | Appends `- [ ] N.M new task` to `PLAN.md` (under `Inbox.0` if no `plan_path` metadata, else at the requested id) |
 | `TaskUpdate(status="completed")` | Ticks `[ ]` → `[x]` at the mapped line |
 | `TaskUpdate(status="deleted")` | Removes the line (orphaned empty parents stay; you prune by hand) |
@@ -94,7 +94,15 @@ PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` +
 
 ### `resume`
 
-SessionStart hook handler. Reads the state file and emits a rehydration prompt listing every still-pending mapping with its live `PLAN.md` title, so Claude re-creates the in-session task list after a restart. Output is `{}` when there's no state file, no mappings, or every mapping points at a resolved/missing node. Re-`TaskCreate`s land via writeback's `plan_path`-keyed dedup — the existing PLAN.md line is reused and the stale `task_id` mapping is replaced in place, no duplicate inserted.
+SessionStart hook handler. Reads the state file and emits a rehydration prompt so Claude re-creates the in-session task list after a restart. Output is `{}` when there's no state file, no mappings, or every mapping points at a resolved/missing node. Re-`TaskCreate`s land via writeback's `plan_path`-keyed dedup — the existing PLAN.md line is reused and the stale `task_id` mapping is replaced in place, no duplicate inserted.
+
+**Leaves only.** The prompt lists open *leaf* nodes — childless checkboxes that the agent actually works on. Parent phase nodes (like `- [ ] 27.0 Phase 27 — …`) are NOT emitted as `TaskCreate` asks; instead they appear as `## N.M Title` context headers grouping their leaves, so the agent still sees the phase goal at restart time without polluting the harness task list. Ticking a parent box is a deliberate validation step — "did the children actually meet this phase's goal?" — that the user/agent takes at phase exit, *not* an automatic consequence of all children being done. Archive (`phase_fully_done`) operates on subtree state and doesn't require the parent box ticked, so leaving validation manual costs nothing structurally.
+
+**Source-aware framing.** The hook adapts its wording to Claude Code's `SessionStart.source`:
+- `startup` / `clear` — harness task list is provably empty; the prompt is assertive ("TaskCreate is deferred on a fresh harness — fetch it first with `ToolSearch query=\"select:TaskCreate\"`"). All stale state mappings are also wiped (the harness IDs they reference no longer exist), with one row per drop appended to `.claude/plan-bridge-cleared.jsonl` for traceability.
+- `resume` / `compact` — prior tool history is preserved; TaskCreate is almost always already loaded, so the ToolSearch hint stays a light conditional fallback. State mappings are NOT wiped — they still point at live harness IDs.
+
+The first line of the prompt itself shows the call shape `TaskCreate(subject=<title>, description=<plan_path>, metadata={"plan_path": <plan_path>})` so the agent doesn't accidentally embed the `plan_path` in `subject` or duplicate the title into `description`. The bridge ignores `description`; using the plan_path keeps the harness UI from showing the same text twice.
 
 ### `reconcile`
 
