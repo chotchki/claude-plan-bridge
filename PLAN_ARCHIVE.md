@@ -382,3 +382,16 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
     - [x] 32.6 Release v0.1.20 — bump Cargo.toml, `cargo install --path .`, run `upgrade-hooks` on this project, sweep Phase 32 to PLAN_ARCHIVE.md
     - [x] 32.7 Auto-detect outdated hook entries (relative `--cwd`) and prepend a one-time `additionalContext` warning telling the user to run `upgrade-hooks` — same pattern as the existing missing-SessionStart-hook nag
 
+---
+
+## 2026-05-19
+
+- [x] 33.0 Source-aware resume prompt
+  - [x] 33.1 Branch resume prompt body by `source`: startup/clear keeps imperative TaskCreate flow; resume/compact pivots to imperative "TaskList first, only TaskCreate missing" framing
+  - [x] 33.2 Inline expected `task_id=<id>` next to each plan_path bullet on resume/compact so the agent can dedup against TaskList by ID rather than subject text (and absent on startup/clear, where the IDs are stale)
+  - [x] 33.3 Update `resume_and_compact_sources_preserve_pending_mappings` (+ siblings) to assert new branched wording — must not contain the old "task list is empty" claim on resume/compact
+  - [x] 33.4 Add tests: inline `task_id=<id>` appears on resume/compact bullets; absent on startup/clear (stale ids would mislead a fresh harness post-wipe)
+  - [x] 33.5 Rewrite the closing footer note (`src/resume.rs:170-182`) so the resume/compact branch addresses harness-collision risk, not PLAN.md-insertion (which is the startup/clear concern)
+  - [x] 33.5a Fix pre-existing clippy + fmt drift blocking v0.1.21 release (Rust toolchain bump on main left 6 clippy errors + fmt drift in init.rs/main.rs that I didn't introduce but that 33.6 can't release through)
+  - [x] 33.6 Release v0.1.21: bump Cargo.toml, fmt/clippy/test all green, sweep Phase 33 to PLAN_ARCHIVE.md
+

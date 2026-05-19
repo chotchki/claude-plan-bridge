@@ -216,10 +216,10 @@ pub fn outdated_hook_cwd_warning(cwd: &Path) -> Option<String> {
     let settings_path = cwd.join(".claude/settings.json");
     let text = std::fs::read_to_string(&settings_path).ok()?;
     let settings: Value = serde_json::from_str(&text).ok()?;
-    if !settings
+    if settings
         .pointer("/hooks")
         .and_then(Value::as_object)
-        .is_some_and(|h| !h.is_empty())
+        .is_none_or(|h| h.is_empty())
     {
         return None;
     }
@@ -540,12 +540,20 @@ mod tests {
         let mut checked = 0;
         if let Some(hooks) = settings.pointer("/hooks").and_then(Value::as_object) {
             for entries in hooks.values() {
-                let Some(arr) = entries.as_array() else { continue };
+                let Some(arr) = entries.as_array() else {
+                    continue;
+                };
                 for entry in arr {
-                    let Some(hs) = entry.get("hooks").and_then(Value::as_array) else { continue };
+                    let Some(hs) = entry.get("hooks").and_then(Value::as_array) else {
+                        continue;
+                    };
                     for h in hs {
-                        let Some(cmd) = h.get("command").and_then(Value::as_str) else { continue };
-                        if !cmd.contains("claude-plan-bridge") { continue }
+                        let Some(cmd) = h.get("command").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        if !cmd.contains("claude-plan-bridge") {
+                            continue;
+                        }
                         let toks: Vec<&str> = cmd.split_whitespace().collect();
                         // toks[0] is the binary, toks[1] must be a subcommand
                         // (resume/reconcile/writeback), NOT `--cwd`.
@@ -559,7 +567,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked >= 4, "expected at least 4 plan-bridge hook entries checked, got {checked}");
+        assert!(
+            checked >= 4,
+            "expected at least 4 plan-bridge hook entries checked, got {checked}"
+        );
     }
 
     #[test]

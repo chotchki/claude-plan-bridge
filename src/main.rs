@@ -280,9 +280,8 @@ fn main() -> Result<()> {
         }
         Command::Resume { project } => {
             let plan = project.plan_path();
-            let output = plan_bridge::hook::guard_missing_plan(&plan, "SessionStart", || {
-                run_resume(&plan)
-            });
+            let output =
+                plan_bridge::hook::guard_missing_plan(&plan, "SessionStart", || run_resume(&plan));
             println!("{}", output.to_json());
         }
         Command::UpgradeHooks { cwd } => {
@@ -575,9 +574,7 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                         let event = label.split('(').next().unwrap_or(label);
                         let present = parsed
                             .as_ref()
-                            .map(|s| {
-                                plan_bridge::init::hook_command_present(s, event, subcmd)
-                            })
+                            .map(|s| plan_bridge::init::hook_command_present(s, event, subcmd))
                             .unwrap_or(false);
                         let mark = if present { "✓" } else { "✗" };
                         if !present {
@@ -585,15 +582,15 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                         }
                         println!("  {mark} {label} → claude-plan-bridge ... {subcmd}");
                     }
-                    if let Some(s) = parsed.as_ref() {
-                        if !plan_bridge::init::hooks_have_absolute_cwd(s) {
-                            println!(
-                                "  ⚠ hook entries are using a relative --cwd (or none) — \
-                                 run `claude-plan-bridge upgrade-hooks` to bake the absolute \
-                                 project root so a mid-session `cd` can't break PLAN.md lookup."
-                            );
-                            all_good = false;
-                        }
+                    if let Some(s) = parsed.as_ref()
+                        && !plan_bridge::init::hooks_have_absolute_cwd(s)
+                    {
+                        println!(
+                            "  ⚠ hook entries are using a relative --cwd (or none) — \
+                             run `claude-plan-bridge upgrade-hooks` to bake the absolute \
+                             project root so a mid-session `cd` can't break PLAN.md lookup."
+                        );
+                        all_good = false;
                     }
                 } else {
                     all_good = false;

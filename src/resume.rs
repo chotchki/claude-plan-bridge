@@ -14,20 +14,27 @@ fn harness_is_fresh(source: &str) -> bool {
     matches!(source, "startup" | "clear")
 }
 
-/// Build the SessionStart additionalContext that drives Claude to rehydrate
-/// the in-session task list from the persisted state file. Returns `None`
-/// when there's nothing to rehydrate (no state file, no mappings, or every
+/// Build the SessionStart additionalContext that drives Claude to reconcile
+/// the in-session task list against the persisted state file. Returns `None`
+/// when there's nothing to reconcile (no state file, no mappings, or every
 /// mapping points at a resolved/missing node).
 ///
-/// When `source` is `startup` or `clear` (harness task list provably empty),
-/// also drops every pending-state mapping from the state file before
-/// returning the prompt. The prompt then notes the drop so the reader
-/// doesn't mistake the lack-of-conflict-warnings for a writeback bug.
+/// Phase 33.1: prompt body is branched by `source`. The two branches answer
+/// different questions:
+///   - `startup` / `clear`: the harness task list is provably empty and the
+///     bridge drops every pending-state mapping before returning the prompt.
+///     The prompt asks the agent to `TaskCreate` each leaf below. Bullets
+///     emit `<plan_path> <title>` only — the prior-session task_ids are
+///     stale and would mislead a fresh harness.
+///   - `resume` / `compact`: the harness preserved its task list and the
+///     state file is NOT wiped. The prompt asks the agent to `TaskList`
+///     first and only `TaskCreate` plan_paths whose mapped `task_id` is
+///     missing from TaskList. Bullets emit `<plan_path> <title>
+///     (task_id=<id>)` so dedup is precise (Phase 33.2).
 ///
-/// Contract: emit one bullet per open mapping with its `plan_path` and the
-/// live PLAN.md title. Claude is expected to `TaskCreate` each with the
-/// same `metadata.plan_path`; with stale mappings pre-cleared, writeback
-/// links the fresh harness IDs without collision.
+/// In both branches, parent-phase nodes are filtered (see Phase 27.1) and
+/// rendered as `## <plan_path> <title>` context headers above their leaves
+/// rather than as TaskCreate asks.
 pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<String>> {
     let state_path = default_state_path_for(plan_path);
     if !state_path.exists() {
@@ -54,10 +61,15 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         // Archive already operates on subtree state, so leaving parent boxes
         // unticked doesn't block phase sweeping. A newly-stubbed phase with no
         // children is itself a leaf by `is_leaf()` and still emits.
-        let mut open: Vec<(String, String)> = state
+        //
+        // Phase 33.2: carry the harness task_id alongside plan_path + title so
+        // the resume/compact branch of the prompt can ask the agent to dedup
+        // against TaskList by harness id (precise) instead of by subject text
+        // (fuzzy when titles drift mid-session).
+        let mut open: Vec<(String, String, String)> = state
             .mappings
-            .values()
-            .filter_map(|m| {
+            .iter()
+            .filter_map(|(task_id, m)| {
                 let node = plan.find(&m.plan_path)?;
                 if node.state != NodeState::Pending {
                     return None;
@@ -65,7 +77,7 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 if !node.is_leaf() {
                     return None;
                 }
-                Some((m.plan_path.clone(), node.title.clone()))
+                Some((m.plan_path.clone(), node.title.clone(), task_id.clone()))
             })
             .collect();
         if open.is_empty() {
@@ -110,7 +122,7 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             for id in &stale {
                 state.remove(id);
             }
-            state.pending_rehydration = open.iter().map(|(p, _)| p.clone()).collect();
+            state.pending_rehydration = open.iter().map(|(p, _, _)| p.clone()).collect();
             state.rehydration_announced = state.pending_rehydration.len() as u32;
             if !stale.is_empty() || !state.pending_rehydration.is_empty() {
                 state.save(&state_path_for_closure)?;
@@ -134,28 +146,72 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
              `ToolSearch query=\"select:TaskCreate\"`."
         };
 
+        // Phase 33.1: branch the prompt body by `source`. The two branches
+        // are answering different questions:
+        //   * startup/clear: the harness task list is provably empty and the
+        //     bridge just wiped state; the agent must TaskCreate every leaf
+        //     fresh. The prior-session task_ids are stale, so they're NOT
+        //     emitted (they would mislead the agent).
+        //   * resume/compact: the harness preserved its task list and the
+        //     bridge intentionally did NOT wipe state; the agent must
+        //     TaskList first and only TaskCreate plan_paths whose mapped
+        //     task_id is missing from TaskList. Bullets include
+        //     `task_id=<id>` so dedup is by harness id, not by fuzzy
+        //     subject text.
         let mut out = String::new();
-        out.push_str(
-            "claude-plan-bridge: session restart — the harness task list is empty, but \
-             PLAN.md has open tasks tracked in the state file. Before responding to the \
-             user, call TaskCreate for each leaf below.\n\n\
-             Each indented bullet has the shape `<plan_path> <title>` (matching PLAN.md). \
-             For each, call `TaskCreate(subject=<title>, description=<plan_path>, \
-             metadata={\"plan_path\": <plan_path>})` — the leading `N.M` token goes into \
-             `metadata.plan_path` AND `description` (the bridge ignores `description`; \
-             using the plan_path keeps the harness UI clean instead of duplicating the \
-             title). `## <plan_path> <title>` lines are \
-             parent-phase headers shown for goal context; do NOT TaskCreate them — parent \
-             ticking is a deliberate validation step you take after confirming the leaves \
-             met the phase goal. ",
-        );
-        out.push_str(tool_search_hint);
-        out.push_str(
-            " All TaskCreate calls are independent — batch them in a single tool-call \
-             block.\n",
-        );
+        if harness_is_fresh(source) {
+            out.push_str(
+                "claude-plan-bridge: session restart — the harness task list is empty, but \
+                 PLAN.md has open tasks tracked in the state file. Before responding to the \
+                 user, call TaskCreate for each leaf below.\n\n\
+                 Each indented bullet has the shape `<plan_path> <title>` (matching PLAN.md). \
+                 For each, call `TaskCreate(subject=<title>, description=<plan_path>, \
+                 metadata={\"plan_path\": <plan_path>})` — the leading `N.M` token goes into \
+                 `metadata.plan_path` AND `description` (the bridge ignores `description`; \
+                 using the plan_path keeps the harness UI clean instead of duplicating the \
+                 title). `## <plan_path> <title>` lines are \
+                 parent-phase headers shown for goal context; do NOT TaskCreate them — parent \
+                 ticking is a deliberate validation step you take after confirming the leaves \
+                 met the phase goal. ",
+            );
+            out.push_str(tool_search_hint);
+            out.push_str(
+                " All TaskCreate calls are independent — batch them in a single tool-call \
+                 block.\n",
+            );
+        } else {
+            // Phase 33.1: resume/compact path. The harness preserved its
+            // task list, so the prompt must NOT claim "task list is empty"
+            // (it isn't) and must NOT imperative-batch TaskCreates (that
+            // would dupe live tasks). TaskList is the imperative first step
+            // — only backfill leaves whose task_id is missing from it.
+            out.push_str(&format!(
+                "claude-plan-bridge: session {source} — your harness task list was preserved \
+                 across this session-restart event along with the state-file mappings. \
+                 PLAN.md has open tasks the bridge wants you to confirm are still loaded. \
+                 Before responding to the user, call `TaskList` first.\n\n\
+                 Each indented bullet has the shape `<plan_path> <title>  (task_id=<id>)`. \
+                 For each, check whether that `task_id` appears in your TaskList output. \
+                 If YES, the existing mapping is live — do nothing. \
+                 If NO, the harness dropped it; backfill with \
+                 `TaskCreate(subject=<title>, description=<plan_path>, \
+                 metadata={{\"plan_path\": <plan_path>}})` — writeback re-attaches the fresh \
+                 harness id to the existing PLAN.md line (no PLAN.md insertion). \
+                 `## <plan_path> <title>` lines are \
+                 parent-phase headers shown for goal context; do NOT TaskCreate them — parent \
+                 ticking is a deliberate validation step you take after confirming the leaves \
+                 met the phase goal. ",
+            ));
+            out.push_str(tool_search_hint);
+            out.push_str(
+                " Backfill TaskCreates (if any) are independent — batch them in a single \
+                 tool-call block.\n",
+            );
+        }
+
         let mut current_parent: Option<String> = None;
-        for (path, title) in &open {
+        let show_task_id = !harness_is_fresh(source);
+        for (path, title, task_id) in &open {
             let parent_id = crate::ast::parent_id_for(path);
             if parent_id != current_parent {
                 if let Some(ref pid) = parent_id
@@ -165,8 +221,20 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 }
                 current_parent = parent_id;
             }
-            out.push_str(&format!("  - {path} {title}\n"));
+            if show_task_id {
+                out.push_str(&format!("  - {path} {title}  (task_id={task_id})\n"));
+            } else {
+                out.push_str(&format!("  - {path} {title}\n"));
+            }
         }
+
+        // Phase 33.5: footer is source-aware too. The fresh-harness branch
+        // confirms the wipe stats; the preserved-harness branch confirms
+        // mappings survived and explains what backfill (if any) will do.
+        // Note: `dropped == 0 && harness_is_fresh(source)` is impossible —
+        // we returned `Ok(None)` earlier when `state.mappings.is_empty()`,
+        // and a fresh-source path with non-empty mappings always wipes
+        // them all. So the `else` branch is purely the resume/compact case.
         if dropped > 0 {
             out.push_str(&format!(
                 "\nNote: the bridge cleared {dropped} stale mapping(s) from the state \
@@ -175,10 +243,14 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                  move` warnings expected.",
             ));
         } else {
-            out.push_str(
-                "\nWriteback will detect the existing PLAN.md line and update the state \
-                 mapping in place (no PLAN.md insertion).",
-            );
+            out.push_str(&format!(
+                "\nNote: the bridge preserved the state-file mappings across this \
+                 session-restart (source=`{source}` keeps the harness task list intact). \
+                 If TaskList shows every `task_id` above, no action is needed — this \
+                 rehydration is a sanity check. Backfill TaskCreates (for ids missing from \
+                 TaskList) land cleanly because writeback replaces the dead mapping with the \
+                 fresh harness id and reuses the existing PLAN.md line.",
+            ));
         }
         Ok(Some(out))
     })
@@ -1129,5 +1201,201 @@ mod tests {
         assert!(msg.contains("1.0 Open"), "got: {msg}");
         assert!(!msg.contains("Closed"), "got: {msg}");
         assert!(!msg.contains("Skipped"), "got: {msg}");
+    }
+
+    #[test]
+    fn resume_compact_branch_uses_tasklist_first_framing() {
+        // Phase 33.1/33.3: on source=resume/compact the harness preserves
+        // its task list, so the prompt must NOT claim "the harness task
+        // list is empty" and must direct the agent to TaskList first
+        // before any backfill TaskCreates. Locks in the new branched
+        // wording so future edits don't silently revert to the pre-Phase
+        // -33 one-size-fits-all prompt that triggered duplicate-task
+        // creation in the wild.
+        for source in ["resume", "compact"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                !msg.contains("the harness task list is empty"),
+                "source={source} must NOT claim the harness is empty (it isn't): {msg}"
+            );
+            assert!(
+                msg.contains("`TaskList` first"),
+                "source={source} should direct the agent to TaskList first: {msg}"
+            );
+            // "Before responding" remains imperative — different first
+            // action, same urgency.
+            assert!(
+                msg.contains("Before responding"),
+                "source={source} should keep imperative framing: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_clear_branch_keeps_empty_harness_framing() {
+        // Phase 33.1: the startup/clear branch retains the "task list is
+        // empty" assertion — on those sources the harness contract
+        // guarantees it. Locks the wording so the branch doesn't
+        // accidentally lose this when the resume/compact branch evolves.
+        for source in ["startup", "clear"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                msg.contains("the harness task list is empty"),
+                "source={source} should keep the empty-harness framing: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_compact_bullets_carry_task_id() {
+        // Phase 33.2: on resume/compact the bullets must include the
+        // harness task_id so the agent can dedup against TaskList by id
+        // (precise) rather than by subject text (fuzzy when titles drift
+        // mid-session).
+        for source in ["resume", "compact"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                msg.contains("(task_id=42)"),
+                "source={source} bullet should include task_id=42: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_compact_multi_leaf_bullets_each_carry_correct_task_id() {
+        // Phase 33.2: with multiple mappings, each bullet pairs to its own
+        // task_id (no cross-talk from the BTreeMap iteration).
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Alpha\n  - [ ] 1.2 Beta\n  - [ ] 1.3 Gamma\n",
+        );
+        let mut state = State::default();
+        for (id, path, title) in [
+            ("100", "1.1", "Alpha"),
+            ("200", "1.2", "Beta"),
+            ("300", "1.3", "Gamma"),
+        ] {
+            state.record(
+                id,
+                Mapping {
+                    plan_path: path.to_string(),
+                    last_synced_title: title.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "resume").unwrap().unwrap();
+        assert!(msg.contains("1.1 Alpha  (task_id=100)"), "got: {msg}");
+        assert!(msg.contains("1.2 Beta  (task_id=200)"), "got: {msg}");
+        assert!(msg.contains("1.3 Gamma  (task_id=300)"), "got: {msg}");
+    }
+
+    #[test]
+    fn startup_clear_bullets_omit_task_id() {
+        // Phase 33.2: on startup/clear the prior-session task_ids are
+        // stale (the bridge just wiped them), so they must NOT be emitted
+        // — they would mislead the agent into TaskGet'ing dead ids before
+        // TaskCreate.
+        for source in ["startup", "clear"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                !msg.contains("task_id="),
+                "source={source} must omit stale task_ids from bullets: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_compact_footer_notes_preserved_mappings() {
+        // Phase 33.5: the resume/compact footer should explain that state
+        // was preserved (no "cleared" claim) and reference the source
+        // explicitly so the agent knows why mappings survived. Pre-Phase
+        // -33 the footer falsely advertised "Writeback will detect the
+        // existing PLAN.md line" — the actual failure mode on
+        // resume/compact is duplicate harness tasks, not duplicate
+        // PLAN.md lines. Lock in the new framing.
+        for source in ["resume", "compact"] {
+            let dir = scratch_dir();
+            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let mut state = State::default();
+            state.record(
+                "42",
+                Mapping {
+                    plan_path: "1.0".to_string(),
+                    last_synced_title: "Open".to_string(),
+                    ..Default::default()
+                },
+            );
+            write_state(&plan, &state);
+
+            let msg = build_resume_message(&plan, source).unwrap().unwrap();
+            assert!(
+                msg.contains("preserved the state-file mappings"),
+                "source={source} footer should note preserved mappings: {msg}"
+            );
+            assert!(
+                !msg.contains("cleared"),
+                "source={source} must not claim anything was cleared: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("source=`{source}`")),
+                "source={source} footer should reference the source label: {msg}"
+            );
+        }
     }
 }

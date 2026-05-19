@@ -137,6 +137,7 @@ impl HookOutput {
 ///   - File absent → silent no-op (the bridge stays out of projects without a plan).
 ///   - Handler returns `Err` → non-blocking `additionalContext` carrying the
 ///     error text (visible but doesn't wall the user off).
+///
 /// Never emits `decision: "block"`. Originated from a session implode where
 /// Claude `cd`'d mid-session, the hook subprocess inherited a wrong cwd, and
 /// `./PLAN.md` not found became a hard block on every subsequent prompt
