@@ -395,3 +395,12 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
   - [x] 33.5a Fix pre-existing clippy + fmt drift blocking v0.1.21 release (Rust toolchain bump on main left 6 clippy errors + fmt drift in init.rs/main.rs that I didn't introduce but that 33.6 can't release through)
   - [x] 33.6 Release v0.1.21: bump Cargo.toml, fmt/clippy/test all green, sweep Phase 33 to PLAN_ARCHIVE.md
 
+---
+
+## 2026-05-19
+
+- [x] 34.0 Windows CI repair
+  - [x] 34.1 Fix `fresh_init_bakes_absolute_cwd_into_every_hook_command`: replace the `raw.contains("--cwd '<abs>'")` byte-substring assertion (which fails on Windows because JSON serialization doubles every backslash in `\\?\C:\...` paths) with a parsed-JSON walk that compares the unescaped command field against the absolute path
+  - [x] 34.2 Fix `hooks_have_absolute_cwd_accepts_absolute`: hardcoded `/abs/path` isn't absolute on Windows (Path::is_absolute requires a drive letter); pick a cfg!(windows)-switched absolute path so the test covers both platforms
+  - [x] 34.3 Release v0.1.22: bump Cargo.toml, fmt/clippy/test green locally, sweep Phase 34, tag + push (CI should turn green after this — Phase 32 + Phase 33 both shipped with these Windows failures)
+

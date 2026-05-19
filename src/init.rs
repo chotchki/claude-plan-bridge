@@ -506,6 +506,13 @@ mod tests {
         // Phase 32.2: every installed hook command must carry `--cwd <abs>`
         // so subprocess cwd drift (Claude `cd`s mid-session) doesn't break
         // PLAN.md resolution.
+        //
+        // Phase 34.1: walk the parsed settings instead of doing a raw-byte
+        // substring against the JSON file. On Windows the canonical path
+        // is `\\?\C:\...` and JSON serialization escapes every backslash,
+        // so the on-disk bytes (`\\\\?\\C:\\...`) never match the
+        // unescaped `abs_str`. The parsed `command` field is already
+        // unescaped, so comparing against that works on both platforms.
         let dir = scratch_dir();
         init(&dir, false).unwrap();
         let abs = std::fs::canonicalize(&dir).unwrap();
@@ -518,10 +525,34 @@ mod tests {
             hooks_have_absolute_cwd(&settings),
             "expected every plan-bridge hook command to carry --cwd <abs>: {settings:#?}"
         );
-        let raw = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let expected = format!("--cwd '{abs_str}'");
+        let hooks = settings
+            .pointer("/hooks")
+            .and_then(Value::as_object)
+            .expect("settings has /hooks");
+        let mut checked = 0;
+        for entries in hooks.values() {
+            for entry in entries.as_array().expect("hook event value is an array") {
+                for h in entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .expect("entry has a hooks array")
+                {
+                    let cmd = h
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .expect("hook entry has a command string");
+                    assert!(
+                        cmd.contains(&expected),
+                        "command missing `{expected}`: {cmd}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
         assert!(
-            raw.contains(&format!("--cwd '{abs_str}'")),
-            "expected --cwd '{abs_str}' substring in {raw}"
+            checked >= 4,
+            "expected at least 4 plan-bridge hook commands, got {checked}"
         );
     }
 
@@ -668,12 +699,24 @@ mod tests {
 
     #[test]
     fn hooks_have_absolute_cwd_accepts_absolute() {
+        // Phase 34.2: pick a platform-appropriate absolute path. Windows
+        // requires a drive letter — `Path::new("/abs/path").is_absolute()`
+        // returns false there — so the synthetic command must use the
+        // local platform's absolute-path syntax. The function under test
+        // delegates to `Path::is_absolute`, which is the correct behavior;
+        // the test just needs an honestly-absolute example per platform.
+        let abs = if cfg!(windows) {
+            r"C:\abs\path"
+        } else {
+            "/abs/path"
+        };
+        let cmd = format!("claude-plan-bridge --cwd '{abs}' reconcile");
         let settings = json!({
             "hooks": {
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
-                        "command": "claude-plan-bridge --cwd '/abs/path' reconcile"
+                        "command": cmd
                     }]
                 }]
             }
