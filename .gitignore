@@ -1,6 +1,7 @@
 /target
 /.claude/plan-bridge-state.json
 /.claude/plan-bridge-state.json.lock
+/.claude/plan-bridge-cleared.jsonl
 /.claude/settings.local.json
 /lcov.info
 /coverage-html

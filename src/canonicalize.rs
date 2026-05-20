@@ -29,9 +29,19 @@ pub fn canonicalize(plan_path: &Path, dry_run: bool) -> Result<CanonicalizeRepor
         .with_context(|| format!("read {}", plan_path.display()))?;
     let parsed = parse(&text)?;
     let original_serialized = serialize(&parsed);
-    let (plan, notes) = parsed
+    let (mut plan, mut notes) = parsed
         .standardize_to_canonical()
         .map_err(anyhow::Error::msg)?;
+    // Phase 35.6a: sweep any scattered/duplicate `## Backlog (not yet phased)`
+    // (in the preamble or dangling as annotations) into the single canonical
+    // bottom section. This is the one place that relocates an existing Backlog
+    // — routine writes leave it where it sits.
+    let swept = plan.consolidate_backlog();
+    if swept > 0 {
+        notes.push(format!(
+            "consolidated {swept} backlog item(s) into the bottom `## Backlog (not yet phased)` section"
+        ));
+    }
     let new_serialized = serialize(&plan);
     let changed = new_serialized != original_serialized;
     if changed && !dry_run {
@@ -51,13 +61,16 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "plan-bridge-canonicalize-{}-{}",
+            "plan-bridge-canonicalize-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0),
+            N.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -93,6 +106,30 @@ mod tests {
         assert!(report.dry_run);
         let after = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(after, original, "dry run must not write");
+    }
+
+    #[test]
+    fn canonicalize_moves_preamble_backlog_to_bottom() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "# Title\n\n## Backlog (not yet phased)\n\n- **Old** — added 2026-05-01.\n\n- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n",
+        );
+        let report = canonicalize(&plan, false).unwrap();
+        assert!(report.changed);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("consolidated 1 backlog"))
+        );
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(after.matches("## Backlog (not yet phased)").count(), 1);
+        assert!(
+            after.find("## Backlog").unwrap() > after.find("- [ ] 1.0 Phase").unwrap(),
+            "backlog should sit below the phases:\n{after}"
+        );
+        assert!(after.contains("- **Old** — added 2026-05-01."));
     }
 
     #[test]

@@ -43,7 +43,10 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
         if let Some(node) = plan.find_mut(id) {
             node.state = NodeState::Backlog;
         }
-        plan.append_backlog_entry(id, &title, date);
+        // Phase 35.2a: deferrals go to the canonical bottom Backlog section.
+        // Consolidate first so any legacy preamble Backlog merges down.
+        plan.consolidate_backlog();
+        plan.append_backlog_deferral(id, &title, date);
 
         std::fs::write(plan_path, serialize(&plan))
             .with_context(|| format!("write {}", plan_path.display()))?;

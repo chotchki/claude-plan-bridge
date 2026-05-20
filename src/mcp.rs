@@ -388,7 +388,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "plan_add",
-                "description": "Add a new leaf at `plan_path` with the given subject. Parent must already exist. Use canonical numbering (e.g. `1.2.3`, `Inbox.4`).",
+                "description": "Add a new leaf at `plan_path` with the given subject. Parent must already exist. Use canonical numbering (e.g. `1.2.3`, `AH.4`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

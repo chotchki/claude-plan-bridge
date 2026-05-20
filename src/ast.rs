@@ -7,6 +7,16 @@ pub struct Plan {
     pub preamble: Vec<String>,
     /// Top-level nodes (phases). A node is a "leaf" when its `children` vec is empty.
     pub phases: Vec<Node>,
+    /// The canonical `## Backlog (not yet phased)` section, owned as a
+    /// first-class trailing region so it always serializes at the very bottom
+    /// (below every phase) and survives phase-appends without drifting. Holds
+    /// the verbatim body lines (bullets) under the heading — the heading itself
+    /// is re-emitted by the serializer. Empty when the plan has no backlog, or
+    /// when the backlog is still living in the preamble / as annotations
+    /// (un-consolidated). The parser auto-lifts a *trailing* backlog block here;
+    /// `consolidate_backlog` sweeps the rest. See [Plan::append_backlog_note].
+    #[serde(default)]
+    pub backlog: Vec<String>,
 }
 
 /// A single checkbox node in the plan. Phases, tasks, and subtasks all share this shape;
@@ -150,6 +160,16 @@ pub fn looks_like_markdown_header(text: &str) -> bool {
     let trimmed = text.trim_start();
     let hashes = trimmed.chars().take_while(|c| *c == '#').count();
     (1..=6).contains(&hashes) && matches!(trimmed.chars().nth(hashes), Some(' '))
+}
+
+/// True for the canonical bridge-owned Backlog heading (`## Backlog ...` at h2).
+/// Deliberately conservative: matches `## Backlog (not yet phased)` but NOT the
+/// h3 `### Backlog (rehomed from AA)` subsection (different `#` count) nor a
+/// `## Sustainment`-style sibling — those are operator-curated and must not be
+/// swept into the bridge's bottom section. The `## ` prefix (two hashes + a
+/// space) is what excludes `### Backlog`.
+pub fn is_backlog_heading(line: &str) -> bool {
+    line.trim_start().starts_with("## Backlog")
 }
 
 /// Parse `### Phase N — Title` style headers OR the more general
@@ -410,6 +430,7 @@ impl Plan {
             Plan {
                 preamble: self.preamble,
                 phases: new_phases,
+                backlog: self.backlog,
             },
             conversions,
         ))
@@ -430,83 +451,159 @@ impl Plan {
         None
     }
 
-    /// Append a deferred-work entry under `## Backlog (not yet phased)` in
-    /// the preamble. Creates the section at the end of the preamble if it
-    /// doesn't already exist. Idempotent: a bullet referencing the same
-    /// `plan_path` won't be added twice.
+    /// Append a no-path note to the canonical Backlog field (the bottom
+    /// section). Used when a `TaskCreate` arrives with no `plan_path` — the
+    /// work is real but unphased, so it lands in Backlog until a planning move
+    /// promotes it. Idempotent on the exact bullet text.
     ///
-    /// Format: `- **<title>** — deferred from <plan_path> on <date>.`
-    pub fn append_backlog_entry(&mut self, plan_path: &str, title: &str, date: &str) {
-        let entry = format!("- **{title}** — deferred from {plan_path} on {date}.");
-        let needle = format!("deferred from {plan_path} on");
-        if self.preamble.iter().any(|line| line.contains(&needle)) {
-            return;
-        }
-        let header_idx = self
-            .preamble
-            .iter()
-            .position(|line| line.trim_start().starts_with("## Backlog"));
-        match header_idx {
-            Some(idx) => {
-                // Find the last bullet under this section (consecutive `- `
-                // lines, possibly interleaved with blank lines, until we hit
-                // another `##`/`#` header or `---` separator).
-                let mut last_bullet = idx;
-                let mut i = idx + 1;
-                while i < self.preamble.len() {
-                    let trimmed = self.preamble[i].trim_start();
-                    if trimmed.starts_with("##") || trimmed.starts_with("---") {
-                        break;
-                    }
-                    if trimmed.starts_with("- ") {
-                        last_bullet = i;
-                    }
-                    i += 1;
-                }
-                self.preamble.insert(last_bullet + 1, entry);
-            }
-            None => {
-                // No section yet — append one at the end of the preamble.
-                if !self.preamble.is_empty()
-                    && !self.preamble.last().map(|s| s.is_empty()).unwrap_or(true)
-                {
-                    self.preamble.push(String::new());
-                }
-                self.preamble
-                    .push("## Backlog (not yet phased)".to_string());
-                self.preamble.push(String::new());
-                self.preamble.push(entry);
-                self.preamble.push(String::new());
-            }
+    /// Format: `- **<title>** — added <date>.`
+    pub fn append_backlog_note(&mut self, title: &str, date: &str) {
+        let entry = format!("- **{title}** — added {date}.");
+        if !self.backlog.contains(&entry) {
+            self.backlog.push(entry);
         }
     }
 
-    /// Find the existing Inbox phase (id `Inbox.0`) or create one at the end of
-    /// the plan. Returns the assigned id for a freshly appended child.
-    pub fn append_to_inbox(&mut self, subject: &str) -> String {
-        if self.find("Inbox.0").is_none() {
-            self.phases.push(Node {
-                id: "Inbox.0".to_string(),
-                title: "Inbox".to_string(),
-                state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
-                children: vec![],
-                annotations: vec![],
-            });
+    /// Append a deferral to the canonical Backlog field. Used by the defer
+    /// paths (`plan_backlog`, `plan_skip`, `TaskUpdate(deleted)` on a pending
+    /// leaf) once their content has been consolidated to the bottom section.
+    /// Idempotent on the source `plan_path`.
+    ///
+    /// Format: `- **<title>** — deferred from <plan_path> on <date>.`
+    pub fn append_backlog_deferral(&mut self, plan_path: &str, title: &str, date: &str) {
+        let needle = format!("deferred from {plan_path} on");
+        if self.backlog.iter().any(|line| line.contains(&needle)) {
+            return;
         }
-        let inbox = self.find_mut("Inbox.0").expect("just inserted");
-        let next = next_inbox_child_id(inbox);
-        inbox.children.push(Node {
-            id: next.clone(),
-            title: subject.to_string(),
-            state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
-            children: vec![],
-            annotations: vec![],
-        });
-        next
+        self.backlog.push(format!(
+            "- **{title}** — deferred from {plan_path} on {date}."
+        ));
+    }
+
+    /// Remove the first Backlog bullet whose bolded title matches `title`.
+    /// Returns true when a line was removed. Used to clear a no-path note when
+    /// its harness task is completed or deleted, so resolved backlog items
+    /// don't linger as tracked-but-invisible entries.
+    pub fn remove_backlog_note(&mut self, title: &str) -> bool {
+        let marker = format!("**{title}**");
+        if let Some(idx) = self.backlog.iter().position(|line| line.contains(&marker)) {
+            self.backlog.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rename a Backlog bullet's bolded title in place (`**old**` → `**new**`),
+    /// preserving the rest of the line. Returns true when a line matched. Keeps
+    /// the bullet's stored title aligned with a `TaskUpdate(subject=...)` so
+    /// later `remove_backlog_note` can still find it.
+    pub fn rename_backlog_note(&mut self, old: &str, new: &str) -> bool {
+        let marker = format!("**{old}**");
+        if let Some(line) = self.backlog.iter_mut().find(|l| l.contains(&marker)) {
+            *line = line.replace(&marker, &format!("**{new}**"));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sweep every `## Backlog (not yet phased)` block out of the preamble AND
+    /// out of node annotations, merging their bullet bodies into `self.backlog`
+    /// (the canonical bottom section) with exact-line dedup. Returns the number
+    /// of bullet lines newly swept in (0 = nothing to consolidate).
+    ///
+    /// Conservative: only the bridge-owned h2 heading matches
+    /// ([is_backlog_heading]) — operator-curated sections like
+    /// `### Backlog (rehomed from AA)` and `## Sustainment & minor features`
+    /// are left exactly where they are.
+    ///
+    /// This is the explicit normalizer behind `canonicalize` and the
+    /// backlog-mutating writeback paths. It is deliberately NOT called on a
+    /// plain tick/rename, so an unrelated write never relocates a plan's
+    /// Backlog (the trailing-block auto-lift in the parser is what keeps an
+    /// already-canonical Backlog pinned to the bottom across ordinary writes).
+    pub fn consolidate_backlog(&mut self) -> usize {
+        let mut collected: Vec<String> = Vec::new();
+        extract_backlog_from_preamble(&mut self.preamble, &mut collected);
+        for phase in &mut self.phases {
+            extract_backlog_from_annotations(phase, &mut collected);
+        }
+        let mut swept = 0;
+        for line in collected {
+            if !self.backlog.contains(&line) {
+                self.backlog.push(line);
+                swept += 1;
+            }
+        }
+        swept
+    }
+}
+
+/// Pull every `## Backlog (not yet phased)` block out of `lines` (a preamble),
+/// pushing each bullet line into `out`. A block runs from the heading to the
+/// next markdown heading / `---` / EOF. Handles multiple sibling sections.
+fn extract_backlog_from_preamble(lines: &mut Vec<String>, out: &mut Vec<String>) {
+    loop {
+        let Some(start) = lines.iter().position(|l| is_backlog_heading(l)) else {
+            return;
+        };
+        let mut end = start + 1;
+        while end < lines.len() {
+            if looks_like_markdown_header(&lines[end]) || lines[end].trim() == "---" {
+                break;
+            }
+            end += 1;
+        }
+        for line in &lines[start + 1..end] {
+            if line.trim_start().starts_with('-') {
+                out.push(line.clone());
+            }
+        }
+        lines.drain(start..end);
+        // Collapse a now-doubled blank where the removed block sat, so repeated
+        // consolidation doesn't grow vertical whitespace.
+        if start > 0
+            && start < lines.len()
+            && lines[start - 1].trim().is_empty()
+            && lines[start].trim().is_empty()
+        {
+            lines.remove(start);
+        }
+    }
+}
+
+/// Pull a `## Backlog (not yet phased)` block out of a node's annotations
+/// (and, recursively, its children's). The block is a backlog-heading `Text`
+/// annotation followed by the contiguous run of `Bullet` annotations; each
+/// bullet is reconstructed as `- <text>` and pushed into `out`. Handles a
+/// mid-document Backlog that the parser didn't auto-lift (trailing blocks are
+/// already lifted into `plan.backlog` at parse time).
+fn extract_backlog_from_annotations(node: &mut Node, out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < node.annotations.len() {
+        let is_heading = matches!(
+            &node.annotations[i],
+            Annotation::Text { text, .. } if is_backlog_heading(text)
+        );
+        if is_heading {
+            let mut end = i + 1;
+            while end < node.annotations.len() {
+                if let Annotation::Bullet { text, .. } = &node.annotations[end] {
+                    out.push(format!("- {text}"));
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            node.annotations.drain(i..end);
+            // Re-check at the same index (drain shifted things down).
+        } else {
+            i += 1;
+        }
+    }
+    for child in &mut node.children {
+        extract_backlog_from_annotations(child, out);
     }
 }
 
@@ -520,20 +617,6 @@ fn remove_descendant(node: &mut Node, id: &str) -> Option<Node> {
         }
     }
     None
-}
-
-fn next_inbox_child_id(inbox: &Node) -> String {
-    let used: std::collections::HashSet<u32> = inbox
-        .children
-        .iter()
-        .filter_map(|c| c.id.strip_prefix("Inbox."))
-        .filter_map(|tail| tail.parse::<u32>().ok())
-        .collect();
-    let mut n = 1u32;
-    while used.contains(&n) {
-        n += 1;
-    }
-    format!("Inbox.{n}")
 }
 
 /// Insert `new_node` into `siblings` at the first position whose id sorts
@@ -590,7 +673,7 @@ fn split_numeric_prefix(s: &str) -> (Option<u64>, &str) {
 }
 
 /// Derive the parent id for a canonical plan_path. Returns None for top-level
-/// (e.g. `1.0`, `Inbox.0`). For 2-part non-`.0` ids like `1.1` the parent is
+/// (e.g. `1.0`, `AH.0`). For 2-part non-`.0` ids like `1.1` the parent is
 /// `1.0` (the phase). For 3+ parts, parent is the prefix without the last
 /// segment.
 pub fn parent_id_for(plan_path: &str) -> Option<String> {
@@ -631,6 +714,7 @@ mod tests {
     fn json_roundtrip_preserves_plan() {
         let plan = Plan {
             preamble: vec!["# Header".to_string(), "".to_string()],
+            backlog: vec![],
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -660,10 +744,10 @@ mod tests {
     #[test]
     fn parent_id_for_handles_canonical_shapes() {
         assert_eq!(parent_id_for("1.0"), None);
-        assert_eq!(parent_id_for("Inbox.0"), None);
+        assert_eq!(parent_id_for("AH.0"), None);
         assert_eq!(parent_id_for("1"), None);
         assert_eq!(parent_id_for("1.1"), Some("1.0".to_string()));
-        assert_eq!(parent_id_for("Inbox.3"), Some("Inbox.0".to_string()));
+        assert_eq!(parent_id_for("AH.3"), Some("AH.0".to_string()));
         assert_eq!(parent_id_for("1.1.1"), Some("1.1".to_string()));
         assert_eq!(parent_id_for("X.4.a.1"), Some("X.4.a".to_string()));
     }
@@ -672,6 +756,7 @@ mod tests {
     fn find_walks_the_tree() {
         let plan = Plan {
             preamble: vec![],
+            backlog: vec![],
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -702,13 +787,14 @@ mod tests {
         assert!(plan.find("1.1").is_some());
         assert!(plan.find("1.1.1").is_some());
         assert!(plan.find("1.2").is_none());
-        assert!(plan.find("Inbox.0").is_none());
+        assert!(plan.find("9.9").is_none());
     }
 
     #[test]
     fn add_child_of_appends() {
         let mut plan = Plan {
             preamble: vec![],
+            backlog: vec![],
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -838,26 +924,6 @@ mod tests {
     }
 
     #[test]
-    fn append_to_inbox_creates_phase_when_missing() {
-        let mut plan = Plan::default();
-        let assigned = plan.append_to_inbox("first inbox item");
-        assert_eq!(assigned, "Inbox.1");
-        assert!(plan.find("Inbox.0").is_some());
-        assert!(plan.find("Inbox.1").is_some());
-    }
-
-    #[test]
-    fn append_to_inbox_increments() {
-        let mut plan = Plan::default();
-        let a = plan.append_to_inbox("first");
-        let b = plan.append_to_inbox("second");
-        let c = plan.append_to_inbox("third");
-        assert_eq!(a, "Inbox.1");
-        assert_eq!(b, "Inbox.2");
-        assert_eq!(c, "Inbox.3");
-    }
-
-    #[test]
     fn remove_pulls_a_leaf() {
         let mut plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
         let removed = plan.remove("1.1").unwrap();
@@ -885,40 +951,115 @@ mod tests {
     }
 
     #[test]
-    fn append_to_inbox_skips_used_ids() {
-        let mut plan = Plan {
-            preamble: vec![],
-            phases: vec![Node {
-                id: "Inbox.0".to_string(),
-                title: "Inbox".to_string(),
-                state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
-                children: vec![
-                    Node {
-                        id: "Inbox.1".to_string(),
-                        title: "x".to_string(),
-                        state: NodeState::Pending,
-                        id_style: IdStyle::Plain,
-                        separator: Separator::Space,
-                        children: vec![],
-                        annotations: vec![],
-                    },
-                    Node {
-                        id: "Inbox.3".to_string(),
-                        title: "y".to_string(),
-                        state: NodeState::Pending,
-                        id_style: IdStyle::Plain,
-                        separator: Separator::Space,
-                        children: vec![],
-                        annotations: vec![],
-                    },
-                ],
-                annotations: vec![],
-            }],
-        };
-        let next = plan.append_to_inbox("fills the gap");
-        assert_eq!(next, "Inbox.2");
+    fn append_backlog_note_dedups_exact_line() {
+        let mut plan = Plan::default();
+        plan.append_backlog_note("Try a thing", "2026-05-19");
+        plan.append_backlog_note("Try a thing", "2026-05-19");
+        assert_eq!(plan.backlog, vec!["- **Try a thing** — added 2026-05-19."]);
+    }
+
+    #[test]
+    fn append_backlog_deferral_dedups_by_source_path() {
+        let mut plan = Plan::default();
+        plan.append_backlog_deferral("7.2", "Some task", "2026-05-19");
+        // Same source path, different date — still a no-op.
+        plan.append_backlog_deferral("7.2", "Some task", "2026-05-20");
+        assert_eq!(
+            plan.backlog,
+            vec!["- **Some task** — deferred from 7.2 on 2026-05-19."]
+        );
+    }
+
+    #[test]
+    fn remove_backlog_note_drops_matching_title() {
+        let mut plan = Plan::default();
+        plan.append_backlog_note("Keep me", "2026-05-19");
+        plan.append_backlog_note("Drop me", "2026-05-19");
+        assert!(plan.remove_backlog_note("Drop me"));
+        assert_eq!(plan.backlog, vec!["- **Keep me** — added 2026-05-19."]);
+        assert!(!plan.remove_backlog_note("Not present"));
+    }
+
+    #[test]
+    fn consolidate_sweeps_preamble_backlog_to_field() {
+        let input = "\
+# Title
+
+## Backlog (not yet phased)
+
+- **A** — added 2026-05-19.
+- **B** — deferred from 1.2 on 2026-05-19.
+
+- [ ] 1.0 Phase
+";
+        let mut plan = parse_for_test(input);
+        assert!(plan.backlog.is_empty(), "preamble backlog not auto-lifted");
+        let swept = plan.consolidate_backlog();
+        assert_eq!(swept, 2);
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **A** — added 2026-05-19.",
+                "- **B** — deferred from 1.2 on 2026-05-19."
+            ]
+        );
+        // Heading + bullets gone from the preamble.
+        assert!(!plan.preamble.iter().any(|l| is_backlog_heading(l)));
+        assert!(!plan.preamble.iter().any(|l| l.contains("**A**")));
+    }
+
+    #[test]
+    fn consolidate_merges_duplicate_sections_and_dedups() {
+        let input = "\
+## Backlog (not yet phased)
+
+- **Dup** — added 2026-05-19.
+
+## Backlog (not yet phased)
+
+- **Dup** — added 2026-05-19.
+- **Unique** — added 2026-05-19.
+
+- [ ] 1.0 Phase
+";
+        let mut plan = parse_for_test(input);
+        plan.consolidate_backlog();
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **Dup** — added 2026-05-19.",
+                "- **Unique** — added 2026-05-19."
+            ]
+        );
+    }
+
+    #[test]
+    fn consolidate_leaves_h3_and_sustainment_untouched() {
+        let input = "\
+- [ ] 1.0 Phase
+
+### Backlog (rehomed from AA)
+
+- **Rehomed item** — keep me here.
+
+## Sustainment & minor features
+
+- **Sustainment item** — keep me too.
+";
+        let mut plan = parse_for_test(input);
+        let swept = plan.consolidate_backlog();
+        assert_eq!(swept, 0, "neither operator section is bridge-owned");
+        assert!(plan.backlog.is_empty());
+    }
+
+    #[test]
+    fn is_backlog_heading_excludes_h3_and_siblings() {
+        assert!(is_backlog_heading("## Backlog (not yet phased)"));
+        assert!(is_backlog_heading("## Backlog"));
+        // h3 subsection is operator-curated — must not match.
+        assert!(!is_backlog_heading("### Backlog (rehomed from AA)"));
+        // Unrelated h2 sibling.
+        assert!(!is_backlog_heading("## Sustainment & minor features"));
     }
 
     #[test]
@@ -1126,6 +1267,7 @@ mod tests {
         // `#hashtag` (no space after #) isn't a markdown header → not collected.
         let plan = Plan {
             preamble: vec![],
+            backlog: vec![],
             phases: vec![Node {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1144,43 +1286,31 @@ mod tests {
     }
 
     #[test]
-    fn append_backlog_entry_inserts_under_existing_section() {
+    fn deferral_consolidates_preamble_backlog_to_bottom() {
+        // A legacy preamble Backlog merges down to the bottom field rather than
+        // splitting into two sections when a new deferral lands.
         let mut plan = parse_for_test(
-            "# Title\n\n## Backlog (not yet phased)\n\n- **Existing item** — context.\n\n---\n\n- [ ] 1.0 Phase\n",
+            "# Title\n\n## Backlog (not yet phased)\n\n- **Existing item** — context.\n\n- [ ] 1.0 Phase\n",
         );
-        plan.append_backlog_entry("28.7", "Test entry", "2026-05-17");
+        plan.consolidate_backlog();
+        plan.append_backlog_deferral("28.7", "Test entry", "2026-05-17");
         let serialized = crate::serializer::serialize(&plan);
-        assert!(
-            serialized.contains("- **Test entry** — deferred from 28.7 on 2026-05-17."),
-            "got: {serialized}"
-        );
-        // Existing item still there.
+        assert_eq!(serialized.matches("## Backlog (not yet phased)").count(), 1);
         assert!(serialized.contains("- **Existing item** — context."));
-        // Inserted before the `---` separator.
-        let backlog_pos = serialized.find("- **Test entry**").unwrap();
-        let dashes_pos = serialized.find("\n---\n").unwrap();
-        assert!(backlog_pos < dashes_pos);
+        assert!(serialized.contains("- **Test entry** — deferred from 28.7 on 2026-05-17."));
+        // Backlog renders below the phase.
+        assert!(
+            serialized.find("## Backlog").unwrap() > serialized.find("- [ ] 1.0 Phase").unwrap()
+        );
     }
 
     #[test]
-    fn append_backlog_entry_creates_section_when_missing() {
+    fn deferral_creates_section_when_missing() {
         let mut plan = parse_for_test("# Title\n\n- [ ] 1.0 Phase\n");
-        plan.append_backlog_entry("28.7", "Bootstrap entry", "2026-05-17");
+        plan.append_backlog_deferral("28.7", "Bootstrap entry", "2026-05-17");
         let serialized = crate::serializer::serialize(&plan);
         assert!(serialized.contains("## Backlog (not yet phased)"));
         assert!(serialized.contains("- **Bootstrap entry** — deferred from 28.7 on 2026-05-17."));
-    }
-
-    #[test]
-    fn append_backlog_entry_idempotent_on_same_plan_path() {
-        let mut plan = parse_for_test(
-            "## Backlog (not yet phased)\n\n- **First** — deferred from 28.7 on 2026-05-17.\n\n---\n\n- [ ] 1.0 Phase\n",
-        );
-        plan.append_backlog_entry("28.7", "Second attempt", "2026-05-18");
-        let serialized = crate::serializer::serialize(&plan);
-        // Second call shouldn't add a new entry (same plan_path needle).
-        let count = serialized.matches("deferred from 28.7 on").count();
-        assert_eq!(count, 1, "got: {serialized}");
     }
 
     #[test]

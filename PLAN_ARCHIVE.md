@@ -404,3 +404,21 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
   - [x] 34.2 Fix `hooks_have_absolute_cwd_accepts_absolute`: hardcoded `/abs/path` isn't absolute on Windows (Path::is_absolute requires a drive letter); pick a cfg!(windows)-switched absolute path so the test covers both platforms
   - [x] 34.3 Release v0.1.22: bump Cargo.toml, fmt/clippy/test green locally, sweep Phase 34, tag + push (CI should turn green after this — Phase 32 + Phase 33 both shipped with these Windows failures)
 
+---
+
+## 2026-05-20
+
+- [x] 35.0 Phase 35 — Backlog routing replaces Inbox auto-bucket
+  - [x] 35.1 ast.rs: Plan.backlog field + trailing-section serializer + consolidate/append/remove helpers
+  - [x] 35.1a parser: auto-lift a trailing Backlog block into Plan.backlog
+  - [x] 35.1b ast.rs: consolidate_backlog() full sweep (preamble + annotations, merge+dedup)
+  - [x] 35.2 writeback_create: route no-path create to Backlog (tracked)
+  - [x] 35.2a Route defer paths through consolidate + Plan.backlog
+  - [x] 35.3 reconcile: exclude backlog: mappings from LeafRemoved
+  - [x] 35.4 writeback_update: resolve backlog: items by removing their bullet
+  - [x] 35.5 Remove Inbox machinery entirely
+  - [x] 35.6 archive: surface archived item count in summary
+  - [x] 35.6a canonicalize: call consolidate_backlog
+  - [x] 35.7 Docs: README + init.rs Inbox → Backlog
+  - [x] 35.8 Phase 35 exit: green checks, release v0.1.23, archive sweep
+

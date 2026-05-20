@@ -7,6 +7,12 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// Synthetic plan_path prefix for no-path Backlog notes. A `TaskCreate` with no
+/// `metadata.plan_path` is mapped to `backlog:<task_id>` — the harness task
+/// stays linked (idempotent re-runs, clean delete) but the mapping points at a
+/// Backlog bullet, not a phased leaf. Mirrors [crate::baseline::BASELINE_PREFIX].
+pub const BACKLOG_PREFIX: &str = "backlog:";
+
 /// Phase 31.4: drop legacy `last_synced_annotations` strings that look like
 /// column-0 markdown section headers. `annotations_to_strings` now filters
 /// them at write-time, but existing state files captured before the upgrade
@@ -106,7 +112,7 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     }
 
     // Phase 31.5: a leaf is a "phase anchor" when it sits at top level and its
-    // id ends in `.0` (e.g. `10.0`, `Inbox.0`). Phase anchors aren't tracked
+    // id ends in `.0` (e.g. `10.0`, `AH.0`). Phase anchors aren't tracked
     // tasks — the user/agent maintains them by convention. Suppress
     // `LeafAdded` drift for them so a manually-added or auto-synthesized
     // anchor doesn't nag forever with "consider TaskCreate".
@@ -196,7 +202,16 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     // State entries whose plan_path no longer exists anywhere in PLAN.md → removed.
     // A tracked node that gained children is still present (just as a parent now),
     // so it stays in all_node_paths and does NOT trigger LeafRemoved.
+    //
+    // Phase 35.3: `backlog:<task_id>` mappings intentionally have no leaf — they
+    // track a Backlog note, not a phased node. Skip them here so a deferred,
+    // unphased item doesn't nag as "Removed (consider TaskUpdate deleted)" on
+    // every prompt. They quietly persist until the item is completed/deleted
+    // (writeback_update clears the bullet + mapping) or promoted to a phase.
     for (task_id, mapping) in &state.mappings {
+        if mapping.plan_path.starts_with(BACKLOG_PREFIX) {
+            continue;
+        }
         if !all_node_paths.contains(&mapping.plan_path) {
             deltas.push(Delta::LeafRemoved {
                 plan_path: mapping.plan_path.clone(),
@@ -459,6 +474,29 @@ mod tests {
             last_synced_annotations: annotations.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn backlog_mapping_produces_no_leaf_removed() {
+        // A `backlog:<task_id>` mapping tracks a Backlog note, which has no
+        // leaf in PLAN.md. It must NOT register as LeafRemoved drift.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        write_state(
+            &plan,
+            &[
+                ("t-1", mapping("1.1", "Task", false, &[])),
+                (
+                    "t-loose",
+                    mapping("backlog:t-loose", "loose note", false, &[]),
+                ),
+            ],
+        );
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            deltas.is_empty(),
+            "backlog mapping should not surface as drift: {deltas:?}"
+        );
     }
 
     #[test]

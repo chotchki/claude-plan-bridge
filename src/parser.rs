@@ -21,7 +21,19 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
     let mut saw_checkbox = false;
     let mut in_code: Option<CodeAccumulator> = None;
 
-    for (idx, raw_line) in input.lines().enumerate() {
+    // Phase 35.1a: peel a *trailing* `## Backlog (not yet phased)` block off the
+    // tail before the tree walk sees it. Without this, the bridge's own
+    // serialized output (Backlog rendered last) would re-parse as annotations
+    // dangling off the final checkbox node — and the next phase-append would
+    // slip ahead of it. Lifting it into `plan.backlog` keeps the section
+    // pinned to the bottom across edits. Only a genuinely trailing block is
+    // lifted; a preamble or mid-document Backlog stays where it is until
+    // `consolidate_backlog` (canonicalize / explicit backlog ops) moves it.
+    let (body, trailing_backlog) = peel_trailing_backlog(input);
+    plan.backlog = trailing_backlog;
+
+    for (idx, raw_line) in body.iter().enumerate() {
+        let raw_line = *raw_line;
         let line_no = idx + 1;
 
         if let Some(cs) = in_code.as_mut() {
@@ -112,7 +124,7 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
 
     if let Some(cs) = in_code {
         return Err(ParseError::UnterminatedCodeFence {
-            line: input.lines().count(),
+            line: body.len(),
             opened_at: cs.opened_at,
         });
     }
@@ -132,6 +144,69 @@ fn push_into_parent(plan: &mut Plan, stack: &mut [(Node, usize)], node: Node) {
     } else {
         plan.phases.push(node);
     }
+}
+
+/// Split `input` into (body lines, trailing-backlog body). When the document
+/// *ends* with a `## Backlog (not yet phased)` section — heading followed only
+/// by bullet/blank/continuation lines to EOF — the heading-and-below is peeled
+/// off and the bullet lines (leading/trailing blanks trimmed) are returned as
+/// the backlog body. The serializer re-emits the heading, so it's not stored.
+///
+/// Conservative by construction: the upward scan stops at the first line that
+/// isn't blank, a `-` bullet, or an indented continuation. If that stopping
+/// line isn't the Backlog heading (e.g. it's `## Sustainment`, a `### Backlog`
+/// subsection, prose, or a checkbox), nothing is peeled — the Backlog stays in
+/// the body for the tree walk / `consolidate_backlog` to handle.
+fn peel_trailing_backlog(input: &str) -> (Vec<&str>, Vec<String>) {
+    let lines: Vec<&str> = input.lines().collect();
+
+    // Walk up from EOF over backlog-body-shaped lines, looking for the heading.
+    let mut i = lines.len();
+    while i > 0 {
+        let line = lines[i - 1];
+        let trimmed = line.trim_start();
+        // A checkbox line ends the scan — backlog bullets are never checkboxes,
+        // so a `- [ ] ...` below the heading means this isn't a trailing block
+        // (the Backlog sits above real phases and belongs to the preamble).
+        let is_checkbox = trimmed.starts_with("- [");
+        let is_body_shaped = !is_checkbox
+            && (trimmed.is_empty()
+                || trimmed.starts_with('-')
+                || (line.starts_with(char::is_whitespace) && !trimmed.is_empty()));
+        if crate::ast::is_backlog_heading(line) {
+            // Found the heading bounding a clean trailing block.
+            let body_lines: Vec<String> =
+                lines[i..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            // Trim surrounding blank lines from the captured bullets.
+            let backlog = trim_blank_edges(body_lines);
+            if backlog.is_empty() {
+                // A bare heading with no bullets — not worth lifting.
+                return (lines, Vec::new());
+            }
+            let mut kept: Vec<&str> = lines[..i - 1].to_vec();
+            // Drop trailing blanks so re-serialize doesn't accumulate them
+            // (the serializer inserts exactly one blank before the section).
+            while kept.last().is_some_and(|l| l.trim().is_empty()) {
+                kept.pop();
+            }
+            return (kept, backlog);
+        }
+        if !is_body_shaped {
+            break;
+        }
+        i -= 1;
+    }
+    (lines, Vec::new())
+}
+
+fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {
+    while lines.first().is_some_and(|l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
 }
 
 fn attach_annotation(
@@ -435,6 +510,78 @@ mod tests {
         assert_eq!(plan.phases[0].state, NodeState::Backlog);
         assert!(!plan.phases[0].is_done());
         assert!(plan.phases[0].is_resolved());
+    }
+
+    #[test]
+    fn lifts_trailing_backlog_into_field() {
+        let input = "\
+- [ ] 1.0 Phase
+  - [ ] 1.1 Task
+
+## Backlog (not yet phased)
+
+- **Deferred A** — added 2026-05-19.
+- **Deferred B** — deferred from 1.2 on 2026-05-19.
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        // The backlog bullets are NOT dangling as annotations on the last leaf.
+        assert!(plan.phases[0].children[0].annotations.is_empty());
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **Deferred A** — added 2026-05-19.",
+                "- **Deferred B** — deferred from 1.2 on 2026-05-19.",
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_backlog_round_trips_idempotently() {
+        let input =
+            "- [ ] 1.0 Phase\n\n## Backlog (not yet phased)\n\n- **X** — added 2026-05-19.\n";
+        let plan1 = parse(input).unwrap();
+        let out = crate::serializer::serialize(&plan1);
+        assert_eq!(
+            out, input,
+            "serialize should reproduce the trailing section"
+        );
+        let plan2 = parse(&out).unwrap();
+        assert_eq!(plan1, plan2, "parse→serialize→parse must be stable");
+    }
+
+    #[test]
+    fn does_not_lift_preamble_backlog() {
+        // Backlog above the phases stays in the preamble until canonicalize.
+        let input = "\
+# Title
+
+## Backlog (not yet phased)
+
+- **Early note** — added 2026-05-19.
+
+- [ ] 1.0 Phase
+";
+        let plan = parse(input).unwrap();
+        assert!(
+            plan.backlog.is_empty(),
+            "preamble backlog must NOT be lifted"
+        );
+        assert!(plan.preamble.iter().any(|l| l.contains("Early note")));
+    }
+
+    #[test]
+    fn does_not_lift_non_backlog_trailing_section() {
+        // A `## Sustainment`-style trailing section is left for the tree walk.
+        let input = "\
+- [ ] 1.0 Phase
+
+## Sustainment & minor features
+
+- some bullet
+";
+        let plan = parse(input).unwrap();
+        assert!(plan.backlog.is_empty());
     }
 
     #[test]

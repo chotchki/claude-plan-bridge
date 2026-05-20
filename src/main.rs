@@ -345,9 +345,14 @@ fn main() -> Result<()> {
                 } else {
                     "archived"
                 };
+                // Report the total archived item count alongside the top-level
+                // phase count: a single phase that bundles a dotted prefix
+                // (e.g. `AE.0` carrying `AE.1`..`AE.11`) is one phase but many
+                // items, and "1 phase" alone badly under-reports the sweep.
                 println!(
-                    "claude-plan-bridge: {verb} {} phase(s): {}",
+                    "claude-plan-bridge: {verb} {} phase(s), {} item(s): {}",
                     report.archived_phase_ids.len(),
+                    report.archived_plan_paths.len(),
                     report.archived_phase_ids.join(", ")
                 );
             }

@@ -213,6 +213,7 @@ fn build_archive_section(today: &str, archived: &[Node]) -> String {
         let temp = Plan {
             preamble: vec![],
             phases: vec![phase.clone()],
+            backlog: vec![],
         };
         out.push_str(&serialize(&temp));
         out.push('\n');
@@ -300,6 +301,34 @@ mod tests {
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(after.contains("1.0 Phase"));
         assert!(!archive_path_for(&plan).exists());
+    }
+
+    #[test]
+    fn prefix_bundle_reports_one_phase_many_items() {
+        // The under-report case the summary message guards against: a single
+        // top-level phase `AE.0` bundling `AE.1`..`AE.3` is 1 phase but 4 items.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "\
+- [ ] AE.0 Phase AE
+  - [x] AE.1 One
+  - [x] AE.2 Two
+  - [-] AE.3 Three (won't do)
+",
+        );
+        let report = archive(&plan, false, "2026-05-19").unwrap();
+        assert_eq!(
+            report.archived_phase_ids,
+            vec!["AE.0"],
+            "one top-level phase"
+        );
+        assert_eq!(
+            report.archived_plan_paths.len(),
+            4,
+            "four items archived: {:?}",
+            report.archived_plan_paths
+        );
     }
 
     #[test]

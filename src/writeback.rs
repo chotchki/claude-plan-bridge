@@ -61,8 +61,10 @@ pub fn normalize_subject(s: &str) -> String {
 /// - If `metadata.plan_path` is set, insert at that exact id; parent must
 ///   already exist in PLAN.md (otherwise we error out instead of silently
 ///   inventing structure).
-/// - If `metadata.plan_path` is absent, append to the `Inbox.0` phase
-///   (auto-created at the end of PLAN.md if missing).
+/// - If `metadata.plan_path` is absent, the work is unphased: it lands as a
+///   tracked note in the canonical `## Backlog (not yet phased)` section at the
+///   bottom of PLAN.md (mapped to a synthetic `backlog:<task_id>` path), to be
+///   promoted into a real phase later by a deliberate planning move.
 ///
 /// Idempotent: re-running with the same `task_id` is a no-op.
 pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookOutput> {
@@ -133,9 +135,18 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 (plan, p, "added".to_string(), anchor_created)
             }
             None => {
+                // Phase 35: no plan_path means the work is real but unphased.
+                // It lands as a tracked note in the canonical Backlog section
+                // (consolidated to the bottom first), NOT in an auto-invented
+                // Inbox phase. A planning move promotes it later. The mapping
+                // is keyed to a synthetic `backlog:<task_id>` path so the
+                // harness task stays linked (idempotent re-runs, clean delete)
+                // without pretending to be a phased leaf.
                 let mut plan = parsed;
-                let p = plan.append_to_inbox(&input.subject);
-                (plan, p, "added to Inbox".to_string(), None)
+                plan.consolidate_backlog();
+                plan.append_backlog_note(&input.subject, &crate::today::today_utc());
+                let p = format!("{}{task_id}", crate::reconcile::BACKLOG_PREFIX);
+                (plan, p, "added to Backlog".to_string(), None)
             }
         };
 
@@ -298,6 +309,62 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             .with_context(|| format!("read {}", plan_path.display()))?;
         let mut plan = parse(&plan_text)?;
 
+        // Phase 35.4: a `backlog:<task_id>` mapping points at a Backlog note,
+        // not a phased leaf. completed/deleted both retire the note (remove the
+        // bullet + unlink the mapping); a subject rename swaps the bullet's
+        // title in place. Handled here so the leaf-oriented logic below doesn't
+        // silently no-op a backlog item (leaving it tracked-but-invisible).
+        if node_path.starts_with(crate::reconcile::BACKLOG_PREFIX) {
+            let title = state
+                .mappings
+                .get(&input.task_id)
+                .map(|m| m.last_synced_title.clone())
+                .unwrap_or_default();
+            if matches!(status, Some("completed") | Some("deleted")) {
+                let removed = plan.remove_backlog_note(&title);
+                if removed {
+                    std::fs::write(plan_path, serialize(&plan))
+                        .with_context(|| format!("write {}", plan_path.display()))?;
+                }
+                state.remove(&input.task_id);
+                state.save(&state_path)?;
+                let verb = if status == Some("completed") {
+                    "completed"
+                } else {
+                    "deleted"
+                };
+                let note = if removed {
+                    "removed bullet"
+                } else {
+                    "bullet already gone"
+                };
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: {verb} Backlog note `{title}` ({note}); unlinked task {}",
+                        input.task_id
+                    ),
+                ));
+            }
+            // Subject-only update (pending/in_progress carry no PLAN.md change).
+            if let Some(new_title) = new_subject
+                && new_title != title
+                && plan.rename_backlog_note(&title, new_title)
+            {
+                std::fs::write(plan_path, serialize(&plan))
+                    .with_context(|| format!("write {}", plan_path.display()))?;
+                if let Some(m) = state.mappings.get_mut(&input.task_id) {
+                    m.last_synced_title = new_title.to_string();
+                }
+                state.save(&state_path)?;
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!("claude-plan-bridge: renamed Backlog note to `{new_title}`"),
+                ));
+            }
+            return Ok(HookOutput::silent());
+        }
+
         let mut changes: Vec<String> = Vec::new();
 
         // --- Subject rename (skip when also deleting — would rename then remove) ---
@@ -343,7 +410,11 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                     if let Some(node) = plan.find_mut(&node_path) {
                         node.state = NodeState::Backlog;
                     }
-                    plan.append_backlog_entry(&node_path, &title, &crate::today::today_utc());
+                    // Phase 35.2a: deferrals land in the canonical bottom
+                    // Backlog section. Consolidate first so a legacy preamble
+                    // Backlog merges down rather than splitting into two.
+                    plan.consolidate_backlog();
+                    plan.append_backlog_deferral(&node_path, &title, &crate::today::today_utc());
                     std::fs::write(plan_path, serialize(&plan))
                         .with_context(|| format!("write {}", plan_path.display()))?;
                     state.remove(&input.task_id);
@@ -493,7 +564,7 @@ fn insert_at_path(
                 && !plan.phases.iter().any(|p| p.id == parent_id)
             {
                 // Phase 31.3: parent has the top-level shape (e.g. `10.0`,
-                // `Inbox.0`) but was found nested under another node — usually
+                // `AH.0`) but was found nested under another node — usually
                 // because the user hand-added `- [ ] 10.0 ...` at the wrong
                 // indent. Refuse rather than silently parenting the new task
                 // under whatever leaf the misplaced anchor wound up beneath
@@ -524,7 +595,6 @@ fn insert_at_path(
 /// title without renaming the children.
 fn synthesize_anchor_title(parent_id: &str) -> String {
     match parent_id.strip_suffix(".0") {
-        Some("Inbox") => "Inbox".to_string(),
         Some(prefix) => format!("Phase {prefix}"),
         None => format!("Phase {parent_id}"),
     }
@@ -705,20 +775,71 @@ mod tests {
     }
 
     #[test]
-    fn appends_to_inbox_when_no_plan_path() {
+    fn no_plan_path_lands_in_backlog_tracked() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let payload = payload_for_create("t-loose", "loose task", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added to Backlog"),
+            "{}",
+            out.to_json()
+        );
+
+        let new_contents = std::fs::read_to_string(&plan).unwrap();
+        // No Inbox phase invented; a Backlog note at the bottom instead.
+        assert!(!new_contents.contains("Inbox"), "got:\n{new_contents}");
+        assert!(
+            new_contents.contains("## Backlog (not yet phased)"),
+            "got:\n{new_contents}"
+        );
+        assert!(
+            new_contents.contains("- **loose task** — added "),
+            "got:\n{new_contents}"
+        );
+
+        // Tracked via a synthetic backlog:<task_id> mapping.
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-loose"), Some("backlog:t-loose"));
+    }
+
+    #[test]
+    fn no_plan_path_create_is_idempotent() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
         let payload = payload_for_create("t-loose", "loose task", None);
         writeback_create(&payload, &plan).unwrap();
+        let after_first = std::fs::read_to_string(&plan).unwrap();
+        // Re-run with the same task_id — no second bullet, no-op.
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(out.to_json().contains("no-op"), "{}", out.to_json());
+        assert_eq!(after_first, std::fs::read_to_string(&plan).unwrap());
+    }
+
+    #[test]
+    fn no_plan_path_consolidates_existing_preamble_backlog() {
+        let dir = scratch_dir();
+        // Backlog sitting in the preamble (above the phase) — the legacy spot.
+        let plan = write_plan(
+            &dir,
+            "## Backlog (not yet phased)\n\n- **Old item** — added 2026-05-01.\n\n- [ ] 1.0 Phase\n",
+        );
+        let payload = payload_for_create("t-new", "fresh note", None);
+        writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(
-            new_contents.contains("- [ ] Inbox.0 Inbox"),
-            "got:\n{new_contents}"
+        // Exactly one Backlog heading, now at the bottom, holding both items.
+        assert_eq!(
+            new_contents.matches("## Backlog (not yet phased)").count(),
+            1
         );
+        let heading_pos = new_contents.find("## Backlog").unwrap();
+        let phase_pos = new_contents.find("- [ ] 1.0 Phase").unwrap();
         assert!(
-            new_contents.contains("  - [ ] Inbox.1 loose task"),
-            "got:\n{new_contents}"
+            heading_pos > phase_pos,
+            "Backlog should be below the phase:\n{new_contents}"
         );
+        assert!(new_contents.contains("- **Old item** — added 2026-05-01."));
+        assert!(new_contents.contains("- **fresh note** — added "));
     }
 
     #[test]
@@ -940,6 +1061,71 @@ mod tests {
             tool_response: serde_json::json!({}),
             source: String::new(),
         }
+    }
+
+    #[test]
+    fn backlog_item_completed_removes_bullet_and_unlinks() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-loose", "loose task", None), &plan).unwrap();
+        let out = writeback_update(&payload_for_update("t-loose", "completed"), &plan).unwrap();
+        assert!(
+            out.to_json().contains("completed Backlog note"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            !contents.contains("loose task"),
+            "bullet should be gone:\n{contents}"
+        );
+        // Empty backlog → no dangling heading.
+        assert!(!contents.contains("## Backlog"), "got:\n{contents}");
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert!(
+            state.plan_path("t-loose").is_none(),
+            "mapping should be unlinked"
+        );
+    }
+
+    #[test]
+    fn backlog_item_deleted_removes_bullet_and_unlinks() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-loose", "loose task", None), &plan).unwrap();
+        let out = writeback_update(&payload_for_update("t-loose", "deleted"), &plan).unwrap();
+        assert!(
+            out.to_json().contains("deleted Backlog note"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(!contents.contains("loose task"), "got:\n{contents}");
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert!(state.plan_path("t-loose").is_none());
+    }
+
+    #[test]
+    fn backlog_item_rename_swaps_bullet_title() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        writeback_create(&payload_for_create("t-loose", "old name", None), &plan).unwrap();
+        writeback_update(&payload_for_update_subject("t-loose", "new name"), &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- **new name** — added "),
+            "got:\n{contents}"
+        );
+        assert!(!contents.contains("old name"), "got:\n{contents}");
+        // Stored title tracks the rename, so a later delete still finds it.
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(
+            state
+                .mappings
+                .get("t-loose")
+                .map(|m| m.last_synced_title.as_str()),
+            Some("new name")
+        );
     }
 
     #[test]

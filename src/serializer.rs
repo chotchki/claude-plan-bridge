@@ -21,6 +21,20 @@ pub fn serialize(plan: &Plan) -> String {
         // then captures as a new Blank annotation, growing the AST each cycle).
         write_node(&mut out, phase, 0);
     }
+    // Phase 35: the canonical Backlog section renders last, below every phase.
+    // One blank line separates it from preceding content. The parser auto-lifts
+    // this trailing block back into `plan.backlog` on the next parse, so the
+    // round-trip is stable and a later phase-append can't slip ahead of it.
+    if !plan.backlog.is_empty() {
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str("## Backlog (not yet phased)\n\n");
+        for line in &plan.backlog {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
     out
 }
 
@@ -150,6 +164,36 @@ mod tests {
         let plan = parse("- [~] 1.0 Skipped\n").unwrap();
         // Tilde is accepted on read, but canonical output is `[-]`.
         assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
+    }
+
+    #[test]
+    fn backlog_field_renders_at_bottom() {
+        let mut plan = parse("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n").unwrap();
+        plan.backlog
+            .push("- **Deferred thing** — added 2026-05-19.".to_string());
+        let out = serialize(&plan);
+        assert_eq!(
+            out,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Backlog (not yet phased)\n\n- **Deferred thing** — added 2026-05-19.\n"
+        );
+    }
+
+    #[test]
+    fn empty_backlog_field_emits_nothing() {
+        let plan = parse("- [ ] 1.0 Phase\n").unwrap();
+        assert!(plan.backlog.is_empty());
+        assert_eq!(serialize(&plan), "- [ ] 1.0 Phase\n");
+    }
+
+    #[test]
+    fn backlog_only_plan_renders_without_leading_blank() {
+        let mut plan = Plan::default();
+        plan.backlog
+            .push("- **Orphan note** — added 2026-05-19.".to_string());
+        assert_eq!(
+            serialize(&plan),
+            "## Backlog (not yet phased)\n\n- **Orphan note** — added 2026-05-19.\n"
+        );
     }
 
     #[test]

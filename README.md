@@ -57,7 +57,7 @@ From the next session, the bridge runs invisibly:
 | Claude does… | The bridge does… |
 |---|---|
 | Starts a new session | `SessionStart` hook emits a rehydration prompt listing every open *leaf* `plan_path` (parents shown only as context headers) so Claude re-`TaskCreate`s them into the fresh task list (writeback re-links to existing PLAN.md lines, no duplicates) |
-| `TaskCreate` (any source) | Appends `- [ ] N.M new task` to `PLAN.md` (under `Inbox.0` if no `plan_path` metadata, else at the requested id) |
+| `TaskCreate` (any source) | Inserts `- [ ] N.M new task` at the requested `plan_path`; with no `plan_path` metadata the work is unphased, so it lands as a tracked note in the bottom `## Backlog (not yet phased)` section instead |
 | `TaskUpdate(status="completed")` | Ticks `[ ]` → `[x]` at the mapped line |
 | `TaskUpdate(status="deleted")` | Removes the line (orphaned empty parents stay; you prune by hand) |
 | `TaskUpdate(subject="...")` | Rewrites the node's title in `PLAN.md` (works with or without a status change) |
@@ -89,7 +89,7 @@ Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-lev
 
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
-- **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set, else append to auto-managed `Inbox.0`. Idempotent on `task_id`.
+- **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set. With no `plan_path`, the work is unphased — it's recorded as a tracked note in the canonical `## Backlog (not yet phased)` section at the bottom of `PLAN.md` (mapped to a synthetic `backlog:<task_id>` path) and promoted into a real phase later by a deliberate planning move. Idempotent on `task_id`.
   - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level `N.0` exists, the bridge synthesizes the anchor for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback). No more manual "add the 10.0 row, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
   - **Top-level enforcement.** If an `N.0` exists but is nested under another phase (e.g. hand-added at the wrong indent), the bridge refuses the insert rather than silently parking children under the misplaced anchor. Fix the indent and retry.
   - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
@@ -245,11 +245,16 @@ Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == pa
 
 `[>]` marks a leaf as **deferred from its current phase** — work you've consciously decided not to ship as part of this phase, but want to remember for later. Distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active).
 
-Three ways to enter the state:
+All deferred and unphased work collects in a single **`## Backlog (not yet phased)` section pinned to the bottom of PLAN.md** — a visible, named holding pen, not an auto-discovered `Inbox` sub-list. You promote a coherent batch into a named phase when the time comes (the planning move); the bridge never auto-phases backlog items.
 
-1. **`TaskUpdate(taskId=X, status="deleted")` against a pending leaf** — the hook flips the line to `[>]` and appends a bullet under `## Backlog (not yet phased)` recording the source plan_path + date. State mapping is dropped. **Pending leaves are never hard-deleted from PLAN.md via `TaskUpdate`** — this is the safety contract. To actually remove a line, edit PLAN.md by hand or let archive sweep it.
-2. **MCP `plan_backlog(plan_path, date?)`** — same effect, callable directly without going through the harness task list. Useful when there's no active mapping (e.g., baselined plan).
-3. **CLI `plan-bridge backlog <plan_path>`** — same effect from the shell.
+Four ways work lands in Backlog:
+
+1. **`TaskCreate` with no `metadata.plan_path`** — unphased work. The hook records a tracked note (`- **<subject>** — added <date>.`) in the bottom section, mapped to a synthetic `backlog:<task_id>` path so the harness task stays linked. Completing or deleting that task removes the note; a subject rename updates it.
+2. **`TaskUpdate(taskId=X, status="deleted")` against a pending leaf** — the hook flips the line to `[>]` and appends a deferral bullet (source plan_path + date) to the bottom section. State mapping is dropped. **Pending leaves are never hard-deleted from PLAN.md via `TaskUpdate`** — this is the safety contract. To actually remove a line, edit PLAN.md by hand or let archive sweep it.
+3. **MCP `plan_backlog(plan_path, date?)`** — same effect as (2), callable directly without going through the harness task list. Useful when there's no active mapping (e.g., baselined plan).
+4. **CLI `plan-bridge backlog <plan_path>`** — same effect from the shell.
+
+The section is owned as a first-class trailing region: it always serializes below every phase and survives phase-appends without drifting. A `## Backlog` that's still sitting in the preamble (or split across duplicate sections) gets merged down to the bottom only when you run **`plan-bridge canonicalize`** (or on the next backlog-mutating write) — routine ticks and renames leave its placement alone. Conservative by design: only the bridge-owned `## Backlog (not yet phased)` h2 is touched; operator sections like `### Backlog (rehomed from ...)` or `## Sustainment` are left exactly where they are.
 
 What happens at phase exit: archive treats `[>]` like `[x]` and `[-]` — all three count as "resolved" for the `phase_fully_done` gate. When the phase sweeps to `PLAN_ARCHIVE.md`, the `[>]` lines go with it. But the `## Backlog (not yet phased)` bullet you got at deferral time **stays in PLAN.md**, so the deferred work is preserved as a durable record.
 

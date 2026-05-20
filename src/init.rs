@@ -28,8 +28,9 @@ Describe what you're building.
 
 <!--
 This PLAN.md is driven by `claude-plan-bridge`:
-- TaskCreate adds a `- [ ] N.M task` line (auto-managed `Inbox.0` if no
-  `metadata.plan_path`).
+- TaskCreate adds a `- [ ] N.M task` line at `metadata.plan_path`; with no
+  `plan_path` it lands as a tracked note in the bottom `## Backlog (not yet
+  phased)` section instead.
 - TaskUpdate(status='completed') ticks the box; (status='deleted') removes
   the line; (subject='...') rewrites the title.
 - Hand-edits between turns surface as `additionalContext` on the next
