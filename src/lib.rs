@@ -6,6 +6,7 @@ pub mod baseline;
 pub mod canonicalize;
 pub mod hook;
 pub mod init;
+pub mod io_util;
 pub mod lock;
 pub mod mcp;
 pub mod parser;

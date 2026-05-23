@@ -100,18 +100,11 @@ impl State {
     }
 
     /// Save state via tmp-file + rename so a crash mid-write can't leave a
-    /// half-written JSON blob on disk.
+    /// half-written JSON blob on disk. Phase 41.4: delegates to the
+    /// shared `crate::io_util::atomic_write`.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .with_context(|| format!("state path {} has no parent", path.display()))?;
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        let tmp = tmp_path(path);
         let json = serde_json::to_vec_pretty(self).context("serialize state")?;
-        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::io_util::atomic_write(path, &json)
     }
 
     pub fn insert(&mut self, task_id: impl Into<String>, plan_path: impl Into<String>) {
@@ -177,11 +170,11 @@ pub fn default_state_path_for(plan_path: &Path) -> PathBuf {
         .join("plan-bridge-state.json")
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
-}
+// Phase 41.4: tmp_path moved to crate::io_util. Re-exported here for the
+// existing `save_is_atomic_via_tmp_rename` test which asserts the tmp
+// file doesn't linger after a clean save.
+#[cfg(test)]
+use crate::io_util::tmp_path;
 
 #[cfg(test)]
 mod tests {

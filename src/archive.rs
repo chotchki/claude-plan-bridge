@@ -84,9 +84,9 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     };
     let combined = append_archive(&archive_text, &archive_section);
 
-    atomic_write(plan_path, &new_plan_text)
+    atomic_write(plan_path, new_plan_text.as_bytes())
         .with_context(|| format!("write {}", plan_path.display()))?;
-    atomic_write(&archive_path, &combined)
+    atomic_write(&archive_path, combined.as_bytes())
         .with_context(|| format!("write {}", archive_path.display()))?;
 
     // Drop state mappings whose plan_path lives inside any archived subtree.
@@ -204,8 +204,8 @@ pub fn archive_phase(
     };
     let combined = append_archive(&archive_text, &archive_section);
 
-    atomic_write(plan_path, &new_plan_text)?;
-    atomic_write(&archive_path, &combined)?;
+    atomic_write(plan_path, new_plan_text.as_bytes())?;
+    atomic_write(&archive_path, combined.as_bytes())?;
 
     let state_path = crate::state::default_state_path_for(plan_path);
     let mut state = crate::state::State::load(&state_path)?;
@@ -374,21 +374,8 @@ fn archive_path_for(plan_path: &Path) -> PathBuf {
         .join("PLAN_ARCHIVE.md")
 }
 
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("no parent for {}", path.display()))?;
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, contents).with_context(|| format!("write tmp {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
-}
+// Phase 41.4: atomic_write moved to crate::io_util.
+use crate::io_util::atomic_write;
 
 #[cfg(test)]
 mod tests {
