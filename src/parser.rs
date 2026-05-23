@@ -410,12 +410,34 @@ fn attach_annotation(
         }
         return;
     }
+    // Phase 36.5: inside a FORMATv2 phase, column-0 non-checkbox lines belong
+    // to the PHASE — not whichever task happened to be open on the stack. This
+    // captures the FORMATv2 pattern where prose appears BEFORE the first task
+    // ("intro paragraph") AND AFTER all tasks ("Random prose that shouldn't be
+    // a task, will be swept with the phase."). Blank lines and indented prose
+    // (indent > 0) keep the existing stack-attached behavior — indentation
+    // signals subordination to the open leaf.
+    //
+    // v1 plans are unaffected: current_phase stays None throughout parsing
+    // (top-level checkboxes promote to Phase at flush time), so the routing
+    // falls through to the legacy stack path.
+    let column0_prose = match &annotation {
+        Annotation::Text { indent, .. } => *indent == 0,
+        Annotation::Bullet { indent, .. } => *indent == 0,
+        Annotation::CodeBlock { indent, .. } => *indent == 0,
+        Annotation::Blank { .. } => false,
+    };
+    if column0_prose
+        && let Some(phase) = current_phase.as_mut()
+    {
+        phase.annotations.push(annotation);
+        return;
+    }
     if let Some((top, _)) = stack.last_mut() {
         top.annotations.push(annotation);
     } else if let Some(phase) = current_phase.as_mut() {
-        // Phase 36.3: lines between a `## Phase X - Title` header and the
-        // first task land as phase-level annotations. 36.5 will split this
-        // into a dedicated `prose` bucket; for now they share annotations.
+        // Indented prose (or a blank) before the first task — falls back to
+        // phase annotations when the stack is empty.
         phase.annotations.push(annotation);
     }
     // Else: after checkboxes started but no open node and no open phase —
@@ -1369,7 +1391,6 @@ Some intro prose here.
         let plan = parse(input).unwrap();
         let p = &plan.phases[0];
         assert_eq!(p.id, "AI");
-        // Prose lives in annotations until 36.5's dedicated prose bucket.
         assert!(
             p.annotations
                 .iter()
@@ -1377,5 +1398,140 @@ Some intro prose here.
             "phase-level prose should be captured in annotations: {:?}",
             p.annotations
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 36.5: phase-level prose bucketing (column-0 in v2 phases
+    // attaches to the phase, not the open task stack)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn v2_phase_column0_prose_after_tasks_attaches_to_phase_not_last_task() {
+        // The FORMATv2 contract: column-0 prose AFTER all tasks in a v2 phase
+        // belongs to the phase (it'll be swept with the phase at archive time),
+        // not to whichever task happened to be the last open node on the stack.
+        let input = "\
+## Phase AI - Studio dogfood
+
+- [ ] AI.0 first
+- [ ] AI.1 second
+
+Random prose that shouldn't be a task, will be swept with the phase.
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        assert_eq!(p.children.len(), 2);
+        // The last task (AI.1) must NOT have the trailing prose attached.
+        let ai_1 = &p.children[1];
+        assert!(
+            !ai_1.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))),
+            "trailing column-0 prose must NOT attach to AI.1: {:?}",
+            ai_1.annotations
+        );
+        // The phase itself must own the trailing prose.
+        assert!(
+            p.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))),
+            "trailing column-0 prose must attach to phase: {:?}",
+            p.annotations
+        );
+    }
+
+    #[test]
+    fn v2_phase_indented_prose_under_task_still_attaches_to_task() {
+        // Subordination signal: indented prose under a leaf belongs to the
+        // leaf, not the phase. (Same v1 behavior — only column-0 prose was
+        // re-routed.)
+        let input = "\
+## Phase AI - Studio
+
+- [ ] AI.0 first task
+  This is task-level prose, indented under AI.0.
+- [ ] AI.1 second
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        let ai_0 = &p.children[0];
+        assert!(
+            ai_0.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))),
+            "indented prose stays with the task it sits under: {:?}",
+            ai_0.annotations
+        );
+        // Phase annotations don't accidentally receive task-level prose.
+        assert!(
+            !p.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))),
+            "indented prose must NOT bubble up to phase: {:?}",
+            p.annotations
+        );
+    }
+
+    #[test]
+    fn v2_phase_multiple_prose_blocks_around_tasks_all_bucket_on_phase() {
+        // Intro prose, prose between tasks, trailing prose — all column-0,
+        // all phase-level.
+        let input = "\
+## Phase AI - Title
+
+Intro paragraph.
+
+- [ ] AI.0 first
+
+Prose between tasks.
+
+- [ ] AI.1 second
+
+Closing prose.
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        let texts: Vec<&str> = p
+            .annotations
+            .iter()
+            .filter_map(|a| {
+                if let Annotation::Text { text, .. } = a {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Intro paragraph")),
+            "intro at phase: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Prose between tasks")),
+            "between-tasks prose at phase: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Closing prose")),
+            "closing prose at phase: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn v1_anchor_column0_prose_keeps_legacy_stack_attachment() {
+        // v1 plans never set current_phase, so column-0 prose mid-tree still
+        // attaches to the open stack node — preserves backward compatibility.
+        let input = "\
+- [ ] 1.0 Legacy phase
+  - [ ] 1.1 task
+
+Column-zero prose under a v1 anchor.
+";
+        let plan = parse(input).unwrap();
+        let phase = &plan.phases[0];
+        // The v1 anchor itself owns the column-0 prose (since the stack still
+        // has 1.0/1.1 open when the prose arrives — the deepest open node
+        // captures it).
+        let prose_anywhere = std::iter::once(phase)
+            .flat_map(|p| {
+                p.annotations.iter().chain(
+                    p.children
+                        .iter()
+                        .flat_map(|c| c.annotations.iter()),
+                )
+            })
+            .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Column-zero prose")));
+        assert!(prose_anywhere, "v1 mode preserves stack-attached prose");
     }
 }
