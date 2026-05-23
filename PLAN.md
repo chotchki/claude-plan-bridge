@@ -28,7 +28,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 38.8 Verb tests (add/rename/deps/archive/backlog/auto-anchor)
 - [ ] 39.0 Reconcile dep surfacing + dogfood + cut
   - [x] 39.1 Reconcile surfaces both `*(depends on)*` and `*(prefer after)*` in additionalContext
-  - [ ] 39.2 e2e: parse + canonicalize a copy of ../quicksight/PLAN.md without losing content
+  - [x] 39.2 e2e: parse + canonicalize a copy of ../quicksight/PLAN.md without losing content
   - [ ] 39.3 SPEC.md + README.md + CLAUDE.md hint docs updates for FORMATv2
   - [ ] 39.4 Cut release (version bump, RELEASE_NOTES, tag, push)
 - [ ] 40.0 Activation focus (per-project active phase)

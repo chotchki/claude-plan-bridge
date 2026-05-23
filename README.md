@@ -131,11 +131,48 @@ Delta variants Claude can act on:
 | `leaf_annotation_changed` | Notes / sub-bullets / code blocks under the leaf differ | Read; act if needed. Column-0 markdown section headers (`## Phase 10 …`) are excluded — they're document dividers, not leaf-scoped content |
 | `parent_inconsistent` | A parent is `[x]` but a descendant leaf isn't | Resolve before archive — sweep refuses inconsistent phases |
 
-### `archive [--dry-run] [--date YYYY-MM-DD]`
+### `archive [<PHASE>] [--descope-pending] [--dry-run] [--date YYYY-MM-DD]`
 
-Sweep every fully-resolved top-level phase from `PLAN.md` into `PLAN_ARCHIVE.md`. New section is appended at the **bottom** under a `## YYYY-MM-DD` header, so history reads chronological-ascending. Both files written atomically (tmp + rename). State mappings under archived subtrees are dropped.
+Two modes (Phase 38.4 / 38.5):
 
-**IDs are never renumbered.** Gaps after a sweep are intentional — downstream commit messages and code comments may reference the original ids.
+- **Bulk sweep** (no `<PHASE>` arg): every fully-resolved top-level phase
+  flows from `PLAN.md` into `PLAN_ARCHIVE.md`. Phases with pending leaves
+  are silently skipped. New section appended at the **bottom** under a
+  `## YYYY-MM-DD` header (chronological-ascending). Both files written
+  atomically. State mappings under archived subtrees are dropped.
+- **Per-phase** (`archive AS`): archive the named phase. Errors loudly if
+  the subtree has any `[ ]` Pending leaves. Add `--descope-pending` to
+  move pending leaves into the bottom `# Backlog (not yet phased)`
+  section as `- <id> - descoped from phase <PHASE> on <date>` notes,
+  then archive the now-fully-resolved phase. State mappings for descoped
+  paths are dropped.
+
+**IDs are never renumbered.** Gaps after a sweep are intentional —
+downstream commit messages and code comments may reference the original
+ids.
+
+### `phase-add <ID> [TITLE] [--depends-on X,Y] [--prefer-after A,B] [--after <ID>]`
+
+Create a new FORMATv2 phase header explicitly. Surgical alternative to
+TaskCreate's auto-anchor for cases that need dependency metadata at
+creation time or an empty phase pre-created.
+
+- `--depends-on` / `--prefer-after`: comma-separated phase ids for the
+  hard / soft sequencing markers. Either or both, in any combination.
+- `--after <ID>`: insert immediately after the named phase (positional);
+  defaults to id-sort order.
+
+### `phase-rename <ID> <new-title>`
+
+Rewrite a phase's title. Refuses task ids — use the `plan_rename` MCP
+tool (or edit PLAN.md directly) for task renames.
+
+### `phase-deps <ID> [--depends-on X,Y] [--prefer-after A,B]`
+
+Replace a phase's `*(depends on)*` / `*(prefer after)*` lists. At least
+one of the two flags must be passed; pass an empty list (`--depends-on
+""`) to clear. Flips a legacy v1 anchor to FORMATv2 header form so the
+markers can render.
 
 ### `baseline`
 
@@ -149,7 +186,19 @@ Seed the state file with synthetic `baseline:<plan_path>` mappings for every lea
 
 Run an MCP server over stdio that exposes typed plan-mutation tools. Useful when you'd rather drive plans through a structured API than through markdown editing.
 
-Tools: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_backlog`, `plan_add`, `plan_rename`, `plan_archive`, `plan_phase_exit`. Errors surface as JSON-RPC error responses (`code: -32603`); unknown tools and missing args produce clean errors the client can show. `plan_rename(plan_path, new_subject)` mirrors writeback's `TaskUpdate(subject=...)` and refreshes the synced baseline so reconcile is quiet next turn.
+Tools:
+
+- **Tasks**: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`,
+  `plan_backlog`, `plan_add`, `plan_rename`
+- **Phases**: `plan_add_phase`, `plan_rename_phase`, `plan_set_phase_deps`
+- **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
+  optional `descope_pending: bool` matching the CLI's `--descope-pending`)
+
+Errors surface as JSON-RPC error responses (`code: -32603`); unknown
+tools and missing args produce clean errors the client can show.
+`plan_rename(plan_path, new_subject)` mirrors writeback's
+`TaskUpdate(subject=...)` and refreshes the synced baseline so reconcile
+is quiet next turn.
 
 Wire it into your MCP client config — for Claude Code, point an `mcpServers` entry at `claude-plan-bridge serve`.
 
@@ -200,16 +249,67 @@ Atomic tmp+rename writes; cross-process advisory lock on the read-modify-write c
 
 Sidecar `.claude/plan-bridge-cleared.jsonl` is an append-only JSON Lines audit log; one row per state mapping the bridge drops during a SessionStart wipe. Timestamps are Unix-epoch seconds — decode with `date -r <n>` or `jq '.epoch_secs | strftime("%FT%TZ")'`. Useful when chasing a "where did my task go?" report.
 
-## Canonical `PLAN.md` format
+## Canonical `PLAN.md` format (FORMATv2)
 
-- Checkboxes: `- [ ]` / `- [x]` / `- [-]` / `- [>]` followed by a dotted id and the title. No bold wrapping, plain-space separator.
-- Four states: `[ ]` pending, `[x]` done, `[-]` won't-do, `[>]` backlog (deferred — see [Backlog state](#backlog-state-) below). The parser also accepts `[~]` on read for won't-do; always writes `[-]`.
-- Human-facing output renders state as emoji: ⬜ pending, ✅ done, ❌ won't-do, 🔜 backlog. PLAN.md itself always uses the bracket form.
-- IDs are project-scoped and stable across archive sweeps. Suffix-positioning works: `7.2a` slots between `7.2` and `7.3` without renumbering.
-- Two-space indent per tree level.
-- Code-block fences re-emit at the normalized indent; their content is preserved verbatim.
+Phases are h2 markdown headers; tasks are checkboxes underneath. The full
+shape:
 
-The parser also tolerates several human-friendly variants (bold-wrapped ids, em-dash separators, alphanumeric components, bare checkboxes) and normalizes them on write.
+```
+## Phase AI - Studio dogfood *(depends on: AH)* *(prefer after: AG)*
+
+Intro paragraph at the phase level — sweeps with the phase to archive.
+
+- [ ] AI.0 - Lock decisions
+- [ ] AI.1 - Implement driver
+  - [x] AI.1.0 - protocol
+  - [ ] AI.1.1 - transport
+    Indented prose stays with the task it sits under.
+
+# Backlog (not yet phased)
+
+- **Drop the fs4 crate** — added 2026-05-22.
+- AI.2 - descoped from phase `AI` on 2026-05-22
+```
+
+- **Phases**: `## Phase <ID> - <Title>` (h2 header). The id is a bare
+  alphabetic prefix (`AI`, `AS`) or numeric (`1`, `1.0`). Title optional.
+- **Phase dependency markers**: `*(depends on: X, Y)*` (hard sequencing
+  hint) and/or `*(prefer after: A, B)*` (soft hint). Informational only —
+  reconcile surfaces them; the bridge never blocks an operation.
+- **Tasks**: `- [<state>] <PHASE>.<N> - <title>` at column 0 under the
+  phase. Subtasks indent two spaces per level.
+- **Four checkbox states**: `[ ]` pending, `[x]` done, `[-]` won't-do,
+  `[>]` backlog. Parser accepts `[~]` as won't-do alias on read.
+- **Human-facing output** renders state as emoji: ⬜ pending, ✅ done,
+  ❌ won't-do, 🔜 backlog. PLAN.md itself always uses the bracket form.
+- **IDs are project-scoped and stable across archive sweeps**. Suffix-
+  positioning works: `7.2a` slots between `7.2` and `7.3` without renumbering.
+- **`# Backlog (not yet phased)`** (h1) pins to the bottom. Accepts flat
+  notes (`- **Subject** — added <date>.`) AND nested descoped subtrees
+  (`- X.1 - …` with indented children).
+
+### Conservative format dispatch + canonicalize
+
+Routine writes (TaskCreate, TaskUpdate, archive sweep) **preserve format
+per phase**. v1 plans with `- [ ] N.0 Title` anchors keep their anchor
+form; v2 plans with `## Phase X` headers keep their header form. Both
+shapes coexist in the same PLAN.md without friction.
+
+The single operation that flips everything to FORMATv2 canonical is:
+
+```sh
+claude-plan-bridge canonicalize
+```
+
+It promotes v1 anchors to v2 headers, normalizes task separators to
+` - ` hyphen-space, flips the backlog heading h2 → h1, and preserves any
+v1 phase-state checkbox marker as a prose breadcrumb
+(`*(was marked [x] in v1 — archive to make it official)*`) so nothing is
+silently lost. Idempotent — second run is a no-op.
+
+The parser tolerates human-friendly variants on read (bold-wrapped ids,
+em-dash separators, alphanumeric components, bare checkboxes); only
+canonicalize normalizes them.
 
 <details>
 <summary>Full JSON schema (output of <code>parse</code>)</summary>

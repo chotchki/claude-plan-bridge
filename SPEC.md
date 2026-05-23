@@ -26,25 +26,88 @@ Make PLAN.md the single source of truth. TaskCreate becomes a mirror, populated 
 - TaskCreate state is derived; it can be regenerated from PLAN.md at any time.
 - External edits to PLAN.md (made outside Claude) are reconciled at the next `UserPromptSubmit` hook fire.
 
-## PLAN.md schema (conventions)
+## PLAN.md schema (FORMATv2, Phase 36–39)
+
+Canonical form:
 
 ```
-- [ ] 1.0 Phase title
-  - [ ] 1.1 Task title
-    - [ ] 1.1.1 Subtask title
-    - [x] 1.1.2 Completed subtask
-  - [ ] 1.2 Another task
-- [ ] 2.0 Next phase
+## Phase AI - Studio dogfood *(depends on: AH)* *(prefer after: AG)*
+
+Intro paragraph at the phase level — context that belongs to the phase
+as a whole, not to any particular task.
+
+- [ ] AI.0 - Lock decisions
+- [ ] AI.1 - Implement driver
+  - [x] AI.1.0 - protocol
+  - [ ] AI.1.1 - transport
+    Indented prose under the subtask — task-level, stays with AI.1.1.
+
+Trailing prose — also phase-level, sweeps with the phase to PLAN_ARCHIVE.md.
+
+# Backlog (not yet phased)
+
+- **Drop the fs4 crate** — added 2026-05-22.
+- AI.2 - descoped from phase `AI` on 2026-05-22
 ```
 
-- Top-level: `- [ ] N.0 Phase title`
-- Nested tasks: `  - [ ] N.M Task title`
-- Leaf subtasks: `    - [ ] N.M.K Subtask title`
-- Two-space indent per level (parser accepts 2 or 4; normalizes to 2 on write).
-- Four checkbox states: `[ ]` pending, `[x]` done, `[-]` won't-do, `[>]` backlog. The parser also accepts `[~]` as an alias for won't-do on input but normalizes to `[-]` on write.
-- Archive treats `[x]`, `[-]`, and `[>]` equivalently — all three count as "resolved" for the phase-exit completeness check. The semantic differences are recorded in PLAN.md for the reader's benefit; they don't affect sweep behavior.
-- A phase exits only when every nested box is resolved. On exit, the phase (including any `[>]` lines) is swept to `PLAN_ARCHIVE.md`. The deferred work isn't lost: backlogging a leaf also appends a bullet under `## Backlog (not yet phased)` at the top of PLAN.md, which survives the sweep.
-- Sibling bullets without checkboxes are notes/context, not tasks.
+### Structure
+
+- **Phases** are markdown h2 headers: `## Phase <ID> - <Title>`. The id is
+  a bare alphanumeric prefix (`AI`, `AS`, `AO`, `1`, `1.0`). The title is
+  optional; the separator is hyphen-space.
+- **Tasks** under a phase sit at column 0: `- [<state>] <PHASE>.<N> -
+  <title>`. Subtasks indent two spaces per level: `<PHASE>.<N>.<K>`.
+- **Two checkbox separators tolerated on read** (` - `, ` — `, plain space);
+  canonical write is ` - ` hyphen-space, applied by the `canonicalize` verb.
+- **Four checkbox states**: `[ ]` pending, `[x]` done, `[-]` won't-do,
+  `[>]` backlog. Parser also accepts `[~]` as an alias for won't-do.
+- **Archive treats `[x]`, `[-]`, `[>]` equivalently** — all three count as
+  "resolved" for the phase-exit completeness check.
+- **Phases don't have state** under FORMATv2 (header form has no checkbox).
+  v1 plans that had `- [x] N.0 Title` anchors preserve the validation
+  marker as a prose breadcrumb on canonicalize: `*(was marked [x] in v1 —
+  archive to make it official)*`.
+
+### Phase dependency markers (informational)
+
+- `*(depends on: AB, AC)*` — hard sequencing hint. Reconcile surfaces it
+  loudly ("Phase AS depends on AR — not yet archived") when any listed
+  phase is still in `plan.phases`.
+- `*(prefer after: AB)*` — soft sequencing hint. Reconcile surfaces it
+  more gently ("Phase AM prefers AI landed first — soft hint").
+- Both are informational only. The bridge never blocks an operation
+  based on these markers; the agent decides what to do.
+
+### Phase-level prose
+
+Lines under a `## Phase X` header that are NOT indented under a task
+belong to the phase itself — they sweep with the phase to PLAN_ARCHIVE.md
+on archive. Indented prose under a task (` ` or more leading spaces) stays
+with that task as today.
+
+### Backlog section (`# Backlog (not yet phased)`)
+
+- Canonical heading is h1 `# Backlog (not yet phased)` (FORMATv2). Legacy
+  h2 `## Backlog` is accepted on read; `canonicalize` flips it to h1.
+- Lives as a first-class trailing region pinned to the bottom of PLAN.md.
+- Two entry shapes:
+  - Flat notes: `- **Subject** — added <date>.` (unphased work captured by
+    no-`plan_path` TaskCreate)
+  - Nested descoped subtrees:
+    ```
+    - AI.2 - descoped from phase `AI` on 2026-05-22
+      - AI.2.1 - subtask carried along
+        Prose continuation under the descoped subtask.
+    ```
+- Survives phase archive sweeps — the durable record of deferred work.
+
+### Conservative format dispatch
+
+Routine writes (TaskCreate, TaskUpdate, archive sweep) preserve the
+on-disk format per phase. A v1 anchor stays a v1 anchor; a v2 header
+stays a v2 header. The single operation that flips everything to
+FORMATv2 canonical is `plan-bridge canonicalize` — explicit, idempotent,
+itemizes every change in its report.
 
 ### Backlog state (`[>]`) semantics
 
@@ -145,25 +208,65 @@ Hook commands written by `init` / `upgrade-hooks` carry an absolute `--cwd <proj
 - **No `decision: "block"`, ever.** The bridge is a peripheral that decorates context; it must not gate the user's ability to submit prompts. Missing PLAN.md → silent no-op. Handler errors → non-blocking `additionalContext` carrying the error text. (Phase 32: an adopter session imploded with every prompt — including `ls` — blocked because an inherited wrong cwd made `./PLAN.md` unreadable, and the bridge converted the I/O error into `decision: "block"`. Never again.)
 - Hooks **never** call Claude tools directly. They emit guidance; Claude executes.
 
-## CLI surface (v1, stable)
+## CLI surface (FORMATv2)
 
 ```
 plan-bridge parse [PATH]
-plan-bridge writeback --event <create|update> --tool-input <json> [--tool-response <json>]
-plan-bridge reconcile [--task-list <json>]
-plan-bridge archive
-plan-bridge init
+plan-bridge writeback --event <create|update>            # PostToolUse hook handler
+plan-bridge reconcile                                     # UserPromptSubmit hook handler
+plan-bridge resume                                        # SessionStart hook handler
+plan-bridge archive [<PHASE>] [--descope-pending]         # bulk sweep / per-phase
+plan-bridge canonicalize [--dry-run]                      # explicit v1 → v2 flip
+plan-bridge backlog <plan_path>                           # defer (subtree-preserving)
+plan-bridge baseline                                      # seed state on install
+plan-bridge init [--force]                                # scaffold project
+plan-bridge upgrade-hooks                                 # re-merge hook config
+plan-bridge status                                        # health check
+plan-bridge phase-add <ID> [TITLE] [--depends-on X,Y] [--prefer-after A,B] [--after <ID>]
+plan-bridge phase-rename <ID> <new-title>
+plan-bridge phase-deps <ID> [--depends-on X,Y] [--prefer-after A,B]
 ```
 
-All commands read/write `PLAN.md` in the current working directory unless `--plan <PATH>` is passed.
+All project-scoped commands accept `--cwd <PATH>` (project root) and
+`--plan <PATH>` (explicit PLAN.md override).
+
+### Archive variants (Phase 38.4 / 38.5)
+
+- `plan-bridge archive` (no arg) — bulk sweep every fully-complete phase.
+  Silent skip on phases with pending leaves.
+- `plan-bridge archive <PHASE>` — per-phase archive. Errors loudly if the
+  named phase has any `[ ]` Pending leaves. Error message points at the
+  `--descope-pending` escape hatch.
+- `plan-bridge archive <PHASE> --descope-pending` — move pending leaves
+  into `# Backlog (not yet phased)` as `- <id> - descoped from phase
+  <PHASE> on <date>` notes, then archive the now-fully-resolved phase.
+
+### Phase verbs (Phase 38.1–38.3, 38.7)
+
+- `phase-add` creates a `## Phase X - Title` header with optional dep
+  markers and positional `--after` insertion (defaults to id-sort order).
+  TaskCreate's auto-anchor still handles the common "just start typing
+  tasks" path (and now synthesizes a v2 header, not a v1 anchor).
+- `phase-rename` rewrites a phase title. Refuses task ids loudly.
+- `phase-deps` replaces `depends_on` / `prefer_after` lists on a phase.
+  Either field is independently settable; empty array clears. Flips a v1
+  anchor to HeaderV2 form so the markers can render.
 
 ## MCP surface
 
-Same binary, `plan-bridge serve` entry point. Exposes:
+Same binary, `plan-bridge serve` entry point. Exposes the full verb set
+above as JSON-RPC tools:
 
-- `plan_add`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_backlog`, `plan_archive`, `plan_list`, `plan_phase_exit`, `plan_rename`.
+- `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`, `plan_backlog`
+- `plan_add` (leaf), `plan_add_phase`, `plan_rename` (any), `plan_rename_phase`
+- `plan_set_phase_deps`
+- `plan_archive` (bulk), `plan_phase_exit` (single, with optional
+  `descope_pending: bool`)
 
-Useful when TaskCreate's flat model is too lossy — e.g., explicit reordering, phase-exit gates, querying archival, deferring without going through `TaskUpdate(deleted)`. Adds Claude-callable tools that operate on PLAN.md natively without going through TaskCreate at all.
+Useful when TaskCreate's flat model is too lossy — e.g., explicit
+reordering, phase-exit gates, dep edits, deferring without going through
+`TaskUpdate(deleted)`. Operates on PLAN.md natively without going through
+TaskCreate at all.
 
 ## Language / tooling
 
