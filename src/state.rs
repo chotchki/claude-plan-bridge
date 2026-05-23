@@ -24,6 +24,15 @@ pub struct State {
     /// once the confirmation fires.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rehydration_announced: u32,
+    /// Phase 40.1: the currently focused phase id, set by
+    /// `plan_activate <PHASE>` and cleared by `plan_deactivate` (or when
+    /// the active phase archives). When `Some`, resume's rehydration
+    /// prompt scopes to leaves under that phase (40.3); reconcile
+    /// foregrounds its drift (40.5); writeback emits a soft warning when
+    /// a TaskCreate lands on a different phase (40.4). None = today's
+    /// behavior — all open leaves load, no scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_phase: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -37,6 +46,7 @@ impl Default for State {
             mappings: BTreeMap::new(),
             pending_rehydration: BTreeSet::new(),
             rehydration_announced: 0,
+            active_phase: None,
         }
     }
 }
@@ -127,6 +137,35 @@ impl State {
     pub fn plan_path(&self, task_id: &str) -> Option<&str> {
         self.mappings.get(task_id).map(|m| m.plan_path.as_str())
     }
+
+    /// Set the active phase. `Some(id)` focuses subsequent resume/reconcile
+    /// flows on the named phase; `None` clears focus (today's behavior).
+    pub fn set_active_phase(&mut self, phase_id: Option<String>) {
+        self.active_phase = phase_id;
+    }
+
+    /// Read the active phase id, if any.
+    pub fn active_phase(&self) -> Option<&str> {
+        self.active_phase.as_deref()
+    }
+
+    /// Phase-id check derived from a leaf's plan_path. A task with
+    /// `plan_path` `"AS.1.2"` is in phase `"AS"`; `"1.1"` is in phase
+    /// `"1"`. Returns `Some(true)` when the task is in the named active
+    /// phase, `Some(false)` otherwise, and `None` when no active phase is
+    /// set (callers treat `None` as "everything matches").
+    pub fn is_in_active_phase(&self, plan_path: &str) -> Option<bool> {
+        let active = self.active_phase.as_deref()?;
+        Some(phase_id_of(plan_path) == active)
+    }
+}
+
+/// Extract the phase id from a leaf's `plan_path` — the first
+/// dot-separated segment. `"AS.1.2"` → `"AS"`, `"1.1"` → `"1"`,
+/// `"AI"` → `"AI"` (already a bare phase id). Used by the activation
+/// path to determine whether a task belongs to the active phase.
+pub fn phase_id_of(plan_path: &str) -> &str {
+    plan_path.split('.').next().unwrap_or(plan_path)
 }
 
 /// Default `.claude/plan-bridge-state.json` next to the plan file.
@@ -230,5 +269,96 @@ mod tests {
         let plan = Path::new("/project/PLAN.md");
         let state = default_state_path_for(plan);
         assert_eq!(state, Path::new("/project/.claude/plan-bridge-state.json"));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 40.1: active_phase field + accessors
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_state_has_no_active_phase() {
+        let s = State::default();
+        assert_eq!(s.active_phase(), None);
+    }
+
+    #[test]
+    fn set_active_phase_roundtrips_via_save_load() {
+        let dir = scratch_dir();
+        let path = dir.join("state.json");
+        let mut s = State::default();
+        s.set_active_phase(Some("AS".to_string()));
+        s.save(&path).unwrap();
+        let loaded = State::load(&path).unwrap();
+        assert_eq!(loaded.active_phase(), Some("AS"));
+    }
+
+    #[test]
+    fn set_active_phase_none_clears() {
+        let mut s = State::default();
+        s.set_active_phase(Some("AI".to_string()));
+        assert_eq!(s.active_phase(), Some("AI"));
+        s.set_active_phase(None);
+        assert_eq!(s.active_phase(), None);
+    }
+
+    #[test]
+    fn is_in_active_phase_matches_first_segment() {
+        let mut s = State::default();
+        s.set_active_phase(Some("AS".to_string()));
+        // Direct task under AS.
+        assert_eq!(s.is_in_active_phase("AS.1"), Some(true));
+        // Deep subtask under AS.
+        assert_eq!(s.is_in_active_phase("AS.1.2.3"), Some(true));
+        // Same prefix as a string — but a different phase.
+        assert_eq!(s.is_in_active_phase("AR.1"), Some(false));
+        // Phase id itself.
+        assert_eq!(s.is_in_active_phase("AS"), Some(true));
+    }
+
+    #[test]
+    fn is_in_active_phase_with_no_focus_returns_none() {
+        let s = State::default();
+        assert_eq!(s.is_in_active_phase("AS.1"), None);
+        assert_eq!(s.is_in_active_phase("anything"), None);
+    }
+
+    #[test]
+    fn legacy_state_file_without_active_phase_field_loads_clean() {
+        // Pre-40 state files don't have the active_phase field. They should
+        // still load — serde default makes it None.
+        let dir = scratch_dir();
+        let path = dir.join("legacy_state.json");
+        let legacy_json = r#"{
+            "version": 1,
+            "mappings": {
+                "task-1": {
+                    "plan_path": "1.2.3",
+                    "last_synced_title": "Old task",
+                    "last_synced_state": "pending",
+                    "last_synced_annotations": []
+                }
+            }
+        }"#;
+        std::fs::write(&path, legacy_json).unwrap();
+        let loaded = State::load(&path).unwrap();
+        assert_eq!(loaded.active_phase(), None);
+        assert_eq!(loaded.plan_path("task-1"), Some("1.2.3"));
+    }
+
+    #[test]
+    fn save_omits_active_phase_field_when_none() {
+        // When active_phase is None, the field shouldn't appear in the
+        // serialized JSON — keeps state files clean for projects that
+        // never use activation.
+        let dir = scratch_dir();
+        let path = dir.join("state.json");
+        let mut s = State::default();
+        s.insert("t1", "1.0");
+        s.save(&path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("active_phase"),
+            "active_phase shouldn't appear when None:\n{contents}"
+        );
     }
 }
