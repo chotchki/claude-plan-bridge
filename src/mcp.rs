@@ -222,18 +222,12 @@ impl McpServer {
         if plan.find_phase(&id).is_some() {
             return Err(anyhow!("phase `{id}` already exists"));
         }
-        let new_phase = crate::ast::Phase {
-            id: id.clone(),
-            title: title.clone(),
-            state: NodeState::Pending,
-            id_style: crate::ast::IdStyle::Plain,
-            separator: crate::ast::Separator::Hyphen,
-            children: vec![],
-            annotations: vec![],
+        let new_phase = crate::ast::Phase::header_v2_with_deps(
+            id.clone(),
+            title.clone(),
             depends_on,
             prefer_after,
-            source: crate::ast::PhaseSource::HeaderV2,
-        };
+        );
         if let Some(after_id) = after {
             let pos = plan
                 .phases
@@ -304,8 +298,7 @@ impl McpServer {
             .ok_or_else(|| anyhow!("no phase with id `{id}` at top level"))?;
         // Force HeaderV2 form so the markers can be emitted — legacy v1
         // anchors don't have a place to render them.
-        phase.source = crate::ast::PhaseSource::HeaderV2;
-        phase.separator = crate::ast::Separator::Hyphen;
+        phase.ensure_header_v2();
         if let Some(deps) = new_depends_on {
             phase.depends_on = deps;
         }

@@ -455,18 +455,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("phase `{id}` already exists in PLAN.md");
             }
             let title_str = title.unwrap_or_default();
-            let new_phase = plan_bridge::ast::Phase {
-                id: id.clone(),
-                title: title_str.clone(),
-                state: plan_bridge::ast::NodeState::Pending,
-                id_style: plan_bridge::ast::IdStyle::Plain,
-                separator: plan_bridge::ast::Separator::Hyphen,
-                children: vec![],
-                annotations: vec![],
+            let new_phase = plan_bridge::ast::Phase::header_v2_with_deps(
+                id.clone(),
+                title_str.clone(),
                 depends_on,
                 prefer_after,
-                source: plan_bridge::ast::PhaseSource::HeaderV2,
-            };
+            );
             if let Some(after_id) = after {
                 let pos = plan
                     .phases
@@ -523,8 +517,7 @@ fn main() -> Result<()> {
             let phase = plan
                 .find_phase_mut(&id)
                 .ok_or_else(|| anyhow::anyhow!("no phase with id `{id}` at top level"))?;
-            phase.source = plan_bridge::ast::PhaseSource::HeaderV2;
-            phase.separator = plan_bridge::ast::Separator::Hyphen;
+            phase.ensure_header_v2();
             if let Some(deps) = depends_on {
                 phase.depends_on = deps.into_iter().filter(|s| !s.is_empty()).collect();
             }
@@ -622,16 +615,13 @@ fn main() -> Result<()> {
                 .filter_map(|spec| parse_task_spec(spec, &id))
                 .collect();
             let new_phase = plan_bridge::ast::Phase {
-                id: id.clone(),
-                title: title_str.clone(),
-                state: plan_bridge::ast::NodeState::Pending,
-                id_style: plan_bridge::ast::IdStyle::Plain,
-                separator: plan_bridge::ast::Separator::Hyphen,
                 children,
-                annotations: vec![],
-                depends_on,
-                prefer_after,
-                source: plan_bridge::ast::PhaseSource::HeaderV2,
+                ..plan_bridge::ast::Phase::header_v2_with_deps(
+                    id.clone(),
+                    title_str.clone(),
+                    depends_on,
+                    prefer_after,
+                )
             };
             let task_count = new_phase.children.len();
             if let Some(after_id) = after {

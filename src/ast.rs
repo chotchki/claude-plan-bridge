@@ -290,6 +290,52 @@ impl Phase {
         }
     }
 
+    /// Phase 41.3: build a fresh FORMATv2 phase header with canonical
+    /// defaults (state=Pending, id_style=Plain, separator=Hyphen,
+    /// source=HeaderV2; tasks/annotations/deps all empty). The minimal
+    /// constructor — for the "I want a new phase, deps come later" case.
+    pub fn header_v2(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            state: NodeState::Pending,
+            id_style: IdStyle::Plain,
+            separator: Separator::Hyphen,
+            children: Vec::new(),
+            annotations: Vec::new(),
+            depends_on: Vec::new(),
+            prefer_after: Vec::new(),
+            source: PhaseSource::HeaderV2,
+        }
+    }
+
+    /// Phase 41.3: build a fresh FORMATv2 phase header pre-populated with
+    /// dep markers — for the `plan_add_phase(id, title, depends_on,
+    /// prefer_after)` flow that wants every field at construction time.
+    pub fn header_v2_with_deps(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        depends_on: Vec<String>,
+        prefer_after: Vec<String>,
+    ) -> Self {
+        Self {
+            depends_on,
+            prefer_after,
+            ..Self::header_v2(id, title)
+        }
+    }
+
+    /// Phase 41.3: flip a legacy v1 anchor in-place to FORMATv2 header
+    /// form (source=HeaderV2, separator=Hyphen, id_style=Plain).
+    /// Idempotent on an already-HeaderV2 phase. Used by canonicalize and
+    /// by the dep-setting verbs (`phase-deps`, `plan_set_phase_deps`) —
+    /// those need HeaderV2 so their `*(depends on)*` markers can render.
+    pub fn ensure_header_v2(&mut self) {
+        self.source = PhaseSource::HeaderV2;
+        self.separator = Separator::Hyphen;
+        self.id_style = IdStyle::Plain;
+    }
+
     /// True when the serializer should emit this phase as a FORMATv2
     /// `## Phase X - Title` header rather than a v1 `- [ ] N.0` anchor.
     /// Driven by `Phase::source`; canonicalize is the explicit operation

@@ -58,9 +58,7 @@ pub fn canonicalize(plan_path: &Path, dry_run: bool) -> Result<CanonicalizeRepor
     let mut tasks_renormalized = 0;
     for phase in &mut plan.phases {
         if !matches!(phase.source, PhaseSource::HeaderV2) {
-            phase.source = PhaseSource::HeaderV2;
-            phase.id_style = crate::ast::IdStyle::Plain;
-            phase.separator = Separator::Hyphen;
+            phase.ensure_header_v2();
             phases_flipped += 1;
         }
         let mark = match phase.state {
