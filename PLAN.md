@@ -6,7 +6,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 - [ ] 36.0 FORMATv2 AST split + bidirectional parser
   - [x] 36.1 Add Phase + Backlog types to AST; refactor Plan struct
   - [x] 36.2 Refactor consumers (archive/reconcile/writeback/resume/mcp/baseline/canonicalize) for new AST
-  - [ ] 36.3 Parser recognizes `## Phase X - Title *(depends on: Y)*` + `*(prefer after: Z)*` headers
+  - [x] 36.3 Parser recognizes `## Phase X - Title *(depends on: Y)*` + `*(prefer after: Z)*` headers
   - [ ] 36.4 Parser recognizes `# Backlog (not yet phased)` h1 + nested descoped subtrees
   - [ ] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
   - [ ] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/

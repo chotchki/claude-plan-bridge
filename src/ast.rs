@@ -393,14 +393,19 @@ pub fn looks_like_markdown_header(text: &str) -> bool {
     (1..=6).contains(&hashes) && matches!(trimmed.chars().nth(hashes), Some(' '))
 }
 
-/// True for the canonical bridge-owned Backlog heading (`## Backlog ...` at h2).
-/// Deliberately conservative: matches `## Backlog (not yet phased)` but NOT the
-/// h3 `### Backlog (rehomed from AA)` subsection (different `#` count) nor a
-/// `## Sustainment`-style sibling — those are operator-curated and must not be
-/// swept into the bridge's bottom section. The `## ` prefix (two hashes + a
-/// space) is what excludes `### Backlog`.
+/// True for the canonical bridge-owned Backlog heading. Accepts both
+/// `# Backlog (not yet phased)` (FORMATv2 canonical, h1) and the legacy
+/// `## Backlog (not yet phased)` (h2 — written by pre-37 versions of the
+/// bridge). Phase 37.2 will flip the serializer to emit h1.
+///
+/// Deliberately conservative: matches the bridge's own heading but NOT the
+/// h3 `### Backlog (rehomed from AA)` subsection nor a `## Sustainment`-style
+/// sibling — those are operator-curated and must not be swept into the
+/// bridge's bottom section. Exact prefix match (`# ` or `## ` followed by
+/// `Backlog`) is what keeps `### Backlog` and `#### …` out.
 pub fn is_backlog_heading(line: &str) -> bool {
-    line.trim_start().starts_with("## Backlog")
+    let trimmed = line.trim_start();
+    trimmed.starts_with("# Backlog") || trimmed.starts_with("## Backlog")
 }
 
 /// Parse `### Phase N — Title` style headers OR the more general
@@ -868,9 +873,14 @@ impl Plan {
     }
 }
 
-/// Pull every `## Backlog (not yet phased)` block out of `lines` (a preamble),
-/// pushing each bullet line into `out`. A block runs from the heading to the
-/// next markdown heading / `---` / EOF. Handles multiple sibling sections.
+/// Pull every backlog block (h1 `# Backlog (not yet phased)` or legacy h2
+/// `## Backlog (not yet phased)`) out of `lines` (a preamble), pushing each
+/// content line into `out`. A block runs from the heading to the next
+/// markdown heading / `---` / EOF. Handles multiple sibling sections.
+///
+/// Phase 36.4: preserves indented continuation lines under bullets, not just
+/// the bullets themselves — so a descoped subtree (`- X.1 - Foo\n  - X.1.1 -
+/// Sub\n    Prose for the task`) round-trips intact through consolidation.
 fn extract_backlog_from_preamble(lines: &mut Vec<String>, out: &mut Vec<String>) {
     loop {
         let Some(start) = lines.iter().position(|l| is_backlog_heading(l)) else {
@@ -884,9 +894,17 @@ fn extract_backlog_from_preamble(lines: &mut Vec<String>, out: &mut Vec<String>)
             end += 1;
         }
         for line in &lines[start + 1..end] {
-            if line.trim_start().starts_with('-') {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('-') {
+                out.push(line.clone());
+            } else if line.starts_with(char::is_whitespace) && !trimmed.is_empty() {
+                // Indented continuation under a previous bullet — e.g. prose
+                // under a descoped subtask. Preserve verbatim so nested
+                // subtrees round-trip intact.
                 out.push(line.clone());
             }
+            // Else: blank line or stray column-0 prose — drop. The serializer
+            // re-inserts exactly one blank between bullets.
         }
         lines.drain(start..end);
         // Collapse a now-doubled blank where the removed block sat, so repeated

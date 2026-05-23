@@ -1253,6 +1253,110 @@ Some prose.
         assert_eq!(plan.phases[1].depends_on, vec!["AI"]);
     }
 
+    // -----------------------------------------------------------------
+    // Phase 36.4: FORMATv2 backlog h1 + nested descoped subtrees
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn h1_backlog_heading_is_recognized_on_read() {
+        let input = "\
+- [ ] 1.0 Phase
+
+# Backlog (not yet phased)
+
+- **Item A** — added 2026-05-19.
+- **Item B** — deferred from 1.2 on 2026-05-19.
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        // h1 backlog peeled into plan.backlog just like h2 did.
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **Item A** — added 2026-05-19.",
+                "- **Item B** — deferred from 1.2 on 2026-05-19.",
+            ]
+        );
+    }
+
+    #[test]
+    fn h1_backlog_preserves_nested_descoped_subtrees() {
+        // FORMATv2 sweep-on-archive puts descoped phase contents into Backlog
+        // as nested plain bullets with optional continuation prose. All lines
+        // must round-trip verbatim.
+        let input = "\
+- [ ] 1.0 Phase
+
+# Backlog (not yet phased)
+
+- Plain backlog item
+- X.1 - Descoped item from a swept phase
+  - X.1.1 - Subtask swept with parent to backlog
+    Prose for the task
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- Plain backlog item",
+                "- X.1 - Descoped item from a swept phase",
+                "  - X.1.1 - Subtask swept with parent to backlog",
+                "    Prose for the task",
+            ],
+            "nested descoped subtree must round-trip line-for-line"
+        );
+    }
+
+    #[test]
+    fn h1_backlog_in_preamble_consolidates_to_field() {
+        // Mid-document `# Backlog` (above the phases) should consolidate into
+        // plan.backlog the same way the legacy h2 form did.
+        let input = "\
+# Title
+
+# Backlog (not yet phased)
+
+- **Early note** — added 2026-05-19.
+- X.1 - Descoped from elsewhere
+  - X.1.1 - subtask
+    notes
+
+- [ ] 1.0 Phase
+";
+        let mut plan = parse(input).unwrap();
+        // Preamble form isn't auto-lifted (only trailing blocks are).
+        assert!(plan.backlog.is_empty());
+        let swept = plan.consolidate_backlog();
+        assert_eq!(swept, 4);
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **Early note** — added 2026-05-19.",
+                "- X.1 - Descoped from elsewhere",
+                "  - X.1.1 - subtask",
+                "    notes",
+            ]
+        );
+        // Heading removed from preamble.
+        assert!(!plan.preamble.iter().any(|l| crate::ast::is_backlog_heading(l)));
+    }
+
+    #[test]
+    fn h2_legacy_backlog_still_recognized() {
+        // Forward-compat: old bridge versions wrote `## Backlog`; the parser
+        // must keep accepting it on read so installed projects don't break
+        // when the bridge upgrades.
+        let input = "\
+- [ ] 1.0 Phase
+
+## Backlog (not yet phased)
+
+- **Legacy** — added 2026-05-19.
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.backlog, vec!["- **Legacy** — added 2026-05-19."]);
+    }
+
     #[test]
     fn v2_phase_prose_before_first_task_lands_as_annotation() {
         let input = "\
