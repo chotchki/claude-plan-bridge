@@ -1508,6 +1508,135 @@ Closing prose.
         );
     }
 
+    // -----------------------------------------------------------------
+    // Phase 36.6: end-to-end fixture coverage. `tests/fixtures/v2_mixed.md`
+    // exercises every FORMATv2 feature in one document (v1 anchor + v2
+    // header phases, depends_on, prefer_after, phase-level prose, nested
+    // tasks, all four states, h1 backlog with nested descoped subtrees).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_v2_mixed_fixture_with_all_features() {
+        let input = include_str!("../tests/fixtures/v2_mixed.md");
+        let plan = parse(input).unwrap();
+
+        // 5 phases total: legacy 1.0, then AI / AQ / AM / AS.
+        let ids: Vec<&str> = plan.phases.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["1.0", "AI", "AQ", "AM", "AS"]);
+
+        // 1.0 is a legacy v1 anchor with all four states represented.
+        let legacy = &plan.phases[0];
+        assert_eq!(legacy.state, NodeState::Done);
+        assert_eq!(legacy.children.len(), 3);
+        assert_eq!(legacy.children[0].state, NodeState::Done);
+        assert_eq!(legacy.children[1].state, NodeState::WontDo);
+        assert_eq!(legacy.children[2].state, NodeState::Backlog);
+        assert!(
+            legacy.depends_on.is_empty() && legacy.prefer_after.is_empty(),
+            "v1 anchors have no FORMATv2 metadata"
+        );
+
+        // AI: header phase, intro prose, between-task prose, trailing prose.
+        let ai = &plan.phases[1];
+        assert_eq!(ai.title, "Studio dogfood");
+        assert_eq!(ai.children.len(), 4);
+        let phase_text_blobs: Vec<&str> = ai
+            .annotations
+            .iter()
+            .filter_map(|a| match a {
+                Annotation::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            phase_text_blobs.iter().any(|t| t.contains("Intro paragraph")),
+            "intro prose at phase: {phase_text_blobs:?}"
+        );
+        assert!(
+            phase_text_blobs.iter().any(|t| t.contains("Prose between tasks")),
+            "between-task prose at phase: {phase_text_blobs:?}"
+        );
+        assert!(
+            phase_text_blobs.iter().any(|t| t.contains("Trailing prose for Phase AI")),
+            "trailing prose at phase: {phase_text_blobs:?}"
+        );
+
+        // AI.1.1 carries the indented (task-level) prose, NOT the phase.
+        let ai_1 = &ai.children[1];
+        let ai_1_1 = &ai_1.children[1];
+        assert_eq!(ai_1_1.id, "AI.1.1");
+        assert!(
+            ai_1_1
+                .annotations
+                .iter()
+                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Indented prose"))),
+            "indented task-level prose stays with the task"
+        );
+
+        // AQ has depends_on=[AP], no prefer_after.
+        let aq = &plan.phases[2];
+        assert_eq!(aq.depends_on, vec!["AP"]);
+        assert!(aq.prefer_after.is_empty());
+
+        // AM has prefer_after=[AI], no depends_on.
+        let am = &plan.phases[3];
+        assert!(am.depends_on.is_empty());
+        assert_eq!(am.prefer_after, vec!["AI"]);
+
+        // AS has both markers.
+        let r#as = &plan.phases[4];
+        assert_eq!(r#as.depends_on, vec!["AR", "AQ"]);
+        assert_eq!(r#as.prefer_after, vec!["AM"]);
+
+        // Backlog: h1 form, both flat notes and nested descoped subtrees.
+        assert_eq!(plan.backlog.len(), 6);
+        assert!(plan.backlog.iter().any(|l| l.contains("**Plain note**")));
+        assert!(plan.backlog.iter().any(|l| l.contains("**Deferred from a phase**")));
+        assert!(plan.backlog.iter().any(|l| l == "- X.1 - Descoped item from an archived phase"));
+        assert!(plan
+            .backlog
+            .iter()
+            .any(|l| l == "  - X.1.1 - Subtask carried over with structure intact"));
+        assert!(plan
+            .backlog
+            .iter()
+            .any(|l| l == "    Prose continuation under the descoped subtask."));
+        assert!(plan.backlog.iter().any(|l| l == "- Y.7 - Another descoped subtree"));
+    }
+
+    #[test]
+    #[ignore = "v2 round-trip is broken until Phase 37 lands the `## Phase X - Title` \
+                serializer — 36.1's write_phase emits v1 anchor form, and bare-alpha v2 \
+                ids (`AI`, `AQ`) aren't valid v1 ids (no dot, not all digits), so they \
+                re-parse as bare-checkbox titles. Phase 37.6 re-enables this test."]
+    fn v2_mixed_fixture_round_trips_through_serialize() {
+        let input = include_str!("../tests/fixtures/v2_mixed.md");
+        let plan1 = parse(input).unwrap();
+        let out = crate::serializer::serialize(&plan1);
+        let plan2 = parse(&out).unwrap();
+        assert_eq!(
+            plan1, plan2,
+            "AST must be stable across parse → serialize → parse"
+        );
+    }
+
+    #[test]
+    fn v2_mixed_fixture_v1_anchor_round_trips_in_isolation() {
+        // The v1-only slice of the fixture (Phase 1.0 with its three states)
+        // DOES round-trip cleanly through the current serializer, since v1
+        // anchors emit and re-parse as `- [ ] N.0 Title` checkboxes.
+        let input = "\
+- [x] 1.0 Legacy v1 anchor phase
+  - [x] 1.1 done task
+  - [-] 1.2 won't-do task
+  - [>] 1.3 backlog task
+";
+        let plan1 = parse(input).unwrap();
+        let out = crate::serializer::serialize(&plan1);
+        let plan2 = parse(&out).unwrap();
+        assert_eq!(plan1, plan2);
+    }
+
     #[test]
     fn v1_anchor_column0_prose_keeps_legacy_stack_attachment() {
         // v1 plans never set current_phase, so column-0 prose mid-tree still

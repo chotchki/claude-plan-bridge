@@ -8,7 +8,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 36.2 Refactor consumers (archive/reconcile/writeback/resume/mcp/baseline/canonicalize) for new AST
   - [x] 36.3 Parser recognizes `## Phase X - Title *(depends on: Y)*` + `*(prefer after: Z)*` headers
   - [x] 36.4 Parser recognizes `# Backlog (not yet phased)` h1 + nested descoped subtrees
-  - [ ] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
+  - [x] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
   - [ ] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
 - [ ] 37.0 FORMATv2 write path (canonicalize on first write)
   - [ ] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
