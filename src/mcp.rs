@@ -95,6 +95,8 @@ impl McpServer {
             "plan_rename" => self.tool_plan_rename(&args),
             "plan_rename_phase" => self.tool_plan_rename_phase(&args),
             "plan_set_phase_deps" => self.tool_plan_set_phase_deps(&args),
+            "plan_activate" => self.tool_plan_activate(&args),
+            "plan_deactivate" => self.tool_plan_deactivate(&args),
             other => Err(anyhow!("unknown tool: {other}")),
         }
     }
@@ -316,6 +318,74 @@ impl McpServer {
         );
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&summary))
+    }
+
+    /// Phase 40.2: focus subsequent resume/reconcile/writeback flows on a
+    /// single phase. Persists `state.active_phase = Some(id)`. Surfaces any
+    /// unmet hard `*(depends on: ...)*` markers in the response so the agent
+    /// sees the sequencing constraint up front (40.5).
+    fn tool_plan_activate(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "id")?;
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let plan = parse(&text)?;
+        let phase = plan
+            .find_phase(&id)
+            .ok_or_else(|| anyhow!("no phase with id `{id}` at top level"))?;
+
+        // Note unmet hard deps on the response so the agent sees the
+        // sequencing constraint without a separate reconcile round-trip.
+        let active_ids: std::collections::HashSet<&str> =
+            plan.phases.iter().map(|p| p.id.as_str()).collect();
+        let unmet_deps: Vec<&String> = phase
+            .depends_on
+            .iter()
+            .filter(|d| active_ids.contains(d.as_str()))
+            .collect();
+        let dep_note = if unmet_deps.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (NOTE: depends on {} — not yet archived)",
+                unmet_deps
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        let state_path = crate::state::default_state_path_for(&self.plan_path);
+        let mut state = crate::state::State::load(&state_path)?;
+        let prior = state.active_phase().map(String::from);
+        state.set_active_phase(Some(id.clone()));
+        state.save(&state_path)?;
+
+        let prior_note = match prior {
+            Some(p) if p == id => String::from(" (already active)"),
+            Some(p) => format!(" (was active: `{p}`)"),
+            None => String::new(),
+        };
+        Ok(tool_text_result(&format!(
+            "activated phase `{id}`{prior_note}{dep_note}"
+        )))
+    }
+
+    /// Phase 40.2: clear any active phase focus. After this, resume +
+    /// reconcile + writeback behave as if activation had never been set
+    /// (load all open leaves, no cross-phase warnings).
+    fn tool_plan_deactivate(&self, _args: &Value) -> Result<Value> {
+        let state_path = crate::state::default_state_path_for(&self.plan_path);
+        let mut state = crate::state::State::load(&state_path)?;
+        match state.active_phase().map(String::from) {
+            Some(prior) => {
+                state.set_active_phase(None);
+                state.save(&state_path)?;
+                Ok(tool_text_result(&format!(
+                    "deactivated focus (was `{prior}`)"
+                )))
+            }
+            None => Ok(tool_text_result("no active phase to deactivate (no-op)")),
+        }
     }
 
     /// Mark a phase (or any non-leaf) as ready to exit: validate every leaf in
@@ -579,6 +649,27 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_activate",
+                "description": "Focus the bridge on one phase: subsequent SessionStart rehydration loads only that phase's leaves, reconcile foregrounds its drift, and writeback emits a soft warning on cross-phase TaskCreates. Surfaces any unmet `*(depends on)*` markers in the response so the agent sees sequencing constraints up front. Persists in state.json — survives /clear.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Phase id (e.g. `AS`, `1.0`)."}
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_deactivate",
+                "description": "Clear the active phase focus. After this, resume + reconcile + writeback behave as if activation had never been set. No-op when nothing was active.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_archive",
                 "description": "Sweep every fully-complete top-level phase to PLAN_ARCHIVE.md. Optional `dry_run` and `date` (YYYY-MM-DD) arguments.",
                 "inputSchema": {
@@ -721,6 +812,10 @@ mod tests {
             "plan_archive",
             "plan_phase_exit",
             "plan_rename",
+            "plan_rename_phase",
+            "plan_set_phase_deps",
+            "plan_activate",
+            "plan_deactivate",
         ] {
             assert!(names.contains(expected), "missing {expected}: {names:?}");
         }
@@ -886,6 +981,126 @@ mod tests {
             after.contains("## Phase 1.0 - Legacy phase *(depends on: 0.0)*"),
             "phase flipped to v2 form with marker:\n{after}"
         );
+    }
+
+    #[test]
+    fn plan_activate_sets_state_active_phase_and_notes_unmet_deps() {
+        let (_, s) = scratch_plan(
+            "## Phase AR - View rollout\n\n- [ ] AR.0 plan\n\n## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "AS"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("activated phase `AS`"));
+        assert!(
+            text.contains("depends on AR"),
+            "unmet hard dep surfaced: {text}"
+        );
+        // Verify the state file actually persisted.
+        let state_path = crate::state::default_state_path_for(&s.plan_path);
+        let state = crate::state::State::load(&state_path).unwrap();
+        assert_eq!(state.active_phase(), Some("AS"));
+    }
+
+    #[test]
+    fn plan_activate_no_unmet_dep_note_when_deps_already_archived() {
+        // AS depends on AR, but only AS is in the plan — AR is implicitly
+        // archived. No "depends on" suffix in the response.
+        let (_, s) = scratch_plan(
+            "## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "AS"}
+            }}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("activated phase `AS`"));
+        assert!(
+            !text.contains("depends on"),
+            "no unmet-dep note when deps already archived: {text}"
+        );
+    }
+
+    #[test]
+    fn plan_activate_refuses_unknown_phase() {
+        let (_, s) = scratch_plan("## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "ZZ"}
+            }}),
+        );
+        let err = resp.get("error").expect("ZZ doesn't exist");
+        assert!(
+            err["message"].as_str().unwrap_or("").contains("ZZ"),
+            "error mentions the bad id"
+        );
+    }
+
+    #[test]
+    fn plan_activate_when_already_active_is_silent_noop() {
+        let (_, s) = scratch_plan("## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        // First activation.
+        rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "AI"}
+            }}),
+        );
+        // Re-activate same phase.
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "AI"}
+            }}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("already active"),
+            "second activate of same id reports no-op: {text}"
+        );
+    }
+
+    #[test]
+    fn plan_deactivate_clears_focus() {
+        let (_, s) = scratch_plan("## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_activate", "arguments": {"id": "AI"}
+            }}),
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "plan_deactivate", "arguments": {}
+            }}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("deactivated"));
+        let state_path = crate::state::default_state_path_for(&s.plan_path);
+        let state = crate::state::State::load(&state_path).unwrap();
+        assert_eq!(state.active_phase(), None);
+    }
+
+    #[test]
+    fn plan_deactivate_with_no_active_phase_is_no_op() {
+        let (_, s) = scratch_plan("## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_deactivate", "arguments": {}
+            }}),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("no active phase"));
     }
 
     #[test]

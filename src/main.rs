@@ -214,6 +214,24 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         prefer_after: Option<Vec<String>>,
     },
+    /// Focus the bridge on one phase: subsequent SessionStart rehydration
+    /// loads only that phase's leaves, reconcile foregrounds its drift,
+    /// and writeback emits a soft warning on cross-phase TaskCreates.
+    /// Persists in `.claude/plan-bridge-state.json` — survives /clear and
+    /// outlives the Claude session. Surfaces any unmet `*(depends on)*`
+    /// markers so sequencing constraints land up front.
+    Activate {
+        #[command(flatten)]
+        project: ProjectArgs,
+        id: String,
+    },
+    /// Clear the active phase focus. After this, resume + reconcile +
+    /// writeback behave as if activation had never been set. No-op when
+    /// nothing was active.
+    Deactivate {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -488,6 +506,64 @@ fn main() -> Result<()> {
             println!(
                 "claude-plan-bridge: updated deps for phase `{id}`: depends_on={deps:?}, prefer_after={after:?}"
             );
+        }
+        Command::Activate { project, id } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let plan = plan_bridge::parser::parse(&text)?;
+            let phase = plan
+                .find_phase(&id)
+                .ok_or_else(|| anyhow::anyhow!("no phase with id `{id}` at top level"))?;
+            // Compute unmet hard deps for the activation report.
+            let active_ids: std::collections::HashSet<&str> =
+                plan.phases.iter().map(|p| p.id.as_str()).collect();
+            let unmet: Vec<&String> = phase
+                .depends_on
+                .iter()
+                .filter(|d| active_ids.contains(d.as_str()))
+                .collect();
+            let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+            let mut state = plan_bridge::state::State::load(&state_path)?;
+            let prior = state.active_phase().map(String::from);
+            state.set_active_phase(Some(id.clone()));
+            state.save(&state_path)?;
+            match prior {
+                Some(p) if p == id => println!(
+                    "claude-plan-bridge: phase `{id}` already active (no-op)"
+                ),
+                Some(p) => println!(
+                    "claude-plan-bridge: activated phase `{id}` (was `{p}`)"
+                ),
+                None => println!("claude-plan-bridge: activated phase `{id}`"),
+            }
+            if !unmet.is_empty() {
+                let list = unmet
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "  NOTE: depends on {list} — not yet archived (informational, not a gate)"
+                );
+            }
+        }
+        Command::Deactivate { project } => {
+            let plan_path = project.plan_path();
+            let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+            let mut state = plan_bridge::state::State::load(&state_path)?;
+            match state.active_phase().map(String::from) {
+                Some(prior) => {
+                    state.set_active_phase(None);
+                    state.save(&state_path)?;
+                    println!(
+                        "claude-plan-bridge: deactivated focus (was `{prior}`)"
+                    );
+                }
+                None => {
+                    println!("claude-plan-bridge: no active phase to deactivate (no-op)");
+                }
+            }
         }
         Command::Archive {
             project,
