@@ -6,16 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn scratch_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "plan-bridge-scaffold-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    plan_bridge::test_utils::scratch_dir("scaffold")
 }
 
 fn binary() -> PathBuf {

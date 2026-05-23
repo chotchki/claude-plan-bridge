@@ -656,26 +656,10 @@ mod tests {
     use crate::state::default_state_path_for;
     use std::path::PathBuf;
 
+    use crate::test_utils::write_plan;
+
     fn scratch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "plan-bridge-writeback-{}-{}",
-            std::process::id(),
-            uniq()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn uniq() -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        N.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn write_plan(dir: &Path, contents: &str) -> PathBuf {
-        let path = dir.join("PLAN.md");
-        std::fs::write(&path, contents).unwrap();
-        path
+        crate::test_utils::scratch_dir("writeback")
     }
 
     fn payload_for_create(task_id: &str, subject: &str, plan_path: Option<&str>) -> HookPayload {

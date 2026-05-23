@@ -585,26 +585,10 @@ mod tests {
     use crate::state::{Mapping, State, default_state_path_for};
     use std::path::PathBuf;
 
+    use crate::test_utils::write_plan;
+
     fn scratch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "plan-bridge-reconcile-{}-{}",
-            std::process::id(),
-            uniq()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn uniq() -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        N.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn write_plan(dir: &Path, contents: &str) -> PathBuf {
-        let p = dir.join("PLAN.md");
-        std::fs::write(&p, contents).unwrap();
-        p
+        crate::test_utils::scratch_dir("reconcile")
     }
 
     fn write_state(plan: &Path, mapping_pairs: &[(&str, Mapping)]) {

@@ -13,5 +13,6 @@ pub mod reconcile;
 pub mod resume;
 pub mod serializer;
 pub mod state;
+pub mod test_utils;
 pub mod today;
 pub mod writeback;

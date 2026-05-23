@@ -92,29 +92,11 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::write_plan;
     use std::path::PathBuf;
 
     fn scratch_dir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "plan-bridge-backlog-{}-{}",
-            std::process::id(),
-            uuid_like()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    fn uuid_like() -> String {
-        format!("{:?}", std::time::SystemTime::now())
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect()
-    }
-
-    fn write_plan(dir: &Path, body: &str) -> PathBuf {
-        let p = dir.join("PLAN.md");
-        std::fs::write(&p, body).unwrap();
-        p
+        crate::test_utils::scratch_dir("backlog")
     }
 
     #[test]

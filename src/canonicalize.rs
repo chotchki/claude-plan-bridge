@@ -145,26 +145,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn scratch_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "plan-bridge-canonicalize-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-            N.fetch_add(1, Ordering::Relaxed),
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
+    use crate::test_utils::write_plan;
 
-    fn write_plan(dir: &Path, body: &str) -> PathBuf {
-        let p = dir.join("PLAN.md");
-        std::fs::write(&p, body).unwrap();
-        p
+    fn scratch_dir() -> PathBuf {
+        crate::test_utils::scratch_dir("canonicalize")
     }
 
     #[test]

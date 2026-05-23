@@ -82,19 +82,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "plan-bridge-audit-{}-{}",
-            std::process::id(),
-            uniq()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn uniq() -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        N.fetch_add(1, Ordering::Relaxed)
+        crate::test_utils::scratch_dir("audit")
     }
 
     #[test]

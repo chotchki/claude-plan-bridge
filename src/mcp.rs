@@ -758,19 +758,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch_plan(contents: &str) -> (PathBuf, McpServer) {
-        let dir =
-            std::env::temp_dir().join(format!("plan-bridge-mcp-{}-{}", std::process::id(), uniq()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("PLAN.md");
-        std::fs::write(&p, contents).unwrap();
+        let p = crate::test_utils::write_plan(
+            &crate::test_utils::scratch_dir("mcp"),
+            contents,
+        );
         let s = McpServer::new(p.clone());
         (p, s)
-    }
-
-    fn uniq() -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        N.fetch_add(1, Ordering::Relaxed)
     }
 
     fn rpc(server: &McpServer, json: Value) -> Value {

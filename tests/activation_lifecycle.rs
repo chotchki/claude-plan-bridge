@@ -22,16 +22,7 @@ use plan_bridge::ast::NodeState;
 use plan_bridge::state::{Mapping, State};
 
 fn scratch_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "plan-bridge-40-e2e-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    plan_bridge::test_utils::scratch_dir("40-e2e")
 }
 
 #[test]

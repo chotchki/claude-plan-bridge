@@ -78,15 +78,7 @@ fn quicksight_plan_canonicalize_preserves_ids() {
 
     // Copy to a scratch dir — canonicalize writes back, and we don't want
     // to mutate the user's real file.
-    let scratch = std::env::temp_dir().join(format!(
-        "plan-bridge-quicksight-dogfood-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    ));
-    std::fs::create_dir_all(&scratch).expect("create scratch");
+    let scratch = plan_bridge::test_utils::scratch_dir("quicksight-dogfood");
     let dst: std::path::PathBuf = scratch.join("PLAN.md");
     std::fs::copy(&src, &dst).expect("copy quicksight PLAN.md to scratch");
 
