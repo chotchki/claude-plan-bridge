@@ -6,10 +6,13 @@
 //! Loud-failure contract (per Phase 8): if the lock can't be acquired within
 //! the timeout, we return Err. The CLI surfaces that as a `decision: "block"`
 //! hook output — never silent on busy, never stale-data success.
-
+//!
+//! Phase 41.1: uses `std::fs::File::try_lock` / `unlock` (stabilized in Rust
+//! 1.89, June 2025) instead of the `fs4` crate. fs4 1.0 was a thin polyfill
+//! around the same std APIs once they stabilized; dropping it tightens the
+//! dependency tree without changing semantics. MSRV: 1.89.
 use anyhow::{Context, Result};
-use fs4::fs_std::FileExt;
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -40,7 +43,8 @@ where
     acquire_with_timeout(&lock_file, timeout)
         .with_context(|| format!("acquire lock {}", lock_path.display()))?;
     let result = f();
-    // fs4 releases the advisory lock when the File handle is dropped.
+    // std::fs::File releases the advisory lock when the handle is dropped
+    // — same semantics as the old fs4 path.
     drop(lock_file);
     result
 }
@@ -54,9 +58,9 @@ fn lock_path_for(state_path: &Path) -> PathBuf {
 fn acquire_with_timeout(f: &std::fs::File, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
-        match f.try_lock_exclusive() {
-            Ok(true) => return Ok(()),
-            Ok(false) => {
+        match f.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {
                 if start.elapsed() >= timeout {
                     anyhow::bail!(
                         "claude-plan-bridge: writeback lock busy after {:?} — another writeback is in-flight",
@@ -65,8 +69,8 @@ fn acquire_with_timeout(f: &std::fs::File, timeout: Duration) -> Result<()> {
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
-            Err(e) => {
-                return Err(anyhow::Error::from(e).context("try_lock_exclusive"));
+            Err(TryLockError::Error(e)) => {
+                return Err(anyhow::Error::from(e).context("try_lock"));
             }
         }
     }
@@ -122,10 +126,9 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        assert!(
-            holder.try_lock_exclusive().unwrap(),
-            "preconditions: holder grabs lock"
-        );
+        holder
+            .try_lock()
+            .expect("preconditions: holder grabs lock");
 
         // Short timeout so the test is fast.
         let err = with_state_lock(&state, Duration::from_millis(150), || Ok(()))
@@ -134,7 +137,7 @@ mod tests {
         assert!(msg.contains("busy"), "got: {msg}");
 
         // Release and confirm next acquire succeeds.
-        FileExt::unlock(&holder).unwrap();
+        holder.unlock().unwrap();
         drop(holder);
         with_state_lock(&state, DEFAULT_TIMEOUT, || Ok(())).unwrap();
     }
