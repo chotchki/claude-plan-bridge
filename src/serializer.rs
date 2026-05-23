@@ -416,14 +416,22 @@ Prose.
     }
 
     #[test]
-    fn canonicalize_flattens_separator_to_space() {
+    fn standardize_flattens_bold_only_keeps_separator() {
+        // Phase 37 conservative model: `standardize_to_canonical` only
+        // strips bold-wrapped IDs. Separator stays per-node — the explicit
+        // `canonicalize` verb (37.5) is what flips ` ` / ` — ` to ` - `.
+        // Routine archive paths that call standardize internally don't
+        // change a v1 plan's separator formatting.
         let input = "- [x] **X.4.a.1** — Studio severability test\n";
         let plan = parse(input).unwrap();
         let (canonical, _) = plan.standardize_to_canonical().unwrap();
         let out = serialize(&canonical);
-        assert!(!out.contains('—'), "em-dash should be flattened:\n{out}");
         assert!(!out.contains("**"), "bold should be flattened:\n{out}");
-        assert!(out.contains("X.4.a.1 Studio severability test"));
+        // Separator preserved (em-dash → em-dash).
+        assert!(
+            out.contains("X.4.a.1 — Studio severability test"),
+            "em-dash preserved through standardize:\n{out}"
+        );
     }
 
     #[test]

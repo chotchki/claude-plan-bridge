@@ -553,11 +553,32 @@ fn strip_and_collect_phase_headers(
 }
 
 fn flatten_id_style(node: &mut Node) {
+    // Narrow normalization: only strips bold-wrapped IDs. Separator stays
+    // per-node (preserved by routine archive/writeback). The full FORMATv2
+    // flip — separator → hyphen-space, phase source → HeaderV2, backlog
+    // heading → h1 — lives in the explicit `canonicalize` verb (37.5),
+    // which routine paths don't trigger.
     node.id_style = IdStyle::Plain;
-    node.separator = Separator::Space;
     for child in &mut node.children {
         flatten_id_style(child);
     }
+}
+
+/// Phase-tier wrapper for [count_phase_headers_in_subtree] — checks the
+/// phase's own annotations plus its task subtree.
+fn phase_header_count(phase: &Phase) -> usize {
+    let here = phase
+        .annotations
+        .iter()
+        .filter(
+            |a| matches!(a, Annotation::Text { text, .. } if parse_phase_header(text).is_some()),
+        )
+        .count();
+    here + phase
+        .children
+        .iter()
+        .map(count_phase_headers_in_subtree)
+        .sum::<usize>()
 }
 
 fn count_phase_headers_in_subtree(node: &Node) -> usize {
@@ -740,13 +761,31 @@ impl Plan {
         // preserved in-place; only `##` / `###` headers matching
         // `<id> — Title` get promoted to canonical phase checkboxes.
 
-        // Convert every existing Phase back into its Node-shaped form so the
-        // header-stripping + promotion logic — which walks Node subtrees —
-        // can operate uniformly. Phases that lose their header annotations
-        // get rebuilt into Phases at the end via flush_phase_group.
-        let mut tagged: Vec<(Vec<(String, String)>, Node)> = Vec::new();
+        // Three input-phase shapes drive the promotion pass:
+        //   (a) v2 header-sourced Phase (`source: HeaderV2`): pass through
+        //       unchanged — preserves depends_on / prefer_after / state /
+        //       annotations. Flush any pending v1 group first so promotion
+        //       boundaries don't cross.
+        //   (b) Legacy anchor with NO `### Phase N — Title` annotations in
+        //       its subtree: queue as Node into pending, no header to
+        //       capture. Final flush will rebuild it as a top-level Phase
+        //       via Phase::from_node (loses no metadata it didn't have).
+        //   (c) Legacy anchor with one or more Phase-N header annotations:
+        //       strip the headers (capturing them for new-phase synthesis),
+        //       queue the stripped node, optionally set the current header
+        //       so the *next* flush groups under it.
         let mut conversions: Vec<String> = Vec::new();
+        let mut new_phases: Vec<Phase> = Vec::new();
+        let mut pending: Vec<Node> = Vec::new();
+        let mut current_header: Option<(String, String)> = None;
+
         for phase in self.phases {
+            if matches!(phase.source, PhaseSource::HeaderV2) {
+                // (a) pass-through preserves FORMATv2 metadata
+                flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
+                new_phases.push(phase);
+                continue;
+            }
             let mut as_node = phase_to_node(phase);
             let mut headers_in_subtree: Vec<(String, String)> = Vec::new();
             strip_and_collect_phase_headers(
@@ -754,30 +793,21 @@ impl Plan {
                 &mut headers_in_subtree,
                 &mut conversions,
             );
-            tagged.push((headers_in_subtree, as_node));
-        }
-
-        // Third pass: each phase's outgoing header is the single Phase-N
-        // header that was in its subtree (if any). Multi-header subtrees were
-        // skipped above — their headers stay as narrative annotations.
-        let mut new_phases: Vec<Phase> = Vec::new();
-        let mut pending: Vec<Node> = Vec::new();
-        let mut current_header: Option<(String, String)> = None;
-        for (mut headers, phase) in tagged {
-            pending.push(phase);
-            if let Some((id, title)) = headers.pop() {
+            pending.push(as_node);
+            if let Some((id, title)) = headers_in_subtree.pop() {
                 flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
                 current_header = Some((id, title));
             }
         }
         flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
 
-        // Phase 29.4: canonical form strips bold-wrapped IDs. The standardize
-        // pass owns the destructive normalization; round-trip writebacks
-        // preserve `IdStyle::Bold`.
+        // Phase 29.4: canonical form strips bold-wrapped IDs. Separator
+        // normalization is NOT done here — that's the explicit canonicalize
+        // verb's job (37.5), so routine archive/writeback preserve user
+        // formatting. (Pass-through HeaderV2 phases also flow through here;
+        // the id_style assignment is a safe no-op for them.)
         for phase in &mut new_phases {
             phase.id_style = IdStyle::Plain;
-            phase.separator = Separator::Space;
             for child in &mut phase.children {
                 flatten_id_style(child);
             }
