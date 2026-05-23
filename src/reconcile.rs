@@ -80,6 +80,24 @@ pub enum Delta {
     /// `TaskCreate(metadata.plan_path=...)`. Resolves itself as adoptions
     /// evict the baseline mappings.
     BaselineOnly { plan_paths: Vec<String> },
+    /// Phase 39.1: a FORMATv2 phase header carries `*(depends on: X, Y)*`
+    /// and one or more of those dependency phases is still active (present
+    /// in plan.phases — not yet archived). Surfaces as a strong advisory
+    /// ("AS depends on AR — AR not yet archived") so the agent knows the
+    /// dependency hasn't cleared. Informational only — doesn't block any
+    /// operation, just nudges sequencing.
+    PhaseDependsOn {
+        phase_id: String,
+        unmet: Vec<String>,
+    },
+    /// Phase 39.1: same as [Delta::PhaseDependsOn] but for the softer
+    /// `*(prefer after: X)*` marker. Renderer speaks more gently
+    /// ("AS prefers AR landed first") so the agent treats it as a hint,
+    /// not a gate.
+    PhasePrefersAfter {
+        phase_id: String,
+        unmet: Vec<String>,
+    },
 }
 
 /// Diff PLAN.md (current) against the bridge's recorded state. Emits one
@@ -248,6 +266,43 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
         }
     }
 
+    // Phase 39.1: FORMATv2 phase dependencies. Build the set of currently
+    // active phase ids, then for each phase walk its depends_on / prefer_after
+    // lists and emit a delta listing the still-active (= un-archived) deps.
+    // Archived phases leave plan.phases, so their absence from the set means
+    // the dependency is implicitly satisfied — no delta needed.
+    let active_phase_ids: HashSet<&str> = plan.phases.iter().map(|p| p.id.as_str()).collect();
+    for phase in &plan.phases {
+        if !phase.depends_on.is_empty() {
+            let unmet: Vec<String> = phase
+                .depends_on
+                .iter()
+                .filter(|d| active_phase_ids.contains(d.as_str()))
+                .cloned()
+                .collect();
+            if !unmet.is_empty() {
+                deltas.push(Delta::PhaseDependsOn {
+                    phase_id: phase.id.clone(),
+                    unmet,
+                });
+            }
+        }
+        if !phase.prefer_after.is_empty() {
+            let unmet: Vec<String> = phase
+                .prefer_after
+                .iter()
+                .filter(|d| active_phase_ids.contains(d.as_str()))
+                .cloned()
+                .collect();
+            if !unmet.is_empty() {
+                deltas.push(Delta::PhasePrefersAfter {
+                    phase_id: phase.id.clone(),
+                    unmet,
+                });
+            }
+        }
+    }
+
     // Phase 23 advisory: state.mappings whose task_id starts with `baseline:`
     // are leaves the bridge tracks but the harness's TaskList doesn't. Surface
     // them so the agent knows to adopt with TaskCreate.
@@ -405,6 +460,19 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
                 for u in unchecked_descendants {
                     out.push_str(&format!("      - {u}\n"));
                 }
+            }
+            Delta::PhaseDependsOn { phase_id, unmet } => {
+                out.push_str(&format!(
+                    "  ! Phase {phase_id} depends on {} — not yet archived ({})\n",
+                    unmet.join(", "),
+                    if unmet.len() == 1 { "still active" } else { "still active phases" }
+                ));
+            }
+            Delta::PhasePrefersAfter { phase_id, unmet } => {
+                out.push_str(&format!(
+                    "  i Phase {phase_id} prefers {} landed first (soft hint — not a gate)\n",
+                    unmet.join(", "),
+                ));
             }
             Delta::BaselineOnly { plan_paths } => {
                 let preview: Vec<String> = plan_paths.iter().take(5).cloned().collect();
@@ -1237,6 +1305,97 @@ mod tests {
         assert!(
             r.contains("(⬜ → 🔜)"),
             "expected emoji transition arrow: {r}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 39.1: cross-phase dep surfacing in reconcile
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn phase_depends_on_active_phase_emits_delta() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AR - View rollout\n\n- [ ] AR.0 plan\n\n## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
+        );
+        write_state(&plan, &[]);
+        let deltas = reconcile(&plan).unwrap();
+        let found = deltas.iter().any(|d| {
+            matches!(d, Delta::PhaseDependsOn { phase_id, unmet }
+                if phase_id == "AS" && unmet == &vec!["AR".to_string()])
+        });
+        assert!(
+            found,
+            "expected PhaseDependsOn(AS → AR), got: {deltas:#?}"
+        );
+    }
+
+    #[test]
+    fn phase_prefer_after_active_phase_emits_softer_delta() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AI - Studio\n\n- [ ] AI.0 task\n\n## Phase AM - Tailwind *(prefer after: AI)*\n\n- [ ] AM.0 task\n",
+        );
+        write_state(&plan, &[]);
+        let deltas = reconcile(&plan).unwrap();
+        let found = deltas.iter().any(|d| {
+            matches!(d, Delta::PhasePrefersAfter { phase_id, unmet }
+                if phase_id == "AM" && unmet == &vec!["AI".to_string()])
+        });
+        assert!(
+            found,
+            "expected PhasePrefersAfter(AM → AI), got: {deltas:#?}"
+        );
+        // No PhaseDependsOn for the soft hint.
+        assert!(
+            !deltas.iter().any(|d| matches!(d, Delta::PhaseDependsOn { .. })),
+            "soft hint shouldn't trigger hard-dep delta: {deltas:#?}"
+        );
+    }
+
+    #[test]
+    fn dep_to_missing_phase_is_silent() {
+        // If a depends_on points at a phase that's not in plan.phases (e.g.
+        // already archived), it's implicitly satisfied — no delta emitted.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
+        );
+        write_state(&plan, &[]);
+        let deltas = reconcile(&plan).unwrap();
+        assert!(
+            !deltas.iter().any(|d| matches!(
+                d,
+                Delta::PhaseDependsOn { .. } | Delta::PhasePrefersAfter { .. }
+            )),
+            "archived deps should be silent: {deltas:#?}"
+        );
+    }
+
+    #[test]
+    fn dep_renderer_distinguishes_hard_vs_soft_language() {
+        let deltas = vec![
+            Delta::PhaseDependsOn {
+                phase_id: "AS".to_string(),
+                unmet: vec!["AR".to_string()],
+            },
+            Delta::PhasePrefersAfter {
+                phase_id: "AM".to_string(),
+                unmet: vec!["AI".to_string()],
+            },
+        ];
+        let r = render_deltas(&deltas);
+        assert!(
+            r.contains("Phase AS depends on AR") && r.contains("not yet archived"),
+            "hard dep uses strong language: {r}"
+        );
+        assert!(
+            r.contains("Phase AM prefers AI landed first")
+                && r.contains("soft hint"),
+            "soft hint uses gentler language: {r}"
         );
     }
 }
