@@ -1599,38 +1599,28 @@ mod tests {
         // `## Phase N — Title` headers attach to the same top-level phase's
         // subtree (because intervening content didn't pop the parser stack),
         // standardize should leave them ALL as narrative rather than refuse.
+        //
+        // Phase 36.3 update: `## Phase X - Title` (and the em-dash variant)
+        // is now a first-class FORMATv2 phase boundary at PARSE time — each
+        // header opens its own Phase. The "multi-header subtree" case the
+        // original test guarded is no longer possible: the parser produces
+        // [0.1, X, AA, Z] phases directly. `standardize_to_canonical` is a
+        // no-op on this input because every header already became a phase.
         let plan = parse_for_test(
             "- [ ] 0.1 First\n\n## Phase X — Top\n## Phase AA — Other\n## Phase Z — Third\n",
         );
+        let pre_ids: Vec<String> = plan.phases.iter().map(|n| n.id.clone()).collect();
+        assert_eq!(
+            pre_ids,
+            vec!["0.1", "X", "AA", "Z"],
+            "v2 parser opens a phase per header at parse time"
+        );
+
         let (out, _) = plan
             .standardize_to_canonical()
-            .expect("multi-header subtree no longer refuses");
-        // No promotion happened — original phase still top-level, no
-        // synthesized X.0 / AA.0 / Z.0 nodes.
-        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["0.1"],
-            "no promotion; only original phase: {ids:?}"
-        );
-        // All three headers preserved as annotations on the phase.
-        let phase_0_1 = out.phases.iter().find(|n| n.id == "0.1").unwrap();
-        let header_anns: Vec<&str> = phase_0_1
-            .annotations
-            .iter()
-            .filter_map(|a| {
-                if let Annotation::Text { text, .. } = a {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            header_anns.len(),
-            3,
-            "all 3 Phase-N headers preserved as narrative: {header_anns:?}"
-        );
+            .expect("standardize is a no-op when headers already parsed as phases");
+        let post_ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(post_ids, vec!["0.1", "X", "AA", "Z"]);
     }
 
     #[test]

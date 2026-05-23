@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Node, NodeState, Phase, Plan};
+use crate::ast::{Annotation, IdStyle, Node, NodeState, Phase, Plan, Separator};
 use thiserror::Error;
 use winnow::Parser;
 use winnow::ascii::space0;
@@ -20,6 +20,13 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
     let mut preamble: Vec<String> = Vec::new();
     let mut saw_checkbox = false;
     let mut in_code: Option<CodeAccumulator> = None;
+    // Phase 36.3: FORMATv2 phase headers (`## Phase X - Title *(depends on: Y)*`)
+    // open a new Phase here. Subsequent top-level checkboxes land in
+    // `current_phase.children` instead of becoming their own Phases. A new
+    // header (or EOF) finalizes the current phase and pushes it onto
+    // `plan.phases`. Legacy v1 checkbox anchors that appear BEFORE any header
+    // keep promoting to Phase via the existing `Phase::from_node` path.
+    let mut current_phase: Option<Phase> = None;
 
     // Phase 35.1a: peel a *trailing* `## Backlog (not yet phased)` block off the
     // tail before the tree walk sees it. Without this, the bridge's own
@@ -45,7 +52,13 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                     content: code.content,
                     indent: code.indent,
                 };
-                attach_annotation(&mut stack, &mut preamble, saw_checkbox, annotation);
+                attach_annotation(
+                    &mut stack,
+                    &mut preamble,
+                    &mut current_phase,
+                    saw_checkbox,
+                    annotation,
+                );
             } else {
                 cs.content.push_str(raw_line);
                 cs.content.push('\n');
@@ -73,6 +86,39 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
             continue;
         }
 
+        // Phase 36.3: FORMATv2 phase header detection. A column-0
+        // `## Phase <ID> - <Title> *(depends on: ...)*  *(prefer after: ...)*`
+        // line drains the stack, finalizes any previous open phase, and opens
+        // a fresh one. Markers are independent — either, both, or neither may
+        // appear; titles ending right at the newline (no markers) work too.
+        if indent == 0
+            && let Some(header) = parse_v2_phase_header(raw_line)
+        {
+            while let Some((node, _)) = stack.pop() {
+                push_into_parent(&mut plan, &mut stack, &mut current_phase, node);
+            }
+            if let Some(p) = current_phase.take() {
+                plan.phases.push(p);
+            }
+            current_phase = Some(Phase {
+                id: header.id,
+                title: header.title,
+                state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                // FORMATv2 canonical: hyphen-space separator. Phase 37.1's
+                // serializer reads this to emit ` - ` on the header line.
+                separator: Separator::Hyphen,
+                children: vec![],
+                annotations: vec![],
+                depends_on: header.depends_on,
+                prefer_after: header.prefer_after,
+            });
+            // Opening a phase header counts as entering the tree — subsequent
+            // blank lines coalesce as Annotation::Blank instead of preamble.
+            saw_checkbox = true;
+            continue;
+        }
+
         match parse_checkbox(trimmed, line_no)? {
             CheckboxLine::Checkbox {
                 state,
@@ -95,7 +141,7 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                 while let Some((_, top_indent)) = stack.last() {
                     if *top_indent >= indent {
                         let (done, _) = stack.pop().unwrap();
-                        push_into_parent(&mut plan, &mut stack, done);
+                        push_into_parent(&mut plan, &mut stack, &mut current_phase, done);
                     } else {
                         break;
                     }
@@ -113,11 +159,17 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                     // single `Annotation::Blank { count }`. Coalesce
                     // consecutive blanks so a row of 3 blank lines round-trips
                     // as one annotation with count=3.
-                    bump_blank_on_top(&mut stack);
+                    bump_blank_on_top(&mut stack, &mut current_phase);
                     continue;
                 }
                 let annotation = classify_annotation(raw_line, indent, trimmed);
-                attach_annotation(&mut stack, &mut preamble, saw_checkbox, annotation);
+                attach_annotation(
+                    &mut stack,
+                    &mut preamble,
+                    &mut current_phase,
+                    saw_checkbox,
+                    annotation,
+                );
             }
         }
     }
@@ -131,25 +183,128 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
 
     // Drain the stack — anything remaining is complete.
     while let Some((node, _)) = stack.pop() {
-        push_into_parent(&mut plan, &mut stack, node);
+        push_into_parent(&mut plan, &mut stack, &mut current_phase, node);
+    }
+    if let Some(p) = current_phase.take() {
+        plan.phases.push(p);
     }
 
     plan.preamble = preamble;
     Ok(plan)
 }
 
-fn push_into_parent(plan: &mut Plan, stack: &mut [(Node, usize)], node: Node) {
+fn push_into_parent(
+    plan: &mut Plan,
+    stack: &mut [(Node, usize)],
+    current_phase: &mut Option<Phase>,
+    node: Node,
+) {
     if let Some((parent, _)) = stack.last_mut() {
         parent.children.push(node);
+    } else if let Some(phase) = current_phase.as_mut() {
+        // Inside a FORMATv2 phase: top-level checkboxes become its tasks.
+        phase.children.push(node);
     } else {
-        // Top-level: legacy v1 `- [ ] N.0` anchors become Phases. The
-        // Node-shaped fields (id/title/state/style/separator/children/
-        // annotations) carry across via Phase::from_node so v1 round-trip is
-        // preserved; FORMATv2's `depends_on` defaults empty until the parser
-        // learns to read `## Phase ID - Title *(depends on: ...)*` headers
-        // (Phase 36.3).
+        // No header context — legacy v1 `- [ ] N.0` anchor. Promote to Phase
+        // via from_node so the Node-shaped state/style/separator come along.
         plan.phases.push(Phase::from_node(node));
     }
+}
+
+/// Parsed FORMATv2 phase header (`## Phase <ID> - <Title>` with optional
+/// `*(depends on: ...)*` and/or `*(prefer after: ...)*` markers).
+struct PhaseHeader {
+    id: String,
+    title: String,
+    depends_on: Vec<String>,
+    prefer_after: Vec<String>,
+}
+
+/// Match a FORMATv2 phase header line. Returns None for any line that isn't
+/// the exact shape `## Phase <alphanumeric-ID><sep><title>` at column 0,
+/// including `## Backlog`, `### Phase`, indented headers, headers without
+/// the `Phase ` keyword, and bare `## Notes` style sections.
+///
+/// Separator tolerance on read (canonical write is ` - `): ` - ` hyphen,
+/// ` — ` em-dash, or a plain space following the ID — same liberality as
+/// checkbox lines.
+fn parse_v2_phase_header(line: &str) -> Option<PhaseHeader> {
+    // Column-0 only. An indented `## Phase X` is markdown content inside a
+    // task, not a phase boundary.
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let after_hashes = line.strip_prefix("## ")?;
+    let after_phase_keyword = after_hashes.strip_prefix("Phase ")?;
+
+    // Extract the ID (alphanumeric, may include `.` for legacy/edge cases).
+    let id_end = after_phase_keyword
+        .find(|c: char| c.is_whitespace() || c == '—' || c == '-' || c == '*')
+        .unwrap_or(after_phase_keyword.len());
+    let id_part = after_phase_keyword[..id_end].trim();
+    if id_part.is_empty() {
+        return None;
+    }
+    if !id_part
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.')
+    {
+        return None;
+    }
+    let rest = after_phase_keyword[id_end..].trim_start();
+
+    // Strip the separator (` - ` / ` — ` / bare whitespace). After the rest
+    // may still start with `-` or `—` from the separator itself.
+    let after_sep = rest
+        .trim_start_matches(|c: char| c == '—' || c == '-')
+        .trim_start();
+
+    // Title runs until the first `*(` marker or end-of-line.
+    let (title_raw, markers_part) = match after_sep.find("*(") {
+        Some(i) => (&after_sep[..i], &after_sep[i..]),
+        None => (after_sep, ""),
+    };
+    let title = title_raw.trim().to_string();
+
+    let (depends_on, prefer_after) = parse_v2_phase_markers(markers_part);
+
+    Some(PhaseHeader {
+        id: id_part.to_string(),
+        title,
+        depends_on,
+        prefer_after,
+    })
+}
+
+/// Scan a tail like `*(depends on: AR)* *(prefer after: AB, AC)*` and
+/// extract the two ID lists. Either marker can appear in either order, both
+/// optional. Unknown marker bodies (e.g. `*(blocked by: X)*`) are ignored
+/// silently — keeps the parser forward-compatible if FORMATv2 grows.
+fn parse_v2_phase_markers(s: &str) -> (Vec<String>, Vec<String>) {
+    let mut depends_on: Vec<String> = Vec::new();
+    let mut prefer_after: Vec<String> = Vec::new();
+    let mut s = s;
+    while let Some(start) = s.find("*(") {
+        s = &s[start + 2..];
+        let Some(end) = s.find(")*") else {
+            break;
+        };
+        let body = s[..end].trim();
+        if let Some(list) = body.strip_prefix("depends on:") {
+            depends_on.extend(split_id_list(list));
+        } else if let Some(list) = body.strip_prefix("prefer after:") {
+            prefer_after.extend(split_id_list(list));
+        }
+        s = &s[end + 2..];
+    }
+    (depends_on, prefer_after)
+}
+
+fn split_id_list(list: &str) -> impl Iterator<Item = String> + '_ {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 /// Split `input` into (body lines, trailing-backlog body). When the document
@@ -218,6 +373,7 @@ fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {
 fn attach_annotation(
     stack: &mut [(Node, usize)],
     preamble: &mut Vec<String>,
+    current_phase: &mut Option<Phase>,
     saw_checkbox: bool,
     annotation: Annotation,
 ) {
@@ -256,24 +412,37 @@ fn attach_annotation(
     }
     if let Some((top, _)) = stack.last_mut() {
         top.annotations.push(annotation);
-    } else {
-        // After checkboxes started but no open node — shouldn't happen with a balanced tree.
-        // Skip silently in v1.
+    } else if let Some(phase) = current_phase.as_mut() {
+        // Phase 36.3: lines between a `## Phase X - Title` header and the
+        // first task land as phase-level annotations. 36.5 will split this
+        // into a dedicated `prose` bucket; for now they share annotations.
+        phase.annotations.push(annotation);
     }
+    // Else: after checkboxes started but no open node and no open phase —
+    // shouldn't happen with a balanced tree. Skip silently.
 }
 
 /// Append a blank line to the top open node's annotations, coalescing
-/// consecutive blanks into a single `Annotation::Blank { count: n }`.
-fn bump_blank_on_top(stack: &mut [(Node, usize)]) {
-    let Some((top, _)) = stack.last_mut() else {
-        // No open node — orphan blank line; drop.
+/// consecutive blanks into a single `Annotation::Blank { count: n }`. Falls
+/// back to the open phase's annotations when the stack is empty (so blank
+/// lines inside a FORMATv2 phase before its first task round-trip).
+fn bump_blank_on_top(stack: &mut [(Node, usize)], current_phase: &mut Option<Phase>) {
+    if let Some((top, _)) = stack.last_mut() {
+        if let Some(Annotation::Blank { count }) = top.annotations.last_mut() {
+            *count += 1;
+        } else {
+            top.annotations.push(Annotation::Blank { count: 1 });
+        }
         return;
-    };
-    if let Some(Annotation::Blank { count }) = top.annotations.last_mut() {
-        *count += 1;
-    } else {
-        top.annotations.push(Annotation::Blank { count: 1 });
     }
+    if let Some(phase) = current_phase.as_mut() {
+        if let Some(Annotation::Blank { count }) = phase.annotations.last_mut() {
+            *count += 1;
+        } else {
+            phase.annotations.push(Annotation::Blank { count: 1 });
+        }
+    }
+    // Else: orphan blank line outside any phase or open node; drop.
 }
 
 fn leading_spaces(s: &str) -> usize {
@@ -919,5 +1088,190 @@ Some prose.
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases[0].children.len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 36.3: FORMATv2 phase-header parsing
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn v2_header_opens_a_phase_with_tasks_as_children() {
+        let input = "\
+## Phase AI - Studio dogfood
+
+- [ ] AI.0 Lock decisions
+- [x] AI.1 Audit
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        let p = &plan.phases[0];
+        assert_eq!(p.id, "AI");
+        assert_eq!(p.title, "Studio dogfood");
+        assert!(p.depends_on.is_empty());
+        assert!(p.prefer_after.is_empty());
+        assert_eq!(p.children.len(), 2);
+        assert_eq!(p.children[0].id, "AI.0");
+        assert_eq!(p.children[1].id, "AI.1");
+        assert!(p.children[1].is_done());
+    }
+
+    #[test]
+    fn v2_header_parses_depends_on_marker() {
+        let input = "\
+## Phase AS - Spine *(depends on: AR)*
+
+- [ ] AS.0 plan
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        assert_eq!(p.id, "AS");
+        assert_eq!(p.title, "Spine");
+        assert_eq!(p.depends_on, vec!["AR"]);
+        assert!(p.prefer_after.is_empty());
+    }
+
+    #[test]
+    fn v2_header_parses_prefer_after_marker() {
+        let input = "\
+## Phase AM - Tailwind *(prefer after: AI)*
+
+- [ ] AM.0 plan
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        assert_eq!(p.depends_on, Vec::<String>::new());
+        assert_eq!(p.prefer_after, vec!["AI"]);
+    }
+
+    #[test]
+    fn v2_header_parses_both_markers_either_order() {
+        let input = "\
+## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        assert_eq!(p.depends_on, vec!["AR", "AQ"]);
+        assert_eq!(p.prefer_after, vec!["AB"]);
+
+        // Reversed order also works.
+        let input2 = "## Phase AS - Spine *(prefer after: AB)* *(depends on: AR)*\n";
+        let plan2 = parse(input2).unwrap();
+        let p2 = &plan2.phases[0];
+        assert_eq!(p2.depends_on, vec!["AR"]);
+        assert_eq!(p2.prefer_after, vec!["AB"]);
+    }
+
+    #[test]
+    fn v2_header_with_em_dash_separator_still_parses() {
+        // Tolerance: read-side accepts em-dash even though canonical write is
+        // hyphen-space.
+        let input = "## Phase AI — Studio dogfood\n";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases[0].id, "AI");
+        assert_eq!(plan.phases[0].title, "Studio dogfood");
+    }
+
+    #[test]
+    fn v2_header_with_no_markers_and_no_separator_is_id_only() {
+        // The bare `## Phase AI` form (no title) parses as id-only, title="".
+        // Matches the user's current quicksight PLAN.md mid-pivot state.
+        let input = "## Phase AI\n\n- [ ] AI.0 task\n";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases[0].id, "AI");
+        assert_eq!(plan.phases[0].title, "");
+        assert_eq!(plan.phases[0].children.len(), 1);
+    }
+
+    #[test]
+    fn v2_header_does_not_match_indented_or_h3_or_h1() {
+        // `### Phase X` (h3) → not a v2 phase header (h2 only).
+        let plan = parse("### Phase AI - Title\n- [ ] AI.0 task\n").unwrap();
+        // Falls back to legacy: `### Phase` becomes a text annotation; the
+        // top-level checkbox promotes to a v1 Phase.
+        assert!(plan.phases[0].id != "AI" || plan.phases.len() != 1);
+
+        // Indented `  ## Phase X` is task-internal markdown, not a header.
+        let plan = parse("- [ ] 1.0 outer\n  ## Phase X\n  - [ ] 1.1 inner\n").unwrap();
+        assert_eq!(plan.phases[0].id, "1.0");
+    }
+
+    #[test]
+    fn v2_header_does_not_match_backlog_heading() {
+        // `## Backlog (not yet phased)` is a backlog section, NOT a phase
+        // header. The trailing-backlog peel handles it; if mid-document, the
+        // existing extract_backlog_from_* paths sweep it.
+        let plan = parse("- [ ] 1.0 Phase\n\n## Backlog (not yet phased)\n").unwrap();
+        // Single phase, no v2 phase added for `## Backlog`.
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].id, "1.0");
+    }
+
+    #[test]
+    fn v2_header_phase_followed_by_v1_anchor_keeps_anchor_as_task() {
+        // Mixed plan: a `## Phase AI` header followed by a `- [ ] 36.0 ...`
+        // checkbox lands the checkbox as a task of AI (since we're inside the
+        // v2 phase). User-visible weirdness, but the canonicalize path can
+        // sort it out — for now, preserve everything.
+        let input = "## Phase AI - Header phase\n\n- [ ] 36.0 Legacy anchor\n";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].id, "AI");
+        assert_eq!(plan.phases[0].children.len(), 1);
+        assert_eq!(plan.phases[0].children[0].id, "36.0");
+    }
+
+    #[test]
+    fn v1_anchors_before_first_v2_header_still_become_phases() {
+        // Legacy phases lead, FORMATv2 header follows. Both coexist.
+        let input = "\
+- [ ] 1.0 Legacy phase
+
+## Phase AI - New phase
+
+- [ ] AI.0 New work
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 2);
+        assert_eq!(plan.phases[0].id, "1.0");
+        assert_eq!(plan.phases[1].id, "AI");
+        assert_eq!(plan.phases[1].children.len(), 1);
+    }
+
+    #[test]
+    fn two_v2_headers_in_a_row_each_become_a_phase() {
+        let input = "\
+## Phase AI - First
+- [ ] AI.0 a
+## Phase AS - Second *(depends on: AI)*
+- [ ] AS.0 b
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 2);
+        assert_eq!(plan.phases[0].id, "AI");
+        assert_eq!(plan.phases[0].children.len(), 1);
+        assert_eq!(plan.phases[1].id, "AS");
+        assert_eq!(plan.phases[1].depends_on, vec!["AI"]);
+    }
+
+    #[test]
+    fn v2_phase_prose_before_first_task_lands_as_annotation() {
+        let input = "\
+## Phase AI - Studio dogfood
+
+Some intro prose here.
+
+- [ ] AI.0 task
+";
+        let plan = parse(input).unwrap();
+        let p = &plan.phases[0];
+        assert_eq!(p.id, "AI");
+        // Prose lives in annotations until 36.5's dedicated prose bucket.
+        assert!(
+            p.annotations
+                .iter()
+                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("intro prose"))),
+            "phase-level prose should be captured in annotations: {:?}",
+            p.annotations
+        );
     }
 }
