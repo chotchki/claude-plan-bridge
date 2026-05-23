@@ -471,3 +471,15 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
   - [x] 40.6 Activation e2e tests + docs (SPEC/README update)
   - [x] 40.7 CLI `plan-bridge phase-scaffold <ID> <title> --tasks "...,...,..."`
 
+---
+
+## 2026-05-23
+
+## Phase 41.0 - Tech debt: fs4 drop + test-utils extraction + Phase constructors
+- [x] 41.1 Migrate fs4 → std::fs::File::lock; drop fs4 dependency
+- [x] 41.2 Extract tests/common shared scratch_dir / uniq / write_plan helpers
+- [x] 41.3 Phase constructors: header_v2, header_v2_with_deps, ensure_header_v2
+- [x] 41.4 Consolidate atomic_write helpers (state.rs tmp_path ↔ archive.rs atomic_write)
+- [x] 41.5 Cut v0.3.1 release (patch — no behavior changes)
+- [x] 41.6 Canonicalize bug: preserve nested children + indented prose continuations under backlog bullets
+
