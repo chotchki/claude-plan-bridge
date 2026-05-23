@@ -177,6 +177,29 @@ enum Command {
         #[arg(long)]
         after: Option<String>,
     },
+    /// Rename a phase. Phase-specific — refuses task ids to keep the
+    /// operation explicit. For task renames, edit PLAN.md directly or use
+    /// the `plan_rename` MCP tool.
+    PhaseRename {
+        #[command(flatten)]
+        project: ProjectArgs,
+        id: String,
+        new_title: String,
+    },
+    /// Replace a phase's `depends_on` / `prefer_after` sequencing markers.
+    /// At least one of `--depends-on` / `--prefer-after` must be passed.
+    /// Pass an empty list (`--depends-on ""`) to clear; omit the flag to
+    /// leave that side unchanged. Flips a legacy v1 anchor to FORMATv2 header
+    /// form so the markers can be rendered.
+    PhaseDeps {
+        #[command(flatten)]
+        project: ProjectArgs,
+        id: String,
+        #[arg(long, value_delimiter = ',')]
+        depends_on: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        prefer_after: Option<Vec<String>>,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -395,6 +418,61 @@ fn main() -> Result<()> {
             println!(
                 "claude-plan-bridge: added phase `{id}` - `{title_str}` in {}",
                 plan_path.display()
+            );
+        }
+        Command::PhaseRename {
+            project,
+            id,
+            new_title,
+        } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            let phase = plan
+                .find_phase_mut(&id)
+                .ok_or_else(|| anyhow::anyhow!("no phase with id `{id}` at top level"))?;
+            if phase.title == new_title {
+                println!("claude-plan-bridge: phase `{id}` already titled `{new_title}` (no-op)");
+            } else {
+                phase.title = new_title.clone();
+                std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                    .with_context(|| format!("write {}", plan_path.display()))?;
+                println!("claude-plan-bridge: renamed phase `{id}` → `{new_title}`");
+            }
+        }
+        Command::PhaseDeps {
+            project,
+            id,
+            depends_on,
+            prefer_after,
+        } => {
+            if depends_on.is_none() && prefer_after.is_none() {
+                anyhow::bail!(
+                    "phase-deps: pass at least one of `--depends-on` or `--prefer-after`"
+                );
+            }
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            let phase = plan
+                .find_phase_mut(&id)
+                .ok_or_else(|| anyhow::anyhow!("no phase with id `{id}` at top level"))?;
+            phase.source = plan_bridge::ast::PhaseSource::HeaderV2;
+            phase.separator = plan_bridge::ast::Separator::Hyphen;
+            if let Some(deps) = depends_on {
+                phase.depends_on = deps.into_iter().filter(|s| !s.is_empty()).collect();
+            }
+            if let Some(after) = prefer_after {
+                phase.prefer_after = after.into_iter().filter(|s| !s.is_empty()).collect();
+            }
+            let deps = phase.depends_on.clone();
+            let after = phase.prefer_after.clone();
+            std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                .with_context(|| format!("write {}", plan_path.display()))?;
+            println!(
+                "claude-plan-bridge: updated deps for phase `{id}`: depends_on={deps:?}, prefer_after={after:?}"
             );
         }
         Command::Archive {

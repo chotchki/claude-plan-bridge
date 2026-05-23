@@ -18,7 +18,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 37.5 Canonicalize flips v1 (checkbox phases) → v2 (header phases) on first write
   - [x] 37.6 Round-trip + v1→v2 flip tests
 - [ ] 38.0 Phase verbs + per-phase archive
-  - [ ] 38.1 `plan_add_phase(id, title, depends_on=[], after=None)` MCP + CLI
+  - [x] 38.1 `plan_add_phase(id, title, depends_on=[], after=None)` MCP + CLI
   - [ ] 38.2 `plan_rename_phase(id, new_title)` MCP + CLI
   - [ ] 38.3 `plan_set_phase_deps(id, depends_on=[], prefer_after=[])` MCP + CLI
   - [ ] 38.4 `archive <PHASE>` errors on `[ ]` Pending tasks

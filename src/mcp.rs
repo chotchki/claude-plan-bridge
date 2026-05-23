@@ -93,6 +93,8 @@ impl McpServer {
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
             "plan_rename" => self.tool_plan_rename(&args),
+            "plan_rename_phase" => self.tool_plan_rename_phase(&args),
+            "plan_set_phase_deps" => self.tool_plan_set_phase_deps(&args),
             other => Err(anyhow!("unknown tool: {other}")),
         }
     }
@@ -242,6 +244,78 @@ impl McpServer {
         }
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&format!("added phase `{id}` - `{title}`")))
+    }
+
+    /// Phase 38.2: rename a phase's title. Phase-specific variant of
+    /// `plan_rename` — refuses task ids loudly so callers don't accidentally
+    /// rename a task when they meant a phase.
+    fn tool_plan_rename_phase(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "id")?;
+        let new_title = require_string(args, "new_title")?;
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        let phase = plan
+            .find_phase_mut(&id)
+            .ok_or_else(|| anyhow!("no phase with id `{id}` at top level"))?;
+        if phase.title == new_title {
+            return Ok(tool_text_result(&format!(
+                "phase `{id}` already titled `{new_title}`"
+            )));
+        }
+        phase.title = new_title.clone();
+        std::fs::write(&self.plan_path, serialize(&plan))?;
+        Ok(tool_text_result(&format!(
+            "renamed phase `{id}` → `{new_title}`"
+        )))
+    }
+
+    /// Phase 38.3: replace a phase's `depends_on` and/or `prefer_after` lists.
+    /// Either field can be set independently (omit to leave unchanged) or
+    /// cleared by passing an empty array. Phase ids only — refuses tasks.
+    fn tool_plan_set_phase_deps(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "id")?;
+        // None means "don't touch this list"; Some(vec![]) means "clear it".
+        let new_depends_on: Option<Vec<String>> = args.get("depends_on").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+        });
+        let new_prefer_after: Option<Vec<String>> = args.get("prefer_after").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+        });
+        if new_depends_on.is_none() && new_prefer_after.is_none() {
+            return Err(anyhow!(
+                "plan_set_phase_deps: pass at least one of `depends_on` or `prefer_after`"
+            ));
+        }
+
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        let phase = plan
+            .find_phase_mut(&id)
+            .ok_or_else(|| anyhow!("no phase with id `{id}` at top level"))?;
+        // Force HeaderV2 form so the markers can be emitted — legacy v1
+        // anchors don't have a place to render them.
+        phase.source = crate::ast::PhaseSource::HeaderV2;
+        phase.separator = crate::ast::Separator::Hyphen;
+        if let Some(deps) = new_depends_on {
+            phase.depends_on = deps;
+        }
+        if let Some(after) = new_prefer_after {
+            phase.prefer_after = after;
+        }
+        let summary = format!(
+            "updated deps for phase `{id}`: depends_on={:?}, prefer_after={:?}",
+            phase.depends_on, phase.prefer_after
+        );
+        std::fs::write(&self.plan_path, serialize(&plan))?;
+        Ok(tool_text_result(&summary))
     }
 
     /// Mark a phase (or any non-leaf) as ready to exit: validate every leaf in
@@ -472,6 +546,33 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_rename_phase",
+                "description": "Rename a phase's title. Phase-specific variant of `plan_rename` — refuses task ids to keep operations explicit. Use `plan_rename` for tasks.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Phase id (e.g. `AI`, `AS`)."},
+                        "new_title": {"type": "string"}
+                    },
+                    "required": ["id", "new_title"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_set_phase_deps",
+                "description": "Replace a phase's `depends_on` / `prefer_after` sequencing markers. Pass either field as an array (empty array clears it); omit to leave that field unchanged. At least one of the two must be provided. Flips the phase to FORMATv2 header form if it was a legacy v1 anchor.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Replace `*(depends on: ...)*`. Empty array clears."},
+                        "prefer_after": {"type": "array", "items": {"type": "string"}, "description": "Replace `*(prefer after: ...)*`. Empty array clears."}
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_archive",
                 "description": "Sweep every fully-complete top-level phase to PLAN_ARCHIVE.md. Optional `dry_run` and `date` (YYYY-MM-DD) arguments.",
                 "inputSchema": {
@@ -657,6 +758,127 @@ mod tests {
         assert!(
             msg.contains("AI") && msg.to_lowercase().contains("already"),
             "error mentions duplicate: {msg}"
+        );
+    }
+
+    #[test]
+    fn plan_rename_phase_rewrites_title_only() {
+        let (_, s) = scratch_plan(
+            "## Phase AI - Old title *(depends on: AR)*\n\n- [ ] AI.0 task\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_rename_phase",
+                "arguments": {"id": "AI", "new_title": "Fresh title"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase AI - Fresh title *(depends on: AR)*"),
+            "title rewritten, markers preserved:\n{after}"
+        );
+        // Tasks untouched.
+        assert!(after.contains("- [ ] AI.0 task"));
+    }
+
+    #[test]
+    fn plan_rename_phase_refuses_task_ids() {
+        let (_, s) = scratch_plan("## Phase AI - Title\n\n- [ ] AI.0 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_rename_phase",
+                "arguments": {"id": "AI.0", "new_title": "Nope"}
+            }}),
+        );
+        let err = resp.get("error").expect("must error: {resp}");
+        assert!(
+            err["message"].as_str().unwrap_or("").contains("AI.0"),
+            "error mentions the bad id"
+        );
+    }
+
+    #[test]
+    fn plan_set_phase_deps_replaces_both_lists() {
+        let (_, s) = scratch_plan(
+            "## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_set_phase_deps",
+                "arguments": {
+                    "id": "AS",
+                    "depends_on": ["AR", "AQ"],
+                    "prefer_after": ["AB"]
+                }
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
+            "both markers updated:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_set_phase_deps_clears_with_empty_array() {
+        let (_, s) = scratch_plan(
+            "## Phase AS - Spine *(depends on: AR)* *(prefer after: AB)*\n\n- [ ] AS.0 plan\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_set_phase_deps",
+                "arguments": {"id": "AS", "depends_on": []}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        // depends_on cleared, prefer_after untouched.
+        assert!(
+            !after.contains("*(depends on:"),
+            "depends_on marker gone:\n{after}"
+        );
+        assert!(
+            after.contains("*(prefer after: AB)*"),
+            "prefer_after preserved:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_set_phase_deps_requires_at_least_one_field() {
+        let (_, s) = scratch_plan("## Phase AS - Spine\n\n- [ ] AS.0 plan\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_set_phase_deps",
+                "arguments": {"id": "AS"}
+            }}),
+        );
+        assert!(resp.get("error").is_some(), "must error: {resp}");
+    }
+
+    #[test]
+    fn plan_set_phase_deps_flips_v1_anchor_to_v2_form() {
+        // Setting deps on a legacy v1 anchor flips it to HeaderV2 — markers
+        // can only render in the header form.
+        let (_, s) = scratch_plan("- [ ] 1.0 Legacy phase\n  - [ ] 1.1 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_set_phase_deps",
+                "arguments": {"id": "1.0", "depends_on": ["0.0"]}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase 1.0 - Legacy phase *(depends on: 0.0)*"),
+            "phase flipped to v2 form with marker:\n{after}"
         );
     }
 
