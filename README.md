@@ -24,6 +24,22 @@ cargo install --git https://github.com/chotchki/claude-plan-bridge
 
 This puts a `claude-plan-bridge` binary in `~/.cargo/bin` — make sure that's on your `PATH`.
 
+## Upgrade
+
+Already installed and want to pick up a newer release?
+
+```sh
+# 1) Bump the binary in place
+cargo install --force claude-plan-bridge
+
+# 2) In each project that already uses the bridge,
+#    re-merge the latest hook set into settings.json
+cd your-project/
+claude-plan-bridge upgrade-hooks
+```
+
+`upgrade-hooks` is idempotent and only touches `.claude/settings.json` — your `PLAN.md` and `.gitignore` stay untouched. Restart Claude Code so it picks up any new hook wiring. See [`upgrade-hooks`](#upgrade-hooks---cwd-path) for details on when this is needed (notably anything predating the `SessionStart` hook or absolute `--cwd` baking).
+
 ## Quickstart
 
 ```sh
