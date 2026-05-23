@@ -512,6 +512,10 @@ fn insert_at_path(
         title: subject.to_string(),
         state: NodeState::Pending,
         id_style: crate::ast::IdStyle::Plain,
+        // Routine TaskCreates preserve the conservative format dispatch:
+        // new tasks land with plain space separator (matches v1 in-place).
+        // `plan-bridge canonicalize` is the single op that flips every task
+        // separator to FORMATv2 ` - ` hyphen-space.
         separator: crate::ast::Separator::Space,
         children: vec![],
         annotations: vec![],
@@ -538,19 +542,29 @@ fn insert_at_path(
                 if standardized.contains_id(&parent_id) {
                     plan = standardized;
                 } else if parent_id_for(&parent_id).is_none() {
+                    // Phase 38.7: auto-anchor synthesizes a FORMATv2
+                    // `## Phase X - Title` header (source=HeaderV2) instead
+                    // of the legacy `- [ ] X.0 Title` checkbox. The phase id
+                    // preserves the `.0` suffix from `parent_id` for
+                    // backward-compatible parent lookups — the header will
+                    // render as `## Phase X.0 - Title` until the operator
+                    // runs `canonicalize` to strip cosmetically.
                     let anchor_title = plan_phase
                         .map(str::to_string)
                         .unwrap_or_else(|| synthesize_anchor_title(&parent_id));
-                    let anchor = Node {
+                    let phase = crate::ast::Phase {
                         id: parent_id.clone(),
                         title: anchor_title,
                         state: NodeState::Pending,
                         id_style: crate::ast::IdStyle::Plain,
-                        separator: crate::ast::Separator::Space,
+                        separator: crate::ast::Separator::Hyphen,
                         children: vec![],
                         annotations: vec![],
+                        depends_on: vec![],
+                        prefer_after: vec![],
+                        source: crate::ast::PhaseSource::HeaderV2,
                     };
-                    plan.insert_phase(crate::ast::Phase::from_node(anchor));
+                    plan.insert_phase(phase);
                     anchor_created = Some(parent_id.clone());
                 } else {
                     anyhow::bail!(
@@ -1616,18 +1630,24 @@ mod tests {
         // Phase 31.2: TaskCreate(plan_path="10.1") with no `10.0` in PLAN.md
         // used to bail with "parent 10.0 not found". Now the bridge synthesizes
         // the anchor at top level.
+        //
+        // Phase 38.7 update: the auto-anchor is now a FORMATv2 `## Phase X.0 -
+        // Title` header (source=HeaderV2), not a v1 `- [ ] X.0` checkbox.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
         let payload = payload_for_create("t-1", "First task of phase 10", Some("10.1"));
         let out = writeback_create(&payload, &plan).expect("auto-anchor should not bail");
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [ ] 10.0 Phase 10"),
-            "auto-anchor should land at top level:\n{contents}"
+            contents.contains("## Phase 10.0 - Phase 10"),
+            "auto-anchor lands as v2 header at top level:\n{contents}"
         );
+        // The child task sits at column 0 under the v2 header (no v1
+        // indentation since the phase isn't a checkbox). Separator stays
+        // plain-space on routine TaskCreate; canonicalize flips it to ` - `.
         assert!(
-            contents.contains("  - [ ] 10.1 First task of phase 10"),
-            "child should land under auto-anchor:\n{contents}"
+            contents.contains("\n- [ ] 10.1 First task of phase 10\n"),
+            "child task at column 0:\n{contents}"
         );
         let json = out.to_json();
         assert!(
@@ -1661,8 +1681,8 @@ mod tests {
         writeback_create(&payload, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [ ] 10.0 Dropdown audit pass"),
-            "plan_phase should drive anchor title:\n{contents}"
+            contents.contains("## Phase 10.0 - Dropdown audit pass"),
+            "plan_phase drives v2 anchor title:\n{contents}"
         );
     }
 

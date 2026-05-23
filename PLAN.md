@@ -23,7 +23,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 38.3 `plan_set_phase_deps(id, depends_on=[], prefer_after=[])` MCP + CLI
   - [x] 38.4 `archive <PHASE>` errors on `[ ]` Pending tasks
   - [x] 38.5 `archive <PHASE> --descope-pending` moves pending subtrees to `# Backlog`
-  - [ ] 38.6 `backlog <plan_path>` preserves subtree under `# Backlog` (was: flat bullet)
+  - [x] 38.6 `backlog <plan_path>` preserves subtree under `# Backlog` (was: flat bullet)
   - [ ] 38.7 Auto-anchor synthesizes `## Phase X - <title>` header (was `- [ ] X.0 ...`)
   - [ ] 38.8 Verb tests (add/rename/deps/archive/backlog/auto-anchor)
 - [ ] 39.0 Reconcile dep surfacing + dogfood + cut
