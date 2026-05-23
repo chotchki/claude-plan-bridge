@@ -564,23 +564,6 @@ fn flatten_id_style(node: &mut Node) {
     }
 }
 
-/// Phase-tier wrapper for [count_phase_headers_in_subtree] — checks the
-/// phase's own annotations plus its task subtree.
-fn phase_header_count(phase: &Phase) -> usize {
-    let here = phase
-        .annotations
-        .iter()
-        .filter(
-            |a| matches!(a, Annotation::Text { text, .. } if parse_phase_header(text).is_some()),
-        )
-        .count();
-    here + phase
-        .children
-        .iter()
-        .map(count_phase_headers_in_subtree)
-        .sum::<usize>()
-}
-
 fn count_phase_headers_in_subtree(node: &Node) -> usize {
     let here = node
         .annotations

@@ -3,34 +3,6 @@
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
-- [ ] 36.0 FORMATv2 AST split + bidirectional parser
-  - [x] 36.1 Add Phase + Backlog types to AST; refactor Plan struct
-  - [x] 36.2 Refactor consumers (archive/reconcile/writeback/resume/mcp/baseline/canonicalize) for new AST
-  - [x] 36.3 Parser recognizes `## Phase X - Title *(depends on: Y)*` + `*(prefer after: Z)*` headers
-  - [x] 36.4 Parser recognizes `# Backlog (not yet phased)` h1 + nested descoped subtrees
-  - [x] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
-  - [x] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
-- [ ] 37.0 FORMATv2 write path (canonicalize on first write)
-  - [x] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
-  - [x] 37.2 Serializer emits `# Backlog (not yet phased)` h1 (was h2)
-  - [x] 37.3 Serializer emits ` - ` hyphen-space separator on task/subtask lines
-  - [x] 37.4 Serializer emits phase-level prose
-  - [x] 37.5 Canonicalize flips v1 (checkbox phases) → v2 (header phases) on first write
-  - [x] 37.6 Round-trip + v1→v2 flip tests
-- [ ] 38.0 Phase verbs + per-phase archive
-  - [x] 38.1 `plan_add_phase(id, title, depends_on=[], after=None)` MCP + CLI
-  - [x] 38.2 `plan_rename_phase(id, new_title)` MCP + CLI
-  - [x] 38.3 `plan_set_phase_deps(id, depends_on=[], prefer_after=[])` MCP + CLI
-  - [x] 38.4 `archive <PHASE>` errors on `[ ]` Pending tasks
-  - [x] 38.5 `archive <PHASE> --descope-pending` moves pending subtrees to `# Backlog`
-  - [x] 38.6 `backlog <plan_path>` preserves subtree under `# Backlog` (was: flat bullet)
-  - [x] 38.7 Auto-anchor synthesizes `## Phase X - <title>` header (was `- [ ] X.0 ...`)
-  - [x] 38.8 Verb tests (add/rename/deps/archive/backlog/auto-anchor)
-- [ ] 39.0 Reconcile dep surfacing + dogfood + cut
-  - [x] 39.1 Reconcile surfaces both `*(depends on)*` and `*(prefer after)*` in additionalContext
-  - [x] 39.2 e2e: parse + canonicalize a copy of ../quicksight/PLAN.md without losing content
-  - [ ] 39.3 SPEC.md + README.md + CLAUDE.md hint docs updates for FORMATv2
-  - [ ] 39.4 Cut release (version bump, RELEASE_NOTES, tag, push)
 - [ ] 40.0 Activation focus (per-project active phase)
   - [ ] 40.1 Add `active_phase: Option<String>` to state file + accessors
   - [ ] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
