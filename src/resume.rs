@@ -66,6 +66,13 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         // the resume/compact branch of the prompt can ask the agent to dedup
         // against TaskList by harness id (precise) instead of by subject text
         // (fuzzy when titles drift mid-session).
+        // Phase 40.3: when a phase is active, scope rehydration to leaves
+        // whose plan_path falls under that phase. Backlog entries
+        // (synthetic `backlog:` mappings, no real leaf in PLAN.md) ride
+        // through the existing filter unchanged — they're cross-cutting
+        // context that always loads. When no active_phase is set, the
+        // filter is a pass-through (today's behavior).
+        let active = state.active_phase().map(String::from);
         let mut open: Vec<(String, String, String)> = state
             .mappings
             .iter()
@@ -76,6 +83,11 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 }
                 if !item.is_leaf() {
                     return None;
+                }
+                if let Some(active_id) = active.as_deref() {
+                    if crate::state::phase_id_of(&m.plan_path) != active_id {
+                        return None;
+                    }
                 }
                 Some((m.plan_path.clone(), item.title().to_string(), task_id.clone()))
             })
@@ -207,6 +219,18 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 " Backfill TaskCreates (if any) are independent — batch them in a single \
                  tool-call block.\n",
             );
+        }
+
+        // Phase 40.3: announce the active-phase scope up front, before the
+        // bullets, so the agent understands why the list is narrower than
+        // PLAN.md would suggest. Cross-phase work is still possible — the
+        // hint just frames the bullets as "your current focus."
+        if let Some(active_id) = active.as_deref() {
+            out.push_str(&format!(
+                "\nActive phase: `{active_id}` (scoped). Other open phases are present in \
+                 PLAN.md but skipped here. Run `plan_deactivate` to widen scope, or \
+                 `plan_activate <other>` to switch focus.\n",
+            ));
         }
 
         let mut current_parent: Option<String> = None;
@@ -1397,5 +1421,131 @@ mod tests {
                 "source={source} footer should reference the source label: {msg}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 40.3: resume scopes rehydration prompt to active phase
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn resume_scopes_open_leaves_to_active_phase() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AI - Studio\n\n- [ ] AI.0 task A\n- [ ] AI.1 task B\n\n## Phase AS - Spine\n\n- [ ] AS.0 task C\n- [ ] AS.1 task D\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "t-AI-0",
+            Mapping {
+                plan_path: "AI.0".to_string(),
+                last_synced_title: "task A".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-AI-1",
+            Mapping {
+                plan_path: "AI.1".to_string(),
+                last_synced_title: "task B".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-AS-0",
+            Mapping {
+                plan_path: "AS.0".to_string(),
+                last_synced_title: "task C".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-AS-1",
+            Mapping {
+                plan_path: "AS.1".to_string(),
+                last_synced_title: "task D".to_string(),
+                ..Default::default()
+            },
+        );
+        state.set_active_phase(Some("AS".to_string()));
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "resume").unwrap().unwrap();
+        // Active phase announced.
+        assert!(
+            msg.contains("Active phase: `AS`"),
+            "active-phase header surfaced: {msg}"
+        );
+        // AS leaves present, AI leaves filtered out.
+        assert!(msg.contains("AS.0"), "AS.0 in scope: {msg}");
+        assert!(msg.contains("AS.1"), "AS.1 in scope: {msg}");
+        assert!(!msg.contains("AI.0"), "AI.0 should be filtered: {msg}");
+        assert!(!msg.contains("AI.1"), "AI.1 should be filtered: {msg}");
+    }
+
+    #[test]
+    fn resume_with_no_active_phase_is_unchanged() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AI - Studio\n\n- [ ] AI.0 task A\n\n## Phase AS - Spine\n\n- [ ] AS.0 task C\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "t-AI-0",
+            Mapping {
+                plan_path: "AI.0".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-AS-0",
+            Mapping {
+                plan_path: "AS.0".to_string(),
+                ..Default::default()
+            },
+        );
+        write_state(&plan, &state);
+
+        let msg = build_resume_message(&plan, "resume").unwrap().unwrap();
+        assert!(
+            !msg.contains("Active phase:"),
+            "no active-phase header when None: {msg}"
+        );
+        assert!(msg.contains("AI.0"), "AI.0 loads: {msg}");
+        assert!(msg.contains("AS.0"), "AS.0 loads: {msg}");
+    }
+
+    #[test]
+    fn resume_active_phase_with_no_matching_open_leaves_returns_none() {
+        // Activated phase has no open leaves (every leaf already done).
+        // build_resume_message returns None — nothing to rehydrate.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AI - Studio\n\n- [ ] AI.0 still open\n\n## Phase AS - Spine\n\n- [x] AS.0 done\n",
+        );
+        let mut state = State::default();
+        state.record(
+            "t-AI-0",
+            Mapping {
+                plan_path: "AI.0".to_string(),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-AS-0",
+            Mapping {
+                plan_path: "AS.0".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        state.set_active_phase(Some("AS".to_string()));
+        write_state(&plan, &state);
+
+        // No open leaves under AS → None.
+        let msg = build_resume_message(&plan, "resume").unwrap();
+        assert!(msg.is_none(), "no open leaves in active phase → None");
     }
 }

@@ -5,7 +5,7 @@ Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
 - [ ] 40.0 Activation focus (per-project active phase)
   - [x] 40.1 Add `active_phase: Option<String>` to state file + accessors
-  - [ ] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
+  - [x] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
   - [ ] 40.3 Resume scopes rehydration prompt to active phase (backlog always loaded)
   - [ ] 40.4 Writeback warns on cross-phase TaskCreate (warn-but-allow); archive auto-clears active_phase
   - [ ] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
