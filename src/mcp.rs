@@ -89,6 +89,7 @@ impl McpServer {
             "plan_skip" => self.tool_plan_skip(&args),
             "plan_backlog" => self.tool_plan_backlog(&args),
             "plan_add" => self.tool_plan_add(&args),
+            "plan_add_phase" => self.tool_plan_add_phase(&args),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
             "plan_rename" => self.tool_plan_rename(&args),
@@ -186,6 +187,61 @@ impl McpServer {
         }
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&format!("added {plan_path} `{subject}`")))
+    }
+
+    /// Phase 38.1: create a new FORMATv2 phase header explicitly. Use when
+    /// you want to set `depends_on` / `prefer_after` at creation time, or
+    /// pre-create a phase with no tasks yet. For the common "just start typing
+    /// tasks" path, TaskCreate's auto-anchor still works — this verb is the
+    /// surgical option for richer setup.
+    fn tool_plan_add_phase(&self, args: &Value) -> Result<Value> {
+        let id = require_string(args, "id")?;
+        let title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let depends_on: Vec<String> = args
+            .get("depends_on")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .unwrap_or_default();
+        let prefer_after: Vec<String> = args
+            .get("prefer_after")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .unwrap_or_default();
+        let after = args.get("after").and_then(Value::as_str).map(String::from);
+
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        if plan.find_phase(&id).is_some() {
+            return Err(anyhow!("phase `{id}` already exists"));
+        }
+        let new_phase = crate::ast::Phase {
+            id: id.clone(),
+            title: title.clone(),
+            state: NodeState::Pending,
+            id_style: crate::ast::IdStyle::Plain,
+            separator: crate::ast::Separator::Hyphen,
+            children: vec![],
+            annotations: vec![],
+            depends_on,
+            prefer_after,
+            source: crate::ast::PhaseSource::HeaderV2,
+        };
+        if let Some(after_id) = after {
+            let pos = plan
+                .phases
+                .iter()
+                .position(|p| p.id == after_id)
+                .ok_or_else(|| anyhow!("--after target `{after_id}` not found at top level"))?;
+            plan.phases.insert(pos + 1, new_phase);
+        } else {
+            plan.insert_phase(new_phase);
+        }
+        std::fs::write(&self.plan_path, serialize(&plan))?;
+        Ok(tool_text_result(&format!("added phase `{id}` - `{title}`")))
     }
 
     /// Mark a phase (or any non-leaf) as ready to exit: validate every leaf in
@@ -400,6 +456,22 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_add_phase",
+                "description": "Create a new FORMATv2 phase header (`## Phase <id> - <title>`) with optional `depends_on` and `prefer_after` markers. Use when you want explicit phase metadata at creation time, or to pre-create a phase with no tasks. TaskCreate's auto-anchor still handles the common 'just start typing tasks' path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Phase id (typically alphabetic, e.g. `AI`, `AS`)."},
+                        "title": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Hard sequencing — surfaced in reconcile as 'depends on X — X not archived'."},
+                        "prefer_after": {"type": "array", "items": {"type": "string"}, "description": "Soft sequencing hint."},
+                        "after": {"type": "string", "description": "Insert immediately after this existing phase id (positional). Defaults to id-sort order."}
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_archive",
                 "description": "Sweep every fully-complete top-level phase to PLAN_ARCHIVE.md. Optional `dry_run` and `date` (YYYY-MM-DD) arguments.",
                 "inputSchema": {
@@ -538,12 +610,77 @@ mod tests {
             "plan_skip",
             "plan_backlog",
             "plan_add",
+            "plan_add_phase",
             "plan_archive",
             "plan_phase_exit",
             "plan_rename",
         ] {
             assert!(names.contains(expected), "missing {expected}: {names:?}");
         }
+    }
+
+    #[test]
+    fn plan_add_phase_inserts_v2_header_with_markers() {
+        let (_, s) = scratch_plan("## Phase AI - Existing\n\n- [ ] AI.0 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_add_phase",
+                "arguments": {
+                    "id": "AS",
+                    "title": "Spine",
+                    "depends_on": ["AR", "AQ"],
+                    "prefer_after": ["AB"]
+                }
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
+            "v2 header with markers landed:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_add_phase_refuses_duplicate_id() {
+        let (_, s) = scratch_plan("## Phase AI - Already there\n\n- [ ] AI.0 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "plan_add_phase",
+                "arguments": {"id": "AI", "title": "Duplicate"}
+            }}),
+        );
+        let err = resp.get("error").expect("duplicate must error: {resp}");
+        let msg = err["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("AI") && msg.to_lowercase().contains("already"),
+            "error mentions duplicate: {msg}"
+        );
+    }
+
+    #[test]
+    fn plan_add_phase_with_after_inserts_after_target() {
+        let (_, s) = scratch_plan(
+            "## Phase AI - First\n\n- [ ] AI.0 a\n\n## Phase AS - Third\n\n- [ ] AS.0 c\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "plan_add_phase",
+                "arguments": {"id": "AM", "title": "Middle", "after": "AI"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        let ai_pos = after.find("## Phase AI").unwrap();
+        let am_pos = after.find("## Phase AM").unwrap();
+        let as_pos = after.find("## Phase AS").unwrap();
+        assert!(
+            ai_pos < am_pos && am_pos < as_pos,
+            "AM inserted between AI and AS:\n{after}"
+        );
     }
 
     #[test]

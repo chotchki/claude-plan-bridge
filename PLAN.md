@@ -12,11 +12,11 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
 - [ ] 37.0 FORMATv2 write path (canonicalize on first write)
   - [x] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
-  - [ ] 37.2 Serializer emits `# Backlog (not yet phased)` h1 (was h2)
-  - [ ] 37.3 Serializer emits ` - ` hyphen-space separator on task/subtask lines
+  - [x] 37.2 Serializer emits `# Backlog (not yet phased)` h1 (was h2)
+  - [x] 37.3 Serializer emits ` - ` hyphen-space separator on task/subtask lines
   - [x] 37.4 Serializer emits phase-level prose
-  - [ ] 37.5 Canonicalize flips v1 (checkbox phases) → v2 (header phases) on first write
-  - [ ] 37.6 Round-trip + v1→v2 flip tests
+  - [x] 37.5 Canonicalize flips v1 (checkbox phases) → v2 (header phases) on first write
+  - [x] 37.6 Round-trip + v1→v2 flip tests
 - [ ] 38.0 Phase verbs + per-phase archive
   - [ ] 38.1 `plan_add_phase(id, title, depends_on=[], after=None)` MCP + CLI
   - [ ] 38.2 `plan_rename_phase(id, new_title)` MCP + CLI
@@ -38,6 +38,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [ ] 40.4 Writeback warns on cross-phase TaskCreate (warn-but-allow); archive auto-clears active_phase
   - [ ] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
   - [ ] 40.6 Activation e2e tests + docs (SPEC/README update)
+  - [ ] 40.7 CLI `plan-bridge phase-scaffold <ID> <title> --tasks "...,...,..."`
 
 ## Backlog (not yet phased)
 

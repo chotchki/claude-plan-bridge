@@ -154,6 +154,29 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Create a new FORMATv2 phase header (`## Phase <ID> - <title>`) with
+    /// optional `*(depends on: ...)*` and `*(prefer after: ...)*` markers.
+    /// For the common "just start typing tasks" path, TaskCreate's auto-anchor
+    /// still works — `phase-add` is the surgical alternative when you want
+    /// dependency metadata at creation time, or to pre-create an empty phase.
+    PhaseAdd {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// Phase id (typically alphabetic, e.g. `AI`, `AS`).
+        id: String,
+        /// Optional phase title (defaults to empty).
+        title: Option<String>,
+        /// Hard sequencing — comma-separated phase ids (`--depends-on AR,AQ`).
+        #[arg(long, value_delimiter = ',')]
+        depends_on: Vec<String>,
+        /// Soft sequencing hint — comma-separated phase ids.
+        #[arg(long, value_delimiter = ',')]
+        prefer_after: Vec<String>,
+        /// Insert immediately after this existing phase id (positional). Defaults
+        /// to id-sort order.
+        #[arg(long)]
+        after: Option<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -328,6 +351,51 @@ fn main() -> Result<()> {
             for note in &report.notes {
                 println!("  - {note}");
             }
+        }
+        Command::PhaseAdd {
+            project,
+            id,
+            title,
+            depends_on,
+            prefer_after,
+            after,
+        } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            if plan.find_phase(&id).is_some() {
+                anyhow::bail!("phase `{id}` already exists in PLAN.md");
+            }
+            let title_str = title.unwrap_or_default();
+            let new_phase = plan_bridge::ast::Phase {
+                id: id.clone(),
+                title: title_str.clone(),
+                state: plan_bridge::ast::NodeState::Pending,
+                id_style: plan_bridge::ast::IdStyle::Plain,
+                separator: plan_bridge::ast::Separator::Hyphen,
+                children: vec![],
+                annotations: vec![],
+                depends_on,
+                prefer_after,
+                source: plan_bridge::ast::PhaseSource::HeaderV2,
+            };
+            if let Some(after_id) = after {
+                let pos = plan
+                    .phases
+                    .iter()
+                    .position(|p| p.id == after_id)
+                    .ok_or_else(|| anyhow::anyhow!("--after target `{after_id}` not found at top level"))?;
+                plan.phases.insert(pos + 1, new_phase);
+            } else {
+                plan.insert_phase(new_phase);
+            }
+            std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                .with_context(|| format!("write {}", plan_path.display()))?;
+            println!(
+                "claude-plan-bridge: added phase `{id}` - `{title_str}` in {}",
+                plan_path.display()
+            );
         }
         Command::Archive {
             project,
