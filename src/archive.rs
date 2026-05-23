@@ -240,6 +240,7 @@ fn build_archive_section(today: &str, archived: &[Phase]) -> String {
             preamble: vec![],
             phases: vec![phase.clone()],
             backlog: vec![],
+            backlog_h1: false,
         };
         out.push_str(&serialize(&temp));
         out.push('\n');

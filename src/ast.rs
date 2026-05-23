@@ -23,6 +23,13 @@ pub struct Plan {
     /// `consolidate_backlog` sweeps the rest. See [Plan::append_backlog_note].
     #[serde(default)]
     pub backlog: Vec<String>,
+    /// When `true`, the serializer emits the backlog heading as `# Backlog
+    /// (not yet phased)` (FORMATv2 canonical, h1). When `false`, the legacy
+    /// `## Backlog (not yet phased)` (h2). Set by the parser when it sees
+    /// `# Backlog` on read, and by `canonicalize` when flipping the plan to
+    /// v2. Routine writes preserve the parsed value.
+    #[serde(default)]
+    pub backlog_h1: bool,
 }
 
 /// A top-level phase. Tasks live in `children`; phase-level metadata
@@ -781,6 +788,7 @@ impl Plan {
                 preamble: self.preamble,
                 phases: new_phases,
                 backlog: self.backlog,
+                backlog_h1: self.backlog_h1,
             },
             conversions,
         ))
@@ -1141,6 +1149,7 @@ mod tests {
         let plan = Plan {
             preamble: vec!["# Header".to_string(), "".to_string()],
             backlog: vec![],
+            backlog_h1: false,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1186,6 +1195,7 @@ mod tests {
         let plan = Plan {
             preamble: vec![],
             backlog: vec![],
+            backlog_h1: false,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1230,6 +1240,7 @@ mod tests {
         let mut plan = Plan {
             preamble: vec![],
             backlog: vec![],
+            backlog_h1: false,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1699,6 +1710,7 @@ mod tests {
         let plan = Plan {
             preamble: vec![],
             backlog: vec![],
+            backlog_h1: false,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),

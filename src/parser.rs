@@ -36,8 +36,9 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
     // pinned to the bottom across edits. Only a genuinely trailing block is
     // lifted; a preamble or mid-document Backlog stays where it is until
     // `consolidate_backlog` (canonicalize / explicit backlog ops) moves it.
-    let (body, trailing_backlog) = peel_trailing_backlog(input);
+    let (body, trailing_backlog, backlog_was_h1) = peel_trailing_backlog(input);
     plan.backlog = trailing_backlog;
+    plan.backlog_h1 = backlog_was_h1;
 
     for (idx, raw_line) in body.iter().enumerate() {
         let raw_line = *raw_line;
@@ -319,7 +320,7 @@ fn split_id_list(list: &str) -> impl Iterator<Item = String> + '_ {
 /// line isn't the Backlog heading (e.g. it's `## Sustainment`, a `### Backlog`
 /// subsection, prose, or a checkbox), nothing is peeled — the Backlog stays in
 /// the body for the tree walk / `consolidate_backlog` to handle.
-fn peel_trailing_backlog(input: &str) -> (Vec<&str>, Vec<String>) {
+fn peel_trailing_backlog(input: &str) -> (Vec<&str>, Vec<String>, bool) {
     let lines: Vec<&str> = input.lines().collect();
 
     // Walk up from EOF over backlog-body-shaped lines, looking for the heading.
@@ -336,29 +337,30 @@ fn peel_trailing_backlog(input: &str) -> (Vec<&str>, Vec<String>) {
                 || trimmed.starts_with('-')
                 || (line.starts_with(char::is_whitespace) && !trimmed.is_empty()));
         if crate::ast::is_backlog_heading(line) {
-            // Found the heading bounding a clean trailing block.
+            // Detect heading level for round-trip: h1 `# Backlog` (FORMATv2)
+            // vs h2 `## Backlog` (legacy). Both are accepted on read; the
+            // serializer honors `plan.backlog_h1`. `# B...` starts with `# `
+            // exactly, while `## B...` starts with `## ` (second char is `#`
+            // not space), so prefix-match on `# ` AND NOT `## ` distinguishes.
+            let was_h1 = trimmed.starts_with("# ") && !trimmed.starts_with("## ");
             let body_lines: Vec<String> =
                 lines[i..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            // Trim surrounding blank lines from the captured bullets.
             let backlog = trim_blank_edges(body_lines);
             if backlog.is_empty() {
-                // A bare heading with no bullets — not worth lifting.
-                return (lines, Vec::new());
+                return (lines, Vec::new(), false);
             }
             let mut kept: Vec<&str> = lines[..i - 1].to_vec();
-            // Drop trailing blanks so re-serialize doesn't accumulate them
-            // (the serializer inserts exactly one blank before the section).
             while kept.last().is_some_and(|l| l.trim().is_empty()) {
                 kept.pop();
             }
-            return (kept, backlog);
+            return (kept, backlog, was_h1);
         }
         if !is_body_shaped {
             break;
         }
         i -= 1;
     }
-    (lines, Vec::new())
+    (lines, Vec::new(), false)
 }
 
 fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {

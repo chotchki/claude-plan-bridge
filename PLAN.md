@@ -11,10 +11,10 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
   - [x] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
 - [ ] 37.0 FORMATv2 write path (canonicalize on first write)
-  - [ ] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
+  - [x] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
   - [ ] 37.2 Serializer emits `# Backlog (not yet phased)` h1 (was h2)
   - [ ] 37.3 Serializer emits ` - ` hyphen-space separator on task/subtask lines
-  - [ ] 37.4 Serializer emits phase-level prose
+  - [x] 37.4 Serializer emits phase-level prose
   - [ ] 37.5 Canonicalize flips v1 (checkbox phases) → v2 (header phases) on first write
   - [ ] 37.6 Round-trip + v1→v2 flip tests
 - [ ] 38.0 Phase verbs + per-phase archive

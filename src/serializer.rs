@@ -25,11 +25,19 @@ pub fn serialize(plan: &Plan) -> String {
     // One blank line separates it from preceding content. The parser auto-lifts
     // this trailing block back into `plan.backlog` on the next parse, so the
     // round-trip is stable and a later phase-append can't slip ahead of it.
+    //
+    // Phase 37.2: heading level is per-plan (`plan.backlog_h1`). FORMATv2
+    // canonical is `# Backlog (not yet phased)` (h1); legacy/parsed h2 form
+    // round-trips as h2 unless `canonicalize` flips it.
     if !plan.backlog.is_empty() {
         if !out.is_empty() && !out.ends_with("\n\n") {
             out.push('\n');
         }
-        out.push_str("## Backlog (not yet phased)\n\n");
+        if plan.backlog_h1 {
+            out.push_str("# Backlog (not yet phased)\n\n");
+        } else {
+            out.push_str("## Backlog (not yet phased)\n\n");
+        }
         for line in &plan.backlog {
             out.push_str(line);
             out.push('\n');
