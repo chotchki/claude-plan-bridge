@@ -5,8 +5,14 @@ use serde::{Deserialize, Serialize};
 pub struct Plan {
     /// Lines preceding the first checkbox node, preserved verbatim for round-trip.
     pub preamble: Vec<String>,
-    /// Top-level nodes (phases). A node is a "leaf" when its `children` vec is empty.
-    pub phases: Vec<Node>,
+    /// Top-level phases. Phase 36 split: phases are no longer Node-shaped
+    /// checkboxes (`- [ ] N.0 ...`) but their own struct, so FORMATv2's header
+    /// form (`## Phase N - Title *(depends on: ...)*`) has a real home. v1
+    /// PLAN.md files still parse — the parser converts each top-level
+    /// `- [ ] N.0` line into a `Phase` with the `state`/`id_style`/`separator`
+    /// fields preserving the legacy anchor form so the serializer can round-trip
+    /// it (Phase 37 will switch the serializer to FORMATv2 by default).
+    pub phases: Vec<Phase>,
     /// The canonical `## Backlog (not yet phased)` section, owned as a
     /// first-class trailing region so it always serializes at the very bottom
     /// (below every phase) and survives phase-appends without drifting. Holds
@@ -19,8 +25,52 @@ pub struct Plan {
     pub backlog: Vec<String>,
 }
 
-/// A single checkbox node in the plan. Phases, tasks, and subtasks all share this shape;
-/// depth is determined by the dotted `id` (e.g., `1.0`, `1.1`, `1.1.1`) and by tree position.
+/// A top-level phase. Tasks live in `children`; phase-level metadata
+/// (`depends_on`, eventually FORMATv2 prose) live on the Phase itself.
+///
+/// The `state`/`id_style`/`separator` fields are v1 holdovers — they describe
+/// the legacy `- [ ] N.0` anchor form. Once Phase 37 lands the FORMATv2
+/// serializer they become advisory only (and a future phase will drop them
+/// from the on-disk representation entirely).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Phase {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub state: NodeState,
+    #[serde(default)]
+    pub id_style: IdStyle,
+    #[serde(default)]
+    pub separator: Separator,
+    /// Tasks under the phase. Field is named `children` (rather than `tasks`)
+    /// for 36.1 so consumers that read `phase.children` keep compiling without
+    /// a rename sweep; 36.2 will tighten the naming.
+    #[serde(default)]
+    pub children: Vec<Node>,
+    /// Annotations attached at the phase level. Today this is everything the
+    /// parser used to hang off the v1 `N.0` anchor; 36.5 will split out
+    /// phase-level prose (lines under a `## Phase` header not attached to any
+    /// task) as a distinct bucket.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    /// FORMATv2: phases declared with `*(depends on: AB, AC)*` carry the
+    /// dependency list here. Informational only — reconcile surfaces it; the
+    /// bridge does not enforce ordering at archive time. Reconcile language is
+    /// strong ("AS depends on AR — AR not yet archived").
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// FORMATv2: phases declared with `*(prefer after: AB)*` carry a softer
+    /// sequencing hint here — work that benefits from being done after the
+    /// listed phases but isn't blocked by them. Same informational-only
+    /// posture as [Phase::depends_on], but reconcile speaks more gently
+    /// ("AS prefers AR has landed first").
+    #[serde(default)]
+    pub prefer_after: Vec<String>,
+}
+
+/// A single checkbox node in the plan. Tasks and subtasks share this shape;
+/// depth is determined by the dotted `id` (e.g., `1.1`, `1.1.1`) and by tree
+/// position. Top-level phases use [Phase] instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
@@ -143,6 +193,187 @@ impl Node {
             }
         }
         None
+    }
+}
+
+impl Phase {
+    /// True when the phase carries no tasks. Phases are not "leaves" in the
+    /// task sense — this is for traversal symmetry with [Node::is_leaf].
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.state == NodeState::Done
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.state.is_resolved()
+    }
+
+    /// Collect every leaf under this phase (depth-first, document order).
+    /// Phases themselves are not leaves; only childless tasks/subtasks are.
+    pub fn leaves(&self) -> Vec<&Node> {
+        let mut out = Vec::new();
+        for child in &self.children {
+            collect_leaves(child, &mut out);
+        }
+        out
+    }
+
+    /// Search this phase + its task subtree for an id. Matches the phase
+    /// itself when `id` equals `self.id`; otherwise recurses into tasks.
+    /// Returned reference is `&Node` — phase matches are returned as a
+    /// borrowed [Node] view via [Phase::as_node_view]; if you need the
+    /// `Phase` itself, look it up on [Plan::phases] directly.
+    pub fn find_task(&self, id: &str) -> Option<&Node> {
+        for child in &self.children {
+            if let Some(n) = child.find(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    pub fn find_task_mut(&mut self, id: &str) -> Option<&mut Node> {
+        for child in &mut self.children {
+            if let Some(n) = child.find_mut(id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Build a Phase from a top-level Node — used by the parser when it
+    /// finishes assembling a `- [ ] N.0 ...` anchor and promotes it to the
+    /// phase tier, and by anywhere that wants to wrap a legacy-anchor-shaped
+    /// node into a Phase for insertion.
+    pub fn from_node(node: Node) -> Self {
+        Self {
+            id: node.id,
+            title: node.title,
+            state: node.state,
+            id_style: node.id_style,
+            separator: node.separator,
+            children: node.children,
+            annotations: node.annotations,
+            depends_on: Vec::new(),
+            prefer_after: Vec::new(),
+        }
+    }
+}
+
+/// Borrowed view of either a Phase or a Node — returned by
+/// [Plan::find_item] for callers that need to inspect common fields without
+/// caring which tier the id lives at.
+#[derive(Debug)]
+pub enum PlanItemRef<'a> {
+    Phase(&'a Phase),
+    Node(&'a Node),
+}
+
+impl<'a> PlanItemRef<'a> {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Phase(p) => &p.id,
+            Self::Node(n) => &n.id,
+        }
+    }
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Phase(p) => &p.title,
+            Self::Node(n) => &n.title,
+        }
+    }
+    pub fn state(&self) -> NodeState {
+        match self {
+            Self::Phase(p) => p.state,
+            Self::Node(n) => n.state,
+        }
+    }
+    pub fn annotations(&self) -> &[Annotation] {
+        match self {
+            Self::Phase(p) => &p.annotations,
+            Self::Node(n) => &n.annotations,
+        }
+    }
+    pub fn children(&self) -> &[Node] {
+        match self {
+            Self::Phase(p) => &p.children,
+            Self::Node(n) => &n.children,
+        }
+    }
+    pub fn is_leaf(&self) -> bool {
+        self.children().is_empty()
+    }
+}
+
+/// Mutable view of either a Phase or a Node — returned by
+/// [Plan::find_item_mut]. Methods provide tier-uniform mutation of the
+/// fields shared between Phase and Node.
+#[derive(Debug)]
+pub enum PlanItemMut<'a> {
+    Phase(&'a mut Phase),
+    Node(&'a mut Node),
+}
+
+impl<'a> PlanItemMut<'a> {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Phase(p) => &p.id,
+            Self::Node(n) => &n.id,
+        }
+    }
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Phase(p) => &p.title,
+            Self::Node(n) => &n.title,
+        }
+    }
+    pub fn set_title(&mut self, t: String) {
+        match self {
+            Self::Phase(p) => p.title = t,
+            Self::Node(n) => n.title = t,
+        }
+    }
+    pub fn state(&self) -> NodeState {
+        match self {
+            Self::Phase(p) => p.state,
+            Self::Node(n) => n.state,
+        }
+    }
+    pub fn set_state(&mut self, s: NodeState) {
+        match self {
+            Self::Phase(p) => p.state = s,
+            Self::Node(n) => n.state = s,
+        }
+    }
+    pub fn annotations(&self) -> &[Annotation] {
+        match self {
+            Self::Phase(p) => &p.annotations,
+            Self::Node(n) => &n.annotations,
+        }
+    }
+    pub fn annotations_mut(&mut self) -> &mut Vec<Annotation> {
+        match self {
+            Self::Phase(p) => &mut p.annotations,
+            Self::Node(n) => &mut n.annotations,
+        }
+    }
+    pub fn children(&self) -> &[Node] {
+        match self {
+            Self::Phase(p) => &p.children,
+            Self::Node(n) => &n.children,
+        }
+    }
+    pub fn children_mut(&mut self) -> &mut Vec<Node> {
+        match self {
+            Self::Phase(p) => &mut p.children,
+            Self::Node(n) => &mut n.children,
+        }
+    }
+    pub fn is_leaf(&self) -> bool {
+        self.children().is_empty()
     }
 }
 
@@ -304,7 +535,7 @@ fn count_phase_headers_in_subtree(node: &Node) -> usize {
 }
 
 fn flush_phase_group(
-    out: &mut Vec<Node>,
+    out: &mut Vec<Phase>,
     pending: &mut Vec<Node>,
     current_header: &mut Option<(String, String)>,
 ) {
@@ -313,7 +544,7 @@ fn flush_phase_group(
     }
     if let Some((id, title)) = current_header.take() {
         let children: Vec<Node> = std::mem::take(pending);
-        out.push(Node {
+        out.push(Phase {
             id,
             title,
             state: NodeState::Pending,
@@ -321,26 +552,51 @@ fn flush_phase_group(
             separator: Separator::Space,
             children,
             annotations: vec![],
+            depends_on: vec![],
+            prefer_after: vec![],
         });
     } else {
-        out.append(pending);
+        // Promote every orphan top-level Node (no captured Phase header
+        // wrapping it) into its own Phase. Legacy `- [ ] N.0` anchors land
+        // here — their state/style/separator come along for v1 round-trip.
+        for node in pending.drain(..) {
+            out.push(Phase::from_node(node));
+        }
     }
 }
 
 impl Plan {
-    /// Every leaf across all phases. Document order.
-    pub fn leaves(&self) -> Vec<&Node> {
-        let mut out = Vec::new();
+    /// Every leaf across all phases, returned as a uniform Phase-or-Node view.
+    /// A *phase* qualifies as a leaf when it has no tasks under it (legacy v1
+    /// `- [ ] N.0 Foo` with no children — the anchor itself was the unit of
+    /// work). A *task* qualifies as a leaf when it has no nested children.
+    /// Document order: childless phase emits its own item; non-empty phase
+    /// emits each leaf descendant of its task subtree.
+    pub fn leaves(&self) -> Vec<PlanItemRef<'_>> {
+        let mut out: Vec<PlanItemRef<'_>> = Vec::new();
         for phase in &self.phases {
-            collect_leaves(phase, &mut out);
+            if phase.children.is_empty() {
+                out.push(PlanItemRef::Phase(phase));
+                continue;
+            }
+            let mut node_leaves: Vec<&Node> = Vec::new();
+            for child in &phase.children {
+                collect_leaves(child, &mut node_leaves);
+            }
+            for leaf in node_leaves {
+                out.push(PlanItemRef::Node(leaf));
+            }
         }
         out
     }
 
-    /// Full-tree search by id. O(N); plans are small.
+    /// Full-tree search by id, walking *task* subtrees only. For top-level
+    /// phase-id lookups use [Plan::find_phase]; for the common "is this id
+    /// anywhere in the plan?" check use [Plan::contains_id]; for callers that
+    /// don't know whether `id` names a phase or a task use [Plan::find_item].
     pub fn find(&self, id: &str) -> Option<&Node> {
         for p in &self.phases {
-            if let Some(n) = p.find(id) {
+            if let Some(n) = p.find_task(id) {
                 return Some(n);
             }
         }
@@ -349,8 +605,46 @@ impl Plan {
 
     pub fn find_mut(&mut self, id: &str) -> Option<&mut Node> {
         for p in &mut self.phases {
-            if let Some(n) = p.find_mut(id) {
+            if let Some(n) = p.find_task_mut(id) {
                 return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Find a phase by id at the top level.
+    pub fn find_phase(&self, id: &str) -> Option<&Phase> {
+        self.phases.iter().find(|p| p.id == id)
+    }
+
+    pub fn find_phase_mut(&mut self, id: &str) -> Option<&mut Phase> {
+        self.phases.iter_mut().find(|p| p.id == id)
+    }
+
+    /// True when `id` matches any phase OR any task in the plan. Cheap
+    /// existence check used by writeback / mcp where the caller doesn't care
+    /// what kind of node it is, only that something owns the id.
+    pub fn contains_id(&self, id: &str) -> bool {
+        self.find_phase(id).is_some() || self.find(id).is_some()
+    }
+
+    /// Locate a phase OR task by id, returning whichever variant matched.
+    /// Use when the caller needs to read shared fields (id/title/state/
+    /// annotations) regardless of which tier the id lives at.
+    pub fn find_item(&self, id: &str) -> Option<PlanItemRef<'_>> {
+        if let Some(p) = self.find_phase(id) {
+            return Some(PlanItemRef::Phase(p));
+        }
+        self.find(id).map(PlanItemRef::Node)
+    }
+
+    pub fn find_item_mut(&mut self, id: &str) -> Option<PlanItemMut<'_>> {
+        if let Some(idx) = self.phases.iter().position(|p| p.id == id) {
+            return Some(PlanItemMut::Phase(&mut self.phases[idx]));
+        }
+        for phase in &mut self.phases {
+            if let Some(n) = phase.find_task_mut(id) {
+                return Some(PlanItemMut::Node(n));
             }
         }
         None
@@ -359,17 +653,27 @@ impl Plan {
     /// Insert a child into the node with `parent_id`, positioned in id-sort
     /// order against its siblings. Lets `1.2a` land between `1.2` and `1.3`
     /// without renumbering. Returns Err if no such parent.
+    ///
+    /// Parent resolution: if `parent_id` matches a top-level Phase, the child
+    /// lands in that phase's task list. Otherwise the bridge searches every
+    /// phase's task subtree for a Node with the matching id.
     pub fn add_child_of(&mut self, parent_id: &str, child: Node) -> Result<(), String> {
-        let parent = self
-            .find_mut(parent_id)
-            .ok_or_else(|| format!("no node with id {parent_id} in PLAN.md"))?;
-        insert_in_order(&mut parent.children, child);
-        Ok(())
+        if let Some(phase) = self.phases.iter_mut().find(|p| p.id == parent_id) {
+            insert_in_order(&mut phase.children, child);
+            return Ok(());
+        }
+        for phase in &mut self.phases {
+            if let Some(parent) = phase.find_task_mut(parent_id) {
+                insert_in_order(&mut parent.children, child);
+                return Ok(());
+            }
+        }
+        Err(format!("no node with id {parent_id} in PLAN.md"))
     }
 
     /// Insert a top-level phase in id-sort order against existing phases.
-    pub fn insert_phase(&mut self, phase: Node) {
-        insert_in_order(&mut self.phases, phase);
+    pub fn insert_phase(&mut self, phase: Phase) {
+        insert_phase_in_order(&mut self.phases, phase);
     }
 
     /// Standardize a plan to canonical form before writeback. Promotes
@@ -391,23 +695,27 @@ impl Plan {
         // preserved in-place; only `##` / `###` headers matching
         // `<id> — Title` get promoted to canonical phase checkboxes.
 
-        // For each top-level phase, depth-first strip every
-        // Phase-N header annotation from anywhere in its subtree (headers
-        // attached to nested leaves count too — the parser attaches a header
-        // to whichever node was open at that indent level). Captured in
-        // document order.
+        // Convert every existing Phase back into its Node-shaped form so the
+        // header-stripping + promotion logic — which walks Node subtrees —
+        // can operate uniformly. Phases that lose their header annotations
+        // get rebuilt into Phases at the end via flush_phase_group.
         let mut tagged: Vec<(Vec<(String, String)>, Node)> = Vec::new();
         let mut conversions: Vec<String> = Vec::new();
-        for mut phase in self.phases {
+        for phase in self.phases {
+            let mut as_node = phase_to_node(phase);
             let mut headers_in_subtree: Vec<(String, String)> = Vec::new();
-            strip_and_collect_phase_headers(&mut phase, &mut headers_in_subtree, &mut conversions);
-            tagged.push((headers_in_subtree, phase));
+            strip_and_collect_phase_headers(
+                &mut as_node,
+                &mut headers_in_subtree,
+                &mut conversions,
+            );
+            tagged.push((headers_in_subtree, as_node));
         }
 
         // Third pass: each phase's outgoing header is the single Phase-N
         // header that was in its subtree (if any). Multi-header subtrees were
         // skipped above — their headers stay as narrative annotations.
-        let mut new_phases: Vec<Node> = Vec::new();
+        let mut new_phases: Vec<Phase> = Vec::new();
         let mut pending: Vec<Node> = Vec::new();
         let mut current_header: Option<(String, String)> = None;
         for (mut headers, phase) in tagged {
@@ -423,7 +731,11 @@ impl Plan {
         // pass owns the destructive normalization; round-trip writebacks
         // preserve `IdStyle::Bold`.
         for phase in &mut new_phases {
-            flatten_id_style(phase);
+            phase.id_style = IdStyle::Plain;
+            phase.separator = Separator::Space;
+            for child in &mut phase.children {
+                flatten_id_style(child);
+            }
         }
 
         Ok((
@@ -439,16 +751,29 @@ impl Plan {
     /// Remove a node by id from anywhere in the tree. Returns the detached
     /// node when found. Does not cascade-remove orphaned empty parents
     /// (deliberate v1 decision per PLAN.md 2.3.3).
+    ///
+    /// Phase 36 split: removing a top-level *phase* returns the phase's
+    /// fields wrapped back into a Node — preserves the contract for callers
+    /// that store the result for later re-insertion (archive sweep, descope).
     pub fn remove(&mut self, id: &str) -> Option<Node> {
-        if let Some(idx) = self.phases.iter().position(|n| n.id == id) {
-            return Some(self.phases.remove(idx));
+        if let Some(idx) = self.phases.iter().position(|p| p.id == id) {
+            return Some(phase_to_node(self.phases.remove(idx)));
         }
         for phase in &mut self.phases {
-            if let Some(detached) = remove_descendant(phase, id) {
+            if let Some(detached) = remove_descendant_in_phase(phase, id) {
                 return Some(detached);
             }
         }
         None
+    }
+
+    /// Remove a top-level phase by id, returning the full Phase (with its
+    /// FORMATv2 metadata intact). Use this instead of [Plan::remove] when
+    /// you specifically want a Phase back — archive sweeps, future descope
+    /// flows.
+    pub fn remove_phase(&mut self, id: &str) -> Option<Phase> {
+        let idx = self.phases.iter().position(|p| p.id == id)?;
+        Some(self.phases.remove(idx))
     }
 
     /// Append a no-path note to the canonical Backlog field (the bottom
@@ -527,7 +852,10 @@ impl Plan {
         let mut collected: Vec<String> = Vec::new();
         extract_backlog_from_preamble(&mut self.preamble, &mut collected);
         for phase in &mut self.phases {
-            extract_backlog_from_annotations(phase, &mut collected);
+            extract_backlog_from_annotation_list(&mut phase.annotations, &mut collected);
+            for child in &mut phase.children {
+                extract_backlog_from_annotations(child, &mut collected);
+            }
         }
         let mut swept = 0;
         for line in collected {
@@ -580,30 +908,37 @@ fn extract_backlog_from_preamble(lines: &mut Vec<String>, out: &mut Vec<String>)
 /// mid-document Backlog that the parser didn't auto-lift (trailing blocks are
 /// already lifted into `plan.backlog` at parse time).
 fn extract_backlog_from_annotations(node: &mut Node, out: &mut Vec<String>) {
+    extract_backlog_from_annotation_list(&mut node.annotations, out);
+    for child in &mut node.children {
+        extract_backlog_from_annotations(child, out);
+    }
+}
+
+/// Inner sweep: walk a single annotation list, pulling out backlog blocks.
+/// Shared by [extract_backlog_from_annotations] (Node) and the Phase-level
+/// walker used in [Plan::consolidate_backlog].
+fn extract_backlog_from_annotation_list(annotations: &mut Vec<Annotation>, out: &mut Vec<String>) {
     let mut i = 0;
-    while i < node.annotations.len() {
+    while i < annotations.len() {
         let is_heading = matches!(
-            &node.annotations[i],
+            &annotations[i],
             Annotation::Text { text, .. } if is_backlog_heading(text)
         );
         if is_heading {
             let mut end = i + 1;
-            while end < node.annotations.len() {
-                if let Annotation::Bullet { text, .. } = &node.annotations[end] {
+            while end < annotations.len() {
+                if let Annotation::Bullet { text, .. } = &annotations[end] {
                     out.push(format!("- {text}"));
                     end += 1;
                 } else {
                     break;
                 }
             }
-            node.annotations.drain(i..end);
+            annotations.drain(i..end);
             // Re-check at the same index (drain shifted things down).
         } else {
             i += 1;
         }
-    }
-    for child in &mut node.children {
-        extract_backlog_from_annotations(child, out);
     }
 }
 
@@ -619,6 +954,36 @@ fn remove_descendant(node: &mut Node, id: &str) -> Option<Node> {
     None
 }
 
+/// Phase variant of [remove_descendant]: searches a phase's task subtree for
+/// an id and removes the matching Node.
+fn remove_descendant_in_phase(phase: &mut Phase, id: &str) -> Option<Node> {
+    if let Some(idx) = phase.children.iter().position(|c| c.id == id) {
+        return Some(phase.children.remove(idx));
+    }
+    for child in &mut phase.children {
+        if let Some(detached) = remove_descendant(child, id) {
+            return Some(detached);
+        }
+    }
+    None
+}
+
+/// Flatten a [Phase] back into a Node. Lossy — drops `depends_on`. Used by
+/// callers that store a swept phase as a Node for re-serialization
+/// (`Plan::remove`), and internally by `standardize_to_canonical` so the
+/// header-promotion logic can keep operating on Node subtrees.
+fn phase_to_node(phase: Phase) -> Node {
+    Node {
+        id: phase.id,
+        title: phase.title,
+        state: phase.state,
+        id_style: phase.id_style,
+        separator: phase.separator,
+        children: phase.children,
+        annotations: phase.annotations,
+    }
+}
+
 /// Insert `new_node` into `siblings` at the first position whose id sorts
 /// strictly after the new id (per `cmp_ids`). When the new id is the largest,
 /// this is just an append.
@@ -628,6 +993,16 @@ fn insert_in_order(siblings: &mut Vec<Node>, new_node: Node) {
         .position(|n| cmp_ids(&new_node.id, &n.id) == std::cmp::Ordering::Less)
         .unwrap_or(siblings.len());
     siblings.insert(pos, new_node);
+}
+
+/// Phase variant of [insert_in_order]: sort-insert a [Phase] into a slice
+/// of phases by id.
+fn insert_phase_in_order(phases: &mut Vec<Phase>, new_phase: Phase) {
+    let pos = phases
+        .iter()
+        .position(|p| cmp_ids(&new_phase.id, &p.id) == std::cmp::Ordering::Less)
+        .unwrap_or(phases.len());
+    phases.insert(pos, new_phase);
 }
 
 /// Compare two plan-path ids component-wise. Each `.`-separated component is
@@ -715,7 +1090,7 @@ mod tests {
         let plan = Plan {
             preamble: vec!["# Header".to_string(), "".to_string()],
             backlog: vec![],
-            phases: vec![Node {
+            phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
@@ -734,6 +1109,8 @@ mod tests {
                     children: vec![],
                     annotations: vec![],
                 }],
+                depends_on: vec![],
+                prefer_after: vec![],
             }],
         };
         let json = serde_json::to_string(&plan).unwrap();
@@ -757,7 +1134,7 @@ mod tests {
         let plan = Plan {
             preamble: vec![],
             backlog: vec![],
-            phases: vec![Node {
+            phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
@@ -781,13 +1158,18 @@ mod tests {
                     annotations: vec![],
                 }],
                 annotations: vec![],
+                depends_on: vec![],
+                prefer_after: vec![],
             }],
         };
-        assert!(plan.find("1.0").is_some());
+        // Phase 36: top-level phase ids resolve via find_phase / contains_id.
+        assert!(plan.find_phase("1.0").is_some());
+        assert!(plan.contains_id("1.0"));
         assert!(plan.find("1.1").is_some());
         assert!(plan.find("1.1.1").is_some());
         assert!(plan.find("1.2").is_none());
         assert!(plan.find("9.9").is_none());
+        assert!(!plan.contains_id("9.9"));
     }
 
     #[test]
@@ -795,7 +1177,7 @@ mod tests {
         let mut plan = Plan {
             preamble: vec![],
             backlog: vec![],
-            phases: vec![Node {
+            phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
@@ -803,6 +1185,8 @@ mod tests {
                 separator: Separator::Space,
                 children: vec![],
                 annotations: vec![],
+                depends_on: vec![],
+                prefer_after: vec![],
             }],
         };
         let child = Node {
@@ -862,7 +1246,7 @@ mod tests {
             annotations: vec![],
         };
         plan.add_child_of("7.0", new_child).unwrap();
-        let parent = plan.find("7.0").unwrap();
+        let parent = plan.find_phase("7.0").unwrap();
         let ids: Vec<&str> = parent.children.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["7.1", "7.2", "7.2a", "7.3"]);
     }
@@ -881,7 +1265,7 @@ mod tests {
         };
         plan.add_child_of("1.0", new_child).unwrap();
         let ids: Vec<&str> = plan
-            .find("1.0")
+            .find_phase("1.0")
             .unwrap()
             .children
             .iter()
@@ -894,7 +1278,7 @@ mod tests {
     fn insert_phase_orders_top_level_too() {
         // Symmetry: top-level phases use the same ordering as child insertion.
         let mut plan = parse_for_test("- [ ] 1.0 a\n- [ ] 3.0 c\n");
-        plan.insert_phase(Node {
+        plan.insert_phase(Phase {
             id: "2.0".to_string(),
             title: "b".to_string(),
             state: NodeState::Pending,
@@ -902,6 +1286,8 @@ mod tests {
             separator: Separator::Space,
             children: vec![],
             annotations: vec![],
+            depends_on: vec![],
+            prefer_after: vec![],
         });
         let ids: Vec<&str> = plan.phases.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["1.0", "2.0", "3.0"]);
@@ -929,15 +1315,15 @@ mod tests {
         let removed = plan.remove("1.1").unwrap();
         assert_eq!(removed.id, "1.1");
         assert!(plan.find("1.1").is_none());
-        assert!(plan.find("1.0").is_some(), "parent should remain");
+        assert!(plan.find_phase("1.0").is_some(), "parent should remain");
     }
 
     #[test]
     fn remove_pulls_a_top_level_phase() {
         let mut plan = parse_for_test("- [ ] 1.0 P1\n- [ ] 2.0 P2\n");
         plan.remove("1.0").unwrap();
-        assert!(plan.find("1.0").is_none());
-        assert!(plan.find("2.0").is_some());
+        assert!(plan.find_phase("1.0").is_none());
+        assert!(plan.find_phase("2.0").is_some());
     }
 
     #[test]
@@ -1268,7 +1654,7 @@ mod tests {
         let plan = Plan {
             preamble: vec![],
             backlog: vec![],
-            phases: vec![Node {
+            phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
@@ -1279,6 +1665,8 @@ mod tests {
                     text: "#hashtag style not a header".to_string(),
                     indent: 2,
                 }],
+                depends_on: vec![],
+                prefer_after: vec![],
             }],
         };
         let (_, notes) = plan.standardize_to_canonical().unwrap();

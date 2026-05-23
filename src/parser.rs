@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Node, NodeState, Plan};
+use crate::ast::{Annotation, Node, NodeState, Phase, Plan};
 use thiserror::Error;
 use winnow::Parser;
 use winnow::ascii::space0;
@@ -142,7 +142,13 @@ fn push_into_parent(plan: &mut Plan, stack: &mut [(Node, usize)], node: Node) {
     if let Some((parent, _)) = stack.last_mut() {
         parent.children.push(node);
     } else {
-        plan.phases.push(node);
+        // Top-level: legacy v1 `- [ ] N.0` anchors become Phases. The
+        // Node-shaped fields (id/title/state/style/separator/children/
+        // annotations) carry across via Phase::from_node so v1 round-trip is
+        // preserved; FORMATv2's `depends_on` defaults empty until the parser
+        // learns to read `## Phase ID - Title *(depends on: ...)*` headers
+        // (Phase 36.3).
+        plan.phases.push(Phase::from_node(node));
     }
 }
 

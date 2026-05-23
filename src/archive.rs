@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::ast::NodeState;
-use crate::ast::{Node, Plan};
+use crate::ast::{Node, Phase, Plan};
 use crate::parser::parse;
 use crate::serializer::serialize;
 use crate::state::{State, default_state_path_for};
@@ -46,8 +46,8 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
         .map_err(anyhow::Error::msg)?;
 
     // Partition phases into "stay" vs "archive" preserving order.
-    let mut keep: Vec<Node> = Vec::new();
-    let mut archive: Vec<Node> = Vec::new();
+    let mut keep: Vec<Phase> = Vec::new();
+    let mut archive: Vec<Phase> = Vec::new();
     for phase in std::mem::take(&mut plan.phases) {
         if phase_fully_done(&phase) {
             archive.push(phase);
@@ -59,7 +59,7 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     let mut report = ArchiveReport::empty(dry_run);
     for phase in &archive {
         report.archived_phase_ids.push(phase.id.clone());
-        collect_plan_paths(phase, &mut report.archived_plan_paths);
+        collect_phase_paths(phase, &mut report.archived_plan_paths);
     }
 
     if archive.is_empty() {
@@ -133,7 +133,7 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
 
     if !phase_fully_done(&plan.phases[phase_idx]) {
         let mut unresolved: Vec<String> = Vec::new();
-        collect_unresolved_leaves(&plan.phases[phase_idx], &mut unresolved);
+        collect_unresolved_leaves_in_phase(&plan.phases[phase_idx], &mut unresolved);
         anyhow::bail!(
             "phase `{phase_id}` is not fully resolved; unresolved leaves: {}",
             unresolved.join(", ")
@@ -143,7 +143,7 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
     let phase = plan.phases.remove(phase_idx);
     let mut report = ArchiveReport::empty(false);
     report.archived_phase_ids.push(phase.id.clone());
-    collect_plan_paths(&phase, &mut report.archived_plan_paths);
+    collect_phase_paths(&phase, &mut report.archived_plan_paths);
 
     let new_plan_text = serialize(&plan);
     let archive_section = build_archive_section(today, std::slice::from_ref(&phase));
@@ -193,11 +193,30 @@ fn collect_unresolved_leaves(node: &Node, out: &mut Vec<String>) {
     }
 }
 
-fn phase_fully_done(node: &Node) -> bool {
+/// Phase-level entry point for unresolved-leaf collection. Phases themselves
+/// aren't leaves — recurse straight into their task list.
+fn collect_unresolved_leaves_in_phase(phase: &Phase, out: &mut Vec<String>) {
+    for child in &phase.children {
+        collect_unresolved_leaves(child, out);
+    }
+}
+
+fn node_fully_done(node: &Node) -> bool {
     if node.is_leaf() {
         return node.is_resolved();
     }
-    node.children.iter().all(phase_fully_done)
+    node.children.iter().all(node_fully_done)
+}
+
+/// True when every leaf under the phase is resolved. For non-empty phases
+/// the phase's own (legacy) state checkbox is irrelevant — phases auto-tick
+/// semantically. For an *empty* phase (no children) we fall back to the
+/// legacy state: `[ ]` blocks archive, `[x]`/`[-]`/`[>]` clears it.
+fn phase_fully_done(phase: &Phase) -> bool {
+    if phase.children.is_empty() {
+        return phase.is_resolved();
+    }
+    phase.children.iter().all(node_fully_done)
 }
 
 fn collect_plan_paths(node: &Node, out: &mut Vec<String>) {
@@ -207,7 +226,14 @@ fn collect_plan_paths(node: &Node, out: &mut Vec<String>) {
     }
 }
 
-fn build_archive_section(today: &str, archived: &[Node]) -> String {
+fn collect_phase_paths(phase: &Phase, out: &mut Vec<String>) {
+    out.push(phase.id.clone());
+    for child in &phase.children {
+        collect_plan_paths(child, out);
+    }
+}
+
+fn build_archive_section(today: &str, archived: &[Phase]) -> String {
     let mut out = format!("## {today}\n\n");
     for phase in archived {
         let temp = Plan {

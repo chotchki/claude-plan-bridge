@@ -70,14 +70,14 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             .mappings
             .iter()
             .filter_map(|(task_id, m)| {
-                let node = plan.find(&m.plan_path)?;
-                if node.state != NodeState::Pending {
+                let item = plan.find_item(&m.plan_path)?;
+                if item.state() != NodeState::Pending {
                     return None;
                 }
-                if !node.is_leaf() {
+                if !item.is_leaf() {
                     return None;
                 }
-                Some((m.plan_path.clone(), node.title.clone(), task_id.clone()))
+                Some((m.plan_path.clone(), item.title().to_string(), task_id.clone()))
             })
             .collect();
         if open.is_empty() {
@@ -215,9 +215,9 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             let parent_id = crate::ast::parent_id_for(path);
             if parent_id != current_parent {
                 if let Some(ref pid) = parent_id
-                    && let Some(parent_node) = plan.find(pid)
+                    && let Some(parent_item) = plan.find_item(pid)
                 {
-                    out.push_str(&format!("\n## {} {}\n", parent_node.id, parent_node.title));
+                    out.push_str(&format!("\n## {} {}\n", parent_item.id(), parent_item.title()));
                 }
                 current_parent = parent_id;
             }

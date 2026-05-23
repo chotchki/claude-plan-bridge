@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, IdStyle, Node, NodeState, Plan, Separator};
+use crate::ast::{Annotation, IdStyle, Node, NodeState, Phase, Plan, Separator};
 
 /// Render a `Plan` back to markdown.
 ///
@@ -19,7 +19,7 @@ pub fn serialize(plan: &Plan) -> String {
         // not from a serializer-side auto-insertion. Removes the asymmetry
         // that caused roundtrip drift (serialize emits a blank that parse
         // then captures as a new Blank annotation, growing the AST each cycle).
-        write_node(&mut out, phase, 0);
+        write_phase(&mut out, phase);
     }
     // Phase 35: the canonical Backlog section renders last, below every phase.
     // One blank line separates it from preceding content. The parser auto-lifts
@@ -36,6 +36,43 @@ pub fn serialize(plan: &Plan) -> String {
         }
     }
     out
+}
+
+/// Phase 36 v1 serializer: emit a phase as the legacy `- [<state>] <id> <title>`
+/// checkbox form. Phase 37 will swap this for FORMATv2's `## Phase <id> - <title>
+/// *(depends on: ...)* *(prefer after: ...)*` markdown header. Until then the
+/// phase's [Phase::depends_on] and [Phase::prefer_after] fields are present in
+/// the AST but not yet written to disk.
+fn write_phase(out: &mut String, phase: &Phase) {
+    let mark = match phase.state {
+        NodeState::Done => "x",
+        NodeState::WontDo => "-",
+        NodeState::Backlog => ">",
+        NodeState::Pending => " ",
+    };
+    let body = if phase.id.is_empty() {
+        phase.title.clone()
+    } else {
+        let id_rendered = match phase.id_style {
+            IdStyle::Bold => format!("**{}**", phase.id),
+            IdStyle::Plain => phase.id.clone(),
+        };
+        let separator = match phase.separator {
+            Separator::Space => " ",
+            Separator::EmDash => " — ",
+            Separator::Hyphen => " - ",
+        };
+        format!("{id_rendered}{separator}{}", phase.title)
+    };
+    out.push_str(&format!("- [{mark}] {body}\n"));
+
+    let inner = "  ";
+    for ann in &phase.annotations {
+        write_annotation(out, ann, inner);
+    }
+    for child in &phase.children {
+        write_node(out, child, 1);
+    }
 }
 
 fn write_node(out: &mut String, node: &Node, depth: usize) {

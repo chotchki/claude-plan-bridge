@@ -108,7 +108,10 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     // (and thus stopped being a leaf) doesn't falsely register as removed.
     let mut all_node_paths: HashSet<String> = HashSet::new();
     for phase in &plan.phases {
-        collect_all_paths(phase, &mut all_node_paths);
+        all_node_paths.insert(phase.id.clone());
+        for child in &phase.children {
+            collect_all_paths(child, &mut all_node_paths);
+        }
     }
 
     // Phase 31.5: a leaf is a "phase anchor" when it sits at top level and its
@@ -222,7 +225,27 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
 
     // Intra-PLAN.md sanity check: parent-checked-but-children-not.
     for phase in &plan.phases {
-        collect_parent_inconsistencies(phase, &mut deltas);
+        // The phase itself: legacy v1 anchors carry a state. If marked done
+        // (`- [x] N.0`) but a descendant is pending, surface the same
+        // inconsistency at the phase tier.
+        if phase.is_resolved() {
+            let mut unresolved: Vec<String> = Vec::new();
+            for child in &phase.children {
+                collect_unresolved_descendants(child, &mut unresolved);
+                if !child.is_resolved() {
+                    unresolved.push(child.id.clone());
+                }
+            }
+            if !unresolved.is_empty() {
+                deltas.push(Delta::ParentInconsistent {
+                    plan_path: phase.id.clone(),
+                    unchecked_descendants: unresolved,
+                });
+            }
+        }
+        for child in &phase.children {
+            collect_parent_inconsistencies(child, &mut deltas);
+        }
     }
 
     // Phase 23 advisory: state.mappings whose task_id starts with `baseline:`
@@ -404,7 +427,11 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
 
 fn collect_leaves<'a>(plan: &'a Plan, out: &mut Vec<&'a Node>) {
     for phase in &plan.phases {
-        collect_leaves_node(phase, out);
+        // Phases themselves are not leaves in the task sense — recurse into
+        // their task tree only.
+        for child in &phase.children {
+            collect_leaves_node(child, out);
+        }
     }
 }
 

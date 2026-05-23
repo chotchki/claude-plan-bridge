@@ -205,12 +205,12 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             state.remove(id);
         }
 
-        let mapping = match plan.find(&assigned_path) {
-            Some(node) => Mapping {
+        let mapping = match plan.find_item(&assigned_path) {
+            Some(item) => Mapping {
                 plan_path: assigned_path.clone(),
-                last_synced_title: node.title.clone(),
-                last_synced_state: node.state,
-                last_synced_annotations: annotations_to_strings(&node.annotations),
+                last_synced_title: item.title().to_string(),
+                last_synced_state: item.state(),
+                last_synced_annotations: annotations_to_strings(item.annotations()),
                 created_in_session: payload.session_id.clone(),
             },
             None => Mapping {
@@ -370,24 +370,24 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         // --- Subject rename (skip when also deleting — would rename then remove) ---
         if !matches!(status, Some("deleted"))
             && let Some(new_title) = new_subject
-            && let Some(node) = plan.find_mut(&node_path)
-            && node.title != new_title
+            && let Some(mut item) = plan.find_item_mut(&node_path)
+            && item.title() != new_title
         {
-            node.title = new_title.to_string();
+            item.set_title(new_title.to_string());
             changes.push(format!("renamed to `{new_title}`"));
         }
 
         // --- Status mutation ---
         match status {
             Some("completed") => {
-                let Some(node) = plan.find_mut(&node_path) else {
+                let Some(mut item) = plan.find_item_mut(&node_path) else {
                     // Node vanished from PLAN.md. Nothing to tick. If we also
                     // had a rename queued it won't have applied either (same
                     // missing-node), so just silent.
                     return Ok(HookOutput::silent());
                 };
-                if !node.is_done() {
-                    node.state = NodeState::Done;
+                if item.state() != NodeState::Done {
+                    item.set_state(NodeState::Done);
                     changes.push("marked complete".to_string());
                 }
             }
@@ -398,17 +398,18 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 // non-Pending (Done / WontDo / Backlog) or missing leaves,
                 // just unlink the harness mapping — the prior contract.
                 // Hand-edit PLAN.md or run archive to actually remove a line.
-                let pending_leaf = plan
-                    .find(&node_path)
-                    .map(|n| n.state == NodeState::Pending && n.is_leaf())
-                    .unwrap_or(false);
+                let (pending_leaf, title) = plan
+                    .find_item(&node_path)
+                    .map(|item| {
+                        (
+                            item.state() == NodeState::Pending && item.is_leaf(),
+                            item.title().to_string(),
+                        )
+                    })
+                    .unwrap_or((false, String::new()));
                 if pending_leaf {
-                    let title = plan
-                        .find(&node_path)
-                        .map(|n| n.title.clone())
-                        .unwrap_or_default();
-                    if let Some(node) = plan.find_mut(&node_path) {
-                        node.state = NodeState::Backlog;
+                    if let Some(mut item) = plan.find_item_mut(&node_path) {
+                        item.set_state(NodeState::Backlog);
                     }
                     // Phase 35.2a: deferrals land in the canonical bottom
                     // Backlog section. Consolidate first so a legacy preamble
@@ -454,7 +455,7 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         // Refresh last_synced_* off the post-mutation leaf so reconcile has a
         // current baseline. Skip if the mapping was removed (deleted case).
         if state.plan_path(&input.task_id).is_some()
-            && let Some(node) = plan.find(&node_path)
+            && let Some(item) = plan.find_item(&node_path)
         {
             // Preserve the mapping's `created_in_session` stamp across the
             // refresh — it's only meaningful to writeback_create's
@@ -467,9 +468,9 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 .unwrap_or_default();
             let updated = Mapping {
                 plan_path: node_path.clone(),
-                last_synced_title: node.title.clone(),
-                last_synced_state: node.state,
-                last_synced_annotations: annotations_to_strings(&node.annotations),
+                last_synced_title: item.title().to_string(),
+                last_synced_state: item.state(),
+                last_synced_annotations: annotations_to_strings(item.annotations()),
                 created_in_session,
             };
             state.record(&input.task_id, updated);
@@ -499,7 +500,7 @@ fn insert_at_path(
     plan_phase: Option<&str>,
 ) -> Result<InsertResult> {
     let mut plan = plan;
-    if plan.find(plan_path).is_some() {
+    if plan.contains_id(plan_path) {
         // Already in the plan — leave it alone, just record the mapping.
         return Ok(InsertResult {
             plan,
@@ -517,9 +518,9 @@ fn insert_at_path(
     };
     let mut anchor_created: Option<String> = None;
     match parent_id_for(plan_path) {
-        None => plan.insert_phase(new_node),
+        None => plan.insert_phase(crate::ast::Phase::from_node(new_node)),
         Some(parent_id) => {
-            if plan.find(&parent_id).is_none() {
+            if !plan.contains_id(&parent_id) {
                 // Conditional canonicalize fallback: if the parent isn't found,
                 // it may be living as a `### Phase N — Title` markdown header
                 // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
@@ -534,7 +535,7 @@ fn insert_at_path(
                     .clone()
                     .standardize_to_canonical()
                     .map_err(|e| anyhow!(e))?;
-                if standardized.find(&parent_id).is_some() {
+                if standardized.contains_id(&parent_id) {
                     plan = standardized;
                 } else if parent_id_for(&parent_id).is_none() {
                     let anchor_title = plan_phase
@@ -549,7 +550,7 @@ fn insert_at_path(
                         children: vec![],
                         annotations: vec![],
                     };
-                    plan.insert_phase(anchor);
+                    plan.insert_phase(crate::ast::Phase::from_node(anchor));
                     anchor_created = Some(parent_id.clone());
                 } else {
                     anyhow::bail!(

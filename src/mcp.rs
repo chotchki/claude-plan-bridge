@@ -137,13 +137,13 @@ impl McpServer {
         let id = require_string(args, "plan_path")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
         let mut plan = parse(&text)?;
-        let node = plan
-            .find_mut(&id)
+        let mut item = plan
+            .find_item_mut(&id)
             .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
-        if node.state == target {
+        if item.state() == target {
             return Ok(tool_text_result(&format!("{id} was already {verb}")));
         }
-        node.state = target;
+        item.set_state(target);
         std::fs::write(&self.plan_path, serialize(&plan))?;
         Ok(tool_text_result(&format!("{verb} {id}")))
     }
@@ -153,7 +153,7 @@ impl McpServer {
         let subject = require_string(args, "subject")?;
         let text = std::fs::read_to_string(&self.plan_path)?;
         let mut plan = parse(&text)?;
-        if plan.find(&plan_path).is_some() {
+        if plan.contains_id(&plan_path) {
             return Err(anyhow!("node `{plan_path}` already exists"));
         }
         let new_node = Node {
@@ -166,18 +166,18 @@ impl McpServer {
             annotations: vec![],
         };
         match parent_id_for(&plan_path) {
-            None => plan.phases.push(new_node),
+            None => plan.phases.push(crate::ast::Phase::from_node(new_node)),
             Some(pid) => {
                 // Conditional canonicalize fallback: if the parent isn't found,
                 // it may be living as a `### Phase N — Title` markdown header
                 // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
                 // Promote those into checkboxes and retry. If still missing,
                 // surface the original error.
-                if plan.find(&pid).is_none() {
+                if !plan.contains_id(&pid) {
                     let parsed = parse(&text)?;
                     let (standardized, _notes) =
                         parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
-                    if standardized.find(&pid).is_some() {
+                    if standardized.contains_id(&pid) {
                         plan = standardized;
                     }
                 }
@@ -222,17 +222,17 @@ impl McpServer {
                 .with_context(|| format!("read {}", self.plan_path.display()))?;
             let mut plan = parse(&text)?;
 
-            let node = plan
-                .find_mut(&id)
+            let mut item = plan
+                .find_item_mut(&id)
                 .ok_or_else(|| anyhow!("no node with id `{id}` in PLAN.md"))?;
 
-            if node.title == new_subject {
+            if item.title() == new_subject {
                 return Ok(tool_text_result(&format!(
                     "{id} already titled `{new_subject}`"
                 )));
             }
 
-            node.title = new_subject.clone();
+            item.set_title(new_subject.clone());
             std::fs::write(&self.plan_path, serialize(&plan))
                 .with_context(|| format!("write {}", self.plan_path.display()))?;
 

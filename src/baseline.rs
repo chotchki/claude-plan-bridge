@@ -51,26 +51,27 @@ pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
         // collide on key `baseline:` — last-write-wins drops siblings, and
         // every subsequent reconcile emits noisy LeafTitleChanged drift.
         // Untrackable by design: give the leaf an id if you want it baselined.
-        if leaf.id.is_empty() {
-            report.skipped_no_id.push(leaf.title.clone());
+        let id = leaf.id();
+        if id.is_empty() {
+            report.skipped_no_id.push(leaf.title().to_string());
             continue;
         }
-        if mapped_paths.contains(&leaf.id) {
-            report.already_mapped.push(leaf.id.clone());
+        if mapped_paths.contains(id) {
+            report.already_mapped.push(id.to_string());
             continue;
         }
-        let synthetic_id = format!("{BASELINE_PREFIX}{}", leaf.id);
+        let synthetic_id = format!("{BASELINE_PREFIX}{id}");
         state.record(
             &synthetic_id,
             Mapping {
-                plan_path: leaf.id.clone(),
-                last_synced_title: leaf.title.clone(),
-                last_synced_state: leaf.state,
-                last_synced_annotations: annotations_to_strings(&leaf.annotations),
+                plan_path: id.to_string(),
+                last_synced_title: leaf.title().to_string(),
+                last_synced_state: leaf.state(),
+                last_synced_annotations: annotations_to_strings(leaf.annotations()),
                 ..Default::default()
             },
         );
-        report.baselined.push(leaf.id.clone());
+        report.baselined.push(id.to_string());
     }
 
     if !report.baselined.is_empty() {
