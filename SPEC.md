@@ -109,6 +109,55 @@ stays a v2 header. The single operation that flips everything to
 FORMATv2 canonical is `plan-bridge canonicalize` — explicit, idempotent,
 itemizes every change in its report.
 
+## Activation focus (Phase 40)
+
+The bridge supports scoping its surface area to a single phase via
+`plan-bridge activate <PHASE>` (or MCP `plan_activate`). When set:
+
+- `state.active_phase: Option<String>` persists the focus across
+  restarts and survives `/clear` — it's a per-project preference, not a
+  per-session task mapping.
+- **SessionStart rehydration** scopes the prompt to leaves whose
+  `plan_path` falls under the active phase (`state::phase_id_of` =
+  first dot-separated segment). Other-phase leaves stay in PLAN.md but
+  aren't surfaced to the harness TaskList until focus widens.
+- **Reconcile** still emits drift for every phase (cross-phase changes
+  don't go invisible), but partitions the output:
+
+  ```
+  Active phase `AS` drift:
+    + Added ⬜ AS.7 ...
+    ! Phase AS depends on AR — not yet archived
+
+  Other phases / cross-cutting:
+    + Added ⬜ AM.5 ...
+    i 4 leaf(s) tracked via baseline ...
+  ```
+
+- **Writeback** is warn-but-allow on cross-phase TaskCreate: the new
+  task lands as usual, and the hook output appends a one-line nudge
+  ("cross-phase TaskCreate — AM.5 is in phase AM, but active phase is
+  AI. Run `plan_activate AM` to switch focus, or `plan_deactivate` to
+  widen.") — never blocks, matches the bridge's other peripheral
+  patterns.
+- **Archive** auto-clears `active_phase` when the swept phase is the
+  focused one. Focus moves with the phase; no orphaned focus left
+  pointing at a vanished phase.
+
+Backlog notes (`backlog:<task_id>` synthetic mappings and unphased
+notes in `# Backlog (not yet phased)`) are cross-cutting context that
+always loads on resume regardless of focus.
+
+Use cases the focus model addresses:
+- Reducing rehydration tokens on a large multi-phase plan (~50 leaves
+  → ~10 under a single phase)
+- Mental focus during multi-day work — the harness surface stops being
+  a wall of cross-phase noise
+- Pairing with `*(depends on)*` markers — activate AR, finish, archive,
+  focus auto-clears, agent picks the next ready phase
+- Explicit signal in transcripts about which slice of the plan is
+  "live" right now
+
 ### Backlog state (`[>]`) semantics
 
 `[>]` marks a leaf that was real planned work but is being **consciously deferred from its current phase** — distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active). Use it when you want to ship the phase without dragging unfinished work along, but the deferred item is worth remembering for later.
@@ -225,6 +274,8 @@ plan-bridge status                                        # health check
 plan-bridge phase-add <ID> [TITLE] [--depends-on X,Y] [--prefer-after A,B] [--after <ID>]
 plan-bridge phase-rename <ID> <new-title>
 plan-bridge phase-deps <ID> [--depends-on X,Y] [--prefer-after A,B]
+plan-bridge activate <PHASE>                              # focus mode (40.2)
+plan-bridge deactivate                                    # clear focus
 ```
 
 All project-scoped commands accept `--cwd <PATH>` (project root) and
@@ -262,6 +313,7 @@ above as JSON-RPC tools:
 - `plan_set_phase_deps`
 - `plan_archive` (bulk), `plan_phase_exit` (single, with optional
   `descope_pending: bool`)
+- `plan_activate(id)`, `plan_deactivate()` — Phase 40 focus mode
 
 Useful when TaskCreate's flat model is too lossy — e.g., explicit
 reordering, phase-exit gates, dep edits, deferring without going through

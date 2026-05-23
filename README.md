@@ -174,6 +174,42 @@ one of the two flags must be passed; pass an empty list (`--depends-on
 ""`) to clear. Flips a legacy v1 anchor to FORMATv2 header form so the
 markers can render.
 
+### `activate <PHASE>` / `deactivate`
+
+Phase 40 focus mode. `activate AS` scopes the bridge's surface to a
+single phase:
+
+- **Resume**'s rehydration prompt only loads leaves under that phase
+  (other-phase leaves stay in PLAN.md but aren't surfaced to the harness
+  TaskList).
+- **Reconcile** still emits drift for every phase, but partitions the
+  output into `Active phase AS drift:` first, then `Other phases /
+  cross-cutting:`.
+- **Writeback** is warn-but-allow on cross-phase TaskCreate — the new
+  task lands, and the hook output appends a one-line nudge
+  (`NOTE: cross-phase TaskCreate — AM.5 is in phase AM, but active
+  phase is AS. Run plan_activate AM to switch focus, or plan_deactivate
+  to widen.`). Never blocks; matches the bridge's other peripheral
+  patterns.
+- **Archive** auto-clears the focus when the swept phase is the focused
+  one — no orphan focus pointing at a vanished phase.
+- **Backlog** notes are cross-cutting and always load on resume.
+
+State persists in `.claude/plan-bridge-state.json` (`active_phase`
+field) — survives `/clear` and outlives the Claude session.
+
+`activate` also surfaces any unmet `*(depends on)*` markers in its
+response so sequencing constraints land up front:
+
+```sh
+$ claude-plan-bridge activate AS
+claude-plan-bridge: activated phase `AS`
+  NOTE: depends on AR — not yet archived (informational, not a gate)
+```
+
+`deactivate` clears the focus. Idempotent — silent no-op when nothing
+was active.
+
 ### `baseline`
 
 Seed the state file with synthetic `baseline:<plan_path>` mappings for every leaf currently in `PLAN.md`. Run once when installing into a project with an existing plan. Idempotent. When Claude later `TaskCreate`s against a baselined path, the baseline mapping is silently replaced.
@@ -193,6 +229,7 @@ Tools:
 - **Phases**: `plan_add_phase`, `plan_rename_phase`, `plan_set_phase_deps`
 - **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
   optional `descope_pending: bool` matching the CLI's `--descope-pending`)
+- **Activation focus** (Phase 40): `plan_activate(id)`, `plan_deactivate()`
 
 Errors surface as JSON-RPC error responses (`code: -32603`); unknown
 tools and missing args produce clean errors the client can show.

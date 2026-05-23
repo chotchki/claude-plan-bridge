@@ -8,7 +8,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
   - [x] 40.3 Resume scopes rehydration prompt to active phase (backlog always loaded)
   - [x] 40.4 Writeback warns on cross-phase TaskCreate (warn-but-allow); archive auto-clears active_phase
-  - [ ] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
+  - [x] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
   - [ ] 40.6 Activation e2e tests + docs (SPEC/README update)
   - [ ] 40.7 CLI `plan-bridge phase-scaffold <ID> <title> --tasks "...,...,..."`
 
