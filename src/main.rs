@@ -902,7 +902,13 @@ fn format_relative_time(t: std::time::SystemTime) -> String {
 
 fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
     let deltas = plan_bridge::reconcile::reconcile(plan)?;
-    let rendered = plan_bridge::reconcile::render_deltas(&deltas);
+    // Phase 40.5: foreground active-phase drift when a focus is set.
+    let state_path = plan_bridge::state::default_state_path_for(plan);
+    let active_phase = plan_bridge::state::State::load(&state_path)
+        .ok()
+        .and_then(|s| s.active_phase.clone());
+    let rendered =
+        plan_bridge::reconcile::render_deltas_focused(&deltas, active_phase.as_deref());
     if rendered.is_empty() {
         Ok(plan_bridge::hook::HookOutput::silent())
     } else {

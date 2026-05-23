@@ -353,6 +353,58 @@ fn collect_unresolved_descendants(node: &Node, out: &mut Vec<String>) {
     }
 }
 
+/// Phase 40.5: render deltas with active-phase foregrounding. When
+/// `active_phase` is `Some(id)`, deltas whose plan_path falls under that
+/// phase are rendered FIRST (under a `Active phase \`id\` drift:` header)
+/// followed by the rest under `Other phases / cross-cutting:`. When
+/// `active_phase` is `None`, the output collapses to today's single
+/// `PLAN.md drift since last sync:` block via [render_deltas].
+pub fn render_deltas_focused(deltas: &[Delta], active_phase: Option<&str>) -> String {
+    if deltas.is_empty() {
+        return String::new();
+    }
+    let Some(active) = active_phase else {
+        return render_deltas(deltas);
+    };
+    let (active_deltas, other_deltas): (Vec<&Delta>, Vec<&Delta>) =
+        deltas.iter().partition(|d| delta_in_phase(d, active));
+    let mut out = String::new();
+    if !active_deltas.is_empty() {
+        out.push_str(&format!("Active phase `{active}` drift:\n"));
+        render_delta_block(&active_deltas, &mut out);
+    }
+    if !other_deltas.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Other phases / cross-cutting:\n");
+        render_delta_block(&other_deltas, &mut out);
+    }
+    out
+}
+
+/// Phase-id check on a delta. Returns true when the delta is in-scope for
+/// the active phase (plan_path's first segment matches). Cross-cutting
+/// deltas (BaselineOnly, PhaseDependsOn / PhasePrefersAfter referring to
+/// the active phase) are bucketed as "active" too — they're FOR this
+/// phase even if their plan_path is empty/global.
+fn delta_in_phase(delta: &Delta, active: &str) -> bool {
+    match delta {
+        Delta::LeafAdded { plan_path, .. }
+        | Delta::LeafRemoved { plan_path, .. }
+        | Delta::LeafStateChanged { plan_path, .. }
+        | Delta::LeafTitleChanged { plan_path, .. }
+        | Delta::LeafAnnotationChanged { plan_path, .. }
+        | Delta::ParentInconsistent { plan_path, .. } => {
+            crate::state::phase_id_of(plan_path) == active
+        }
+        Delta::PhaseDependsOn { phase_id, .. } | Delta::PhasePrefersAfter { phase_id, .. } => {
+            phase_id == active
+        }
+        Delta::BaselineOnly { .. } => false,
+    }
+}
+
 /// Render deltas into a compact human-readable block for Claude. Empty when
 /// no deltas exist.
 pub fn render_deltas(deltas: &[Delta]) -> String {
@@ -360,8 +412,16 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
         return String::new();
     }
     let mut out = String::from("PLAN.md drift since last sync:\n");
+    let view: Vec<&Delta> = deltas.iter().collect();
+    render_delta_block(&view, &mut out);
+    out
+}
+
+fn render_delta_block(deltas: &[&Delta], out: &mut String) {
     for d in deltas {
-        match d {
+        // Iterating &[&Delta] gives `d: &&Delta` — deref once to pattern
+        // match on the original variants.
+        match *d {
             Delta::LeafAdded {
                 plan_path,
                 title,
@@ -490,7 +550,6 @@ pub fn render_deltas(deltas: &[Delta]) -> String {
             }
         }
     }
-    out
 }
 
 fn collect_leaves<'a>(plan: &'a Plan, out: &mut Vec<&'a Node>) {
@@ -1397,5 +1456,117 @@ mod tests {
                 && r.contains("soft hint"),
             "soft hint uses gentler language: {r}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 40.5: render_deltas_focused — active-phase foregrounding
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_focused_with_no_active_phase_matches_unfocused() {
+        let deltas = vec![
+            Delta::LeafAdded {
+                plan_path: "AI.1".to_string(),
+                title: "task".to_string(),
+                state: NodeState::Pending,
+            },
+        ];
+        let focused = render_deltas_focused(&deltas, None);
+        let unfocused = render_deltas(&deltas);
+        assert_eq!(focused, unfocused, "None active = unchanged output");
+    }
+
+    #[test]
+    fn render_focused_partitions_active_first_then_other() {
+        let deltas = vec![
+            Delta::LeafAdded {
+                plan_path: "AM.5".to_string(),
+                title: "other".to_string(),
+                state: NodeState::Pending,
+            },
+            Delta::LeafAdded {
+                plan_path: "AI.1".to_string(),
+                title: "active".to_string(),
+                state: NodeState::Pending,
+            },
+            Delta::LeafAdded {
+                plan_path: "AM.6".to_string(),
+                title: "more other".to_string(),
+                state: NodeState::Pending,
+            },
+        ];
+        let r = render_deltas_focused(&deltas, Some("AI"));
+        // Active block sits before the "Other phases" block.
+        let active_pos = r.find("Active phase `AI` drift:").expect("active header");
+        let other_pos = r.find("Other phases").expect("other header");
+        assert!(
+            active_pos < other_pos,
+            "active block must come first:\n{r}"
+        );
+        // Active block has just the AI.1 add; other block has AM.5 + AM.6.
+        let active_block = &r[active_pos..other_pos];
+        assert!(active_block.contains("AI.1"));
+        assert!(!active_block.contains("AM.5"));
+        assert!(r[other_pos..].contains("AM.5"));
+        assert!(r[other_pos..].contains("AM.6"));
+    }
+
+    #[test]
+    fn render_focused_omits_active_header_when_no_active_deltas() {
+        // All drift is in other phases — skip the "Active phase X drift:"
+        // header, just emit "Other phases / cross-cutting:".
+        let deltas = vec![
+            Delta::LeafAdded {
+                plan_path: "AM.5".to_string(),
+                title: "other".to_string(),
+                state: NodeState::Pending,
+            },
+        ];
+        let r = render_deltas_focused(&deltas, Some("AI"));
+        assert!(
+            !r.contains("Active phase `AI` drift:"),
+            "no header when block is empty: {r}"
+        );
+        assert!(r.contains("Other phases"));
+        assert!(r.contains("AM.5"));
+    }
+
+    #[test]
+    fn render_focused_buckets_phase_dep_deltas_to_active_when_about_active_phase() {
+        // PhaseDependsOn for the active phase belongs in the active block.
+        let deltas = vec![
+            Delta::PhaseDependsOn {
+                phase_id: "AS".to_string(),
+                unmet: vec!["AR".to_string()],
+            },
+            Delta::PhaseDependsOn {
+                phase_id: "AM".to_string(),
+                unmet: vec!["AL".to_string()],
+            },
+        ];
+        let r = render_deltas_focused(&deltas, Some("AS"));
+        // The AS dep delta lives in the active block.
+        let active_pos = r.find("Active phase `AS` drift:").expect("active header");
+        let other_pos = r.find("Other phases").expect("other header");
+        let active_block = &r[active_pos..other_pos];
+        assert!(active_block.contains("Phase AS depends on AR"));
+        assert!(r[other_pos..].contains("Phase AM depends on AL"));
+    }
+
+    #[test]
+    fn render_focused_baseline_only_lives_in_other_block() {
+        // BaselineOnly is cross-cutting — always "other phases" regardless
+        // of active focus.
+        let deltas = vec![
+            Delta::BaselineOnly {
+                plan_paths: vec!["AI.1".to_string()],
+            },
+        ];
+        let r = render_deltas_focused(&deltas, Some("AI"));
+        assert!(
+            !r.contains("Active phase"),
+            "BaselineOnly is cross-cutting, no active header: {r}"
+        );
+        assert!(r.contains("Other phases"));
     }
 }
