@@ -106,7 +106,17 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
     for tid in &to_drop {
         state.remove(tid);
     }
-    if !to_drop.is_empty() {
+    // Phase 40.4: if the active phase was among the archived ids, clear it
+    // — focus on a vanished phase is nonsense, and the next resume would
+    // emit an empty rehydration prompt.
+    let active_cleared = match state.active_phase() {
+        Some(active) if report.archived_phase_ids.iter().any(|id| id == active) => {
+            state.set_active_phase(None);
+            true
+        }
+        _ => false,
+    };
+    if !to_drop.is_empty() || active_cleared {
         state.save(&state_path)?;
     }
 
@@ -216,7 +226,15 @@ pub fn archive_phase(
     for tid in &to_drop {
         state.remove(tid);
     }
-    if !to_drop.is_empty() {
+    // Phase 40.4: clear active_phase when archiving the focused phase.
+    let active_cleared = match state.active_phase() {
+        Some(active) if active == phase_id => {
+            state.set_active_phase(None);
+            true
+        }
+        _ => false,
+    };
+    if !to_drop.is_empty() || active_cleared {
         state.save(&state_path)?;
     }
 
@@ -721,5 +739,91 @@ mod tests {
         assert_eq!(report.archived_phase_ids, vec!["1.0"]);
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(!after.contains("Backlog"), "no backlog noise:\n{after}");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 40.4: archive auto-clears active_phase when archiving the
+    // focused phase
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn archive_phase_clears_state_active_phase_when_it_targets_the_focused_phase() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [x] 1.2 also done\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("1.0".to_string()));
+        state.save(&state_path).unwrap();
+
+        let _ = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap();
+        let after_state = State::load(&state_path).unwrap();
+        assert_eq!(
+            after_state.active_phase(),
+            None,
+            "archived phase cleared active_phase"
+        );
+    }
+
+    #[test]
+    fn archive_phase_preserves_state_active_phase_when_different() {
+        // Active phase AS, archive 1.0 — focus stays on AS.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n\n## Phase AS - Spine\n\n- [ ] AS.0 task\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("AS".to_string()));
+        state.save(&state_path).unwrap();
+
+        let _ = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap();
+        let after_state = State::load(&state_path).unwrap();
+        assert_eq!(after_state.active_phase(), Some("AS"));
+    }
+
+    #[test]
+    fn bulk_archive_clears_state_active_phase_when_focused_phase_swept() {
+        // Active phase is one of the fully-complete phases the bulk sweep
+        // picks up — clear the focus.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 First\n  - [x] 1.1 done\n- [ ] 2.0 Second\n  - [ ] 2.1 pending\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("1.0".to_string()));
+        state.save(&state_path).unwrap();
+
+        let report = archive(&plan, false, "2026-05-22").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let after_state = State::load(&state_path).unwrap();
+        assert_eq!(
+            after_state.active_phase(),
+            None,
+            "swept active phase cleared focus"
+        );
+    }
+
+    #[test]
+    fn bulk_archive_preserves_state_active_phase_when_not_swept() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 First\n  - [x] 1.1 done\n- [ ] 2.0 Second\n  - [ ] 2.1 pending\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        // Active phase is 2.0, which has pending leaves → bulk sweep skips it.
+        state.set_active_phase(Some("2.0".to_string()));
+        state.save(&state_path).unwrap();
+
+        let _ = archive(&plan, false, "2026-05-22").unwrap();
+        let after_state = State::load(&state_path).unwrap();
+        assert_eq!(after_state.active_phase(), Some("2.0"));
     }
 }

@@ -263,6 +263,23 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 stale_ids.join(", ")
             ));
         }
+        // Phase 40.4: cross-phase TaskCreate warn-but-allow. When a phase is
+        // active and the new task lands on a different phase, the create
+        // still succeeds (the bridge is peripheral, never blocks); the hook
+        // output adds a one-liner so the agent sees the focus drift and can
+        // decide whether to widen / switch / continue.
+        if let Some(active_id) = state.active_phase()
+            && !assigned_path.starts_with(crate::reconcile::BACKLOG_PREFIX)
+            && crate::state::phase_id_of(&assigned_path) != active_id
+        {
+            message.push_str(&format!(
+                "\n  NOTE: cross-phase TaskCreate — `{assigned_path}` is in phase \
+                 `{}`, but active phase is `{active_id}`. Run \
+                 `plan_activate {}` to switch focus, or `plan_deactivate` to widen.",
+                crate::state::phase_id_of(&assigned_path),
+                crate::state::phase_id_of(&assigned_path),
+            ));
+        }
         Ok(HookOutput::context(&payload.hook_event_name, message))
     })
 }
@@ -493,6 +510,18 @@ struct InsertResult {
     anchor_created: Option<String>,
 }
 
+/// Phase 40.4: under FORMATv2 a task id like `AI.0` lives correctly nested
+/// inside the v2 header phase `## Phase AI`. The legacy "parent has top-
+/// level shape but found nested" refusal would false-positive on this, so
+/// we suppress it when the v2 parent phase exists at top level (the bare
+/// prefix without the `.0` suffix matches a `Plan.phases[i].id`).
+fn v2_parent_phase_exists(plan: &Plan, parent_id: &str) -> bool {
+    let Some(prefix) = parent_id.strip_suffix(".0") else {
+        return false;
+    };
+    plan.phases.iter().any(|p| p.id == prefix)
+}
+
 fn insert_at_path(
     plan: Plan,
     plan_path: &str,
@@ -577,6 +606,7 @@ fn insert_at_path(
                 }
             } else if parent_id_for(&parent_id).is_none()
                 && !plan.phases.iter().any(|p| p.id == parent_id)
+                && !v2_parent_phase_exists(&plan, &parent_id)
             {
                 // Phase 31.3: parent has the top-level shape (e.g. `10.0`,
                 // `AH.0`) but was found nested under another node — usually
@@ -585,6 +615,11 @@ fn insert_at_path(
                 // under whatever leaf the misplaced anchor wound up beneath
                 // (the shakeout symptom: 10.1–10.13 landed indented under
                 // `6.13 Staging / beta deployment`).
+                //
+                // Phase 40.4 update: skip the refusal when the v2 parent
+                // phase exists at top level (id matches the prefix without
+                // `.0`). E.g., `AI.0` correctly nested under `## Phase AI`
+                // is NOT a misplaced anchor.
                 anyhow::bail!(
                     "inserting {plan_path}: parent `{parent_id}` exists in PLAN.md but is \
                      nested inside another phase. `{parent_id}` has top-level phase shape \
@@ -1376,6 +1411,96 @@ mod tests {
             "parent rename should land:\n{contents}"
         );
         assert!(contents.contains("1.1.1 Leaf"), "child preserved");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 40.4: cross-phase TaskCreate warn-but-allow
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn writeback_create_cross_phase_emits_warning_in_hook_output() {
+        // Active phase AI, TaskCreate(plan_path=AM.5) lands and we get a
+        // warn-but-allow note in the hook message.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase AI - Studio\n\n- [ ] AI.0 task\n\n## Phase AM - Tailwind\n\n- [ ] AM.0 task\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("AI".to_string()));
+        state.save(&state_path).unwrap();
+
+        let payload = payload_for_create("t-1", "Cross-phase work", Some("AM.5"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            json.contains("cross-phase TaskCreate"),
+            "warning surfaced: {json}"
+        );
+        assert!(
+            json.contains("AM") && json.contains("AI"),
+            "names both phases: {json}"
+        );
+        assert!(
+            json.contains("plan_activate AM"),
+            "suggests the switch command: {json}"
+        );
+        // Task still landed (warn-but-allow).
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(after.contains("AM.5"), "task did land:\n{after}");
+    }
+
+    #[test]
+    fn writeback_create_same_phase_emits_no_warning() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("AI".to_string()));
+        state.save(&state_path).unwrap();
+
+        let payload = payload_for_create("t-1", "Same-phase task", Some("AI.5"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            !json.contains("cross-phase"),
+            "no warning when same phase: {json}"
+        );
+    }
+
+    #[test]
+    fn writeback_create_no_warning_when_no_active_phase() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        // No active_phase set.
+        let payload = payload_for_create("t-1", "Any task", Some("AM.5"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            !json.contains("cross-phase"),
+            "no warning when no focus: {json}"
+        );
+    }
+
+    #[test]
+    fn writeback_create_no_plan_path_in_backlog_does_not_warn() {
+        // backlog: synthetic task — not a real phase. Cross-phase check
+        // skips these.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase AI - Studio\n\n- [ ] AI.0 task\n");
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.set_active_phase(Some("AI".to_string()));
+        state.save(&state_path).unwrap();
+
+        let payload = payload_for_create("t-1", "Unphased note", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            !json.contains("cross-phase"),
+            "no warning for backlog: {json}"
+        );
     }
 
     #[test]
