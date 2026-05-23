@@ -330,7 +330,12 @@ impl McpServer {
             .and_then(Value::as_str)
             .map(String::from)
             .unwrap_or_else(crate::today::today_utc);
-        let report = crate::archive::archive_phase(&self.plan_path, &id, &date)?;
+        let descope_pending = args
+            .get("descope_pending")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let report =
+            crate::archive::archive_phase(&self.plan_path, &id, &date, descope_pending)?;
         Ok(tool_text_result(&format!(
             "exited and archived phase {}: {} plan paths cleared",
             id,
@@ -505,12 +510,13 @@ fn tools_list() -> Value {
             },
             {
                 "name": "plan_phase_exit",
-                "description": "Exit a specific phase: validate every leaf in its subtree is resolved ([x] or [-]), then archive just that phase to PLAN_ARCHIVE.md. Errors out if the subtree still has [ ] leaves.",
+                "description": "Exit a specific phase: validate every leaf in its subtree is resolved ([x] / [-] / [>]), then archive just that phase to PLAN_ARCHIVE.md. Errors out if the subtree still has [ ] leaves — pass `descope_pending: true` to move them to the bottom `# Backlog (not yet phased)` section first.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "plan_path": {"type": "string", "description": "Id of the phase to exit, e.g. `1.0`."},
-                        "date": {"type": "string", "description": "YYYY-MM-DD header for the archive section. Defaults to today."}
+                        "date": {"type": "string", "description": "YYYY-MM-DD header for the archive section. Defaults to today."},
+                        "descope_pending": {"type": "boolean", "description": "When true, move any `[ ]` Pending leaves to `# Backlog` as `- <id> - descoped from phase <PHASE> on <date>` notes before archiving. Default false (hard error)."}
                     },
                     "required": ["plan_path"],
                     "additionalProperties": false

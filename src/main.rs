@@ -67,18 +67,32 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
-    /// Sweep every fully-complete top-level phase from PLAN.md into
-    /// PLAN_ARCHIVE.md (newest section at bottom), and drop the associated
-    /// state mappings.
+    /// Archive top-level phases from PLAN.md into PLAN_ARCHIVE.md. With no
+    /// `<phase>` argument: sweep every fully-complete phase (silent skip on
+    /// any phase with pending leaves). With a `<phase>` argument: per-phase
+    /// archive that errors loudly if the named phase has any `[ ]` Pending
+    /// leaves. Pass `--descope-pending` to move pending leaves into the
+    /// bottom `# Backlog (not yet phased)` section instead of erroring.
     Archive {
         #[command(flatten)]
         project: ProjectArgs,
+        /// Phase id (e.g. `AI`, `1.0`). When provided, archives only that
+        /// phase and errors on any unresolved leaves; omit for bulk sweep.
+        phase: Option<String>,
         #[arg(long)]
         dry_run: bool,
         /// Date stamp for the archive section header (YYYY-MM-DD). Defaults
         /// to today (in UTC). Overridable for tests / reproducible builds.
         #[arg(long)]
         date: Option<String>,
+        /// 38.5: when archiving a specific phase, move any `[ ]` Pending
+        /// leaves to the bottom `# Backlog (not yet phased)` section first
+        /// (as `- <id> - descoped from phase <PHASE> on <date>` bullets),
+        /// then archive the now-fully-resolved phase. Errors are surfaced
+        /// for any remaining pending non-leaf nodes the user has to resolve
+        /// manually.
+        #[arg(long)]
+        descope_pending: bool,
     },
     /// Scaffold PLAN.md, install hooks into `.claude/settings.json`, and add
     /// `.claude/plan-bridge-state.json` to `.gitignore` for the project at
@@ -477,12 +491,29 @@ fn main() -> Result<()> {
         }
         Command::Archive {
             project,
+            phase,
             dry_run,
             date,
+            descope_pending,
         } => {
             let plan = project.plan_path();
             let date = date.unwrap_or_else(plan_bridge::today::today_utc);
-            let report = plan_bridge::archive::archive(&plan, dry_run, &date)?;
+            let report = match phase {
+                Some(phase_id) => {
+                    if dry_run {
+                        anyhow::bail!("--dry-run is not yet supported for per-phase archive");
+                    }
+                    plan_bridge::archive::archive_phase(&plan, &phase_id, &date, descope_pending)?
+                }
+                None => {
+                    if descope_pending {
+                        anyhow::bail!(
+                            "--descope-pending only applies to per-phase archive (provide a phase id)"
+                        );
+                    }
+                    plan_bridge::archive::archive(&plan, dry_run, &date)?
+                }
+            };
             if report.is_empty() {
                 println!("claude-plan-bridge: nothing to archive");
             } else {

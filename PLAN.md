@@ -19,8 +19,8 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 37.6 Round-trip + v1→v2 flip tests
 - [ ] 38.0 Phase verbs + per-phase archive
   - [x] 38.1 `plan_add_phase(id, title, depends_on=[], after=None)` MCP + CLI
-  - [ ] 38.2 `plan_rename_phase(id, new_title)` MCP + CLI
-  - [ ] 38.3 `plan_set_phase_deps(id, depends_on=[], prefer_after=[])` MCP + CLI
+  - [x] 38.2 `plan_rename_phase(id, new_title)` MCP + CLI
+  - [x] 38.3 `plan_set_phase_deps(id, depends_on=[], prefer_after=[])` MCP + CLI
   - [ ] 38.4 `archive <PHASE>` errors on `[ ]` Pending tasks
   - [ ] 38.5 `archive <PHASE> --descope-pending` moves pending subtrees to `# Backlog`
   - [ ] 38.6 `backlog <plan_path>` preserves subtree under `# Backlog` (was: flat bullet)

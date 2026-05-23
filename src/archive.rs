@@ -117,7 +117,19 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
 /// (`[x]` or `[-]` leaves) — errors otherwise. The phase is moved to the same
 /// dated section as `archive` would write; state mappings whose `plan_path`
 /// lives inside the moved subtree are dropped.
-pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<ArchiveReport> {
+///
+/// When `descope_pending` is true, pending leaves are moved to the bottom
+/// `# Backlog (not yet phased)` section before the archive proceeds — the
+/// 38.5 "descope-and-archive" escape hatch. Each descoped leaf lands as a
+/// bullet `- <id> - <title>` in plan.backlog, and is removed from the phase
+/// subtree. State mappings for descoped paths are dropped (they're no longer
+/// tracked tasks; they're notes in the backlog).
+pub fn archive_phase(
+    plan_path: &Path,
+    phase_id: &str,
+    today: &str,
+    descope_pending: bool,
+) -> Result<ArchiveReport> {
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
     let parsed = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
@@ -131,14 +143,41 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
         .position(|p| p.id == phase_id)
         .ok_or_else(|| anyhow::anyhow!("no phase with id `{phase_id}` at top level"))?;
 
-    if !phase_fully_done(&plan.phases[phase_idx]) {
-        let mut unresolved: Vec<String> = Vec::new();
-        collect_unresolved_leaves_in_phase(&plan.phases[phase_idx], &mut unresolved);
-        anyhow::bail!(
-            "phase `{phase_id}` is not fully resolved; unresolved leaves: {}",
-            unresolved.join(", ")
-        );
-    }
+    let descoped_paths: Vec<String> = if !phase_fully_done(&plan.phases[phase_idx]) {
+        if descope_pending {
+            let descoped = descope_pending_leaves(&mut plan.phases[phase_idx]);
+            for path in &descoped {
+                plan.backlog
+                    .push(format!("- {path} - descoped from phase `{phase_id}` on {today}"));
+            }
+            // Backlog flipped to h1 alongside descope — descoping IS a v2
+            // operation, so the bottom section adopts the FORMATv2 heading.
+            plan.backlog_h1 = true;
+            if !phase_fully_done(&plan.phases[phase_idx]) {
+                let mut still_unresolved: Vec<String> = Vec::new();
+                collect_unresolved_leaves_in_phase(
+                    &plan.phases[phase_idx],
+                    &mut still_unresolved,
+                );
+                anyhow::bail!(
+                    "phase `{phase_id}` still has unresolved leaves after --descope-pending: {} \
+                     (these are non-leaf nodes whose own state is pending; tick or `[-]` them first)",
+                    still_unresolved.join(", ")
+                );
+            }
+            descoped
+        } else {
+            let mut unresolved: Vec<String> = Vec::new();
+            collect_unresolved_leaves_in_phase(&plan.phases[phase_idx], &mut unresolved);
+            anyhow::bail!(
+                "phase `{phase_id}` is not fully resolved; unresolved leaves: {} \
+                 (re-run with --descope-pending to move pending leaves to the # Backlog section first)",
+                unresolved.join(", ")
+            );
+        }
+    } else {
+        Vec::new()
+    };
 
     let phase = plan.phases.remove(phase_idx);
     let mut report = ArchiveReport::empty(false);
@@ -160,15 +199,18 @@ pub fn archive_phase(plan_path: &Path, phase_id: &str, today: &str) -> Result<Ar
 
     let state_path = crate::state::default_state_path_for(plan_path);
     let mut state = crate::state::State::load(&state_path)?;
-    let archived: std::collections::HashSet<&str> = report
+    // Drop mappings for both archived AND descoped paths — descoped tasks
+    // are no longer tracked; they're notes in the backlog.
+    let removed: std::collections::HashSet<&str> = report
         .archived_plan_paths
         .iter()
+        .chain(descoped_paths.iter())
         .map(String::as_str)
         .collect();
     let to_drop: Vec<String> = state
         .mappings
         .iter()
-        .filter(|(_, m)| archived.contains(m.plan_path.as_str()))
+        .filter(|(_, m)| removed.contains(m.plan_path.as_str()))
         .map(|(tid, _)| tid.clone())
         .collect();
     for tid in &to_drop {
@@ -198,6 +240,45 @@ fn collect_unresolved_leaves(node: &Node, out: &mut Vec<String>) {
 fn collect_unresolved_leaves_in_phase(phase: &Phase, out: &mut Vec<String>) {
     for child in &phase.children {
         collect_unresolved_leaves(child, out);
+    }
+}
+
+/// Walk a phase's task subtree and remove every pending leaf, returning the
+/// removed leaves' plan paths in document order. Used by 38.5's
+/// `--descope-pending` archive escape hatch — each removed leaf becomes a
+/// backlog note before the phase archive proceeds.
+///
+/// Leaf-only: a non-leaf node with pending children is left in place (its
+/// children are handled individually). After the pass an intermediate parent
+/// that had only-pending leaves may become childless — those parents stay as
+/// structural nodes that go to PLAN_ARCHIVE.md with the rest of the phase.
+fn descope_pending_leaves(phase: &mut Phase) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < phase.children.len() {
+        if phase.children[i].is_leaf()
+            && phase.children[i].state == crate::ast::NodeState::Pending
+        {
+            out.push(phase.children[i].id.clone());
+            phase.children.remove(i);
+        } else {
+            descope_pending_in_node(&mut phase.children[i], &mut out);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn descope_pending_in_node(node: &mut Node, out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < node.children.len() {
+        if node.children[i].is_leaf() && node.children[i].state == crate::ast::NodeState::Pending {
+            out.push(node.children[i].id.clone());
+            node.children.remove(i);
+        } else {
+            descope_pending_in_node(&mut node.children[i], out);
+            i += 1;
+        }
     }
 }
 
@@ -567,7 +648,7 @@ mod tests {
             "- [ ] 1.0 Phase one\n  - [x] 1.1 Done\n- [ ] 2.0 Phase two\n  - [x] 2.1 Also done\n",
         );
         // Even though both phases are fully done, archive_phase only moves 1.0.
-        let report = archive_phase(&plan, "1.0", "2026-05-16").unwrap();
+        let report = archive_phase(&plan, "1.0", "2026-05-16", false).unwrap();
         assert_eq!(report.archived_phase_ids, vec!["1.0"]);
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(!after.contains("1.0 Phase one"));
@@ -578,7 +659,7 @@ mod tests {
     fn archive_phase_refuses_unresolved_subtree() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Not done\n");
-        let err = archive_phase(&plan, "1.0", "2026-05-16").unwrap_err();
+        let err = archive_phase(&plan, "1.0", "2026-05-16", false).unwrap_err();
         assert!(err.to_string().contains("not fully resolved"), "{err}");
     }
 
@@ -586,7 +667,59 @@ mod tests {
     fn archive_phase_errors_when_phase_missing() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
-        let err = archive_phase(&plan, "9.9", "2026-05-16").unwrap_err();
+        let err = archive_phase(&plan, "9.9", "2026-05-16", false).unwrap_err();
         assert!(err.to_string().contains("9.9"));
+    }
+
+    #[test]
+    fn archive_phase_error_message_mentions_descope_escape_hatch() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [ ] 1.2 pending\n",
+        );
+        let err = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--descope-pending"), "error mentions the flag: {msg}");
+        assert!(msg.contains("1.2"), "error lists the unresolved leaf: {msg}");
+    }
+
+    #[test]
+    fn archive_phase_with_descope_pending_moves_leaves_to_backlog_and_archives() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [ ] 1.2 still pending\n  - [ ] 1.3 also pending\n",
+        );
+        let report = archive_phase(&plan, "1.0", "2026-05-22", true).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+
+        // PLAN.md: phase 1.0 is gone, backlog has the descoped notes (h1).
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("1.0 Phase"), "phase archived:\n{after}");
+        assert!(after.contains("# Backlog (not yet phased)"));
+        assert!(after.contains("- 1.2 - descoped from phase `1.0` on 2026-05-22"));
+        assert!(after.contains("- 1.3 - descoped from phase `1.0` on 2026-05-22"));
+
+        // PLAN_ARCHIVE.md got the phase with its single done task.
+        let archive_md = std::fs::read_to_string(&dir.join("PLAN_ARCHIVE.md")).unwrap();
+        assert!(archive_md.contains("1.0 Phase"));
+        assert!(archive_md.contains("1.1 done"));
+        // Descoped leaves were removed before archive, so they're NOT in
+        // PLAN_ARCHIVE.md.
+        assert!(!archive_md.contains("1.2 still pending"));
+        assert!(!archive_md.contains("1.3 also pending"));
+    }
+
+    #[test]
+    fn archive_phase_descope_is_noop_when_already_fully_resolved() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [-] 1.2 won't-do\n");
+        // descope_pending=true on a fully-resolved phase: no leaves to
+        // descope, no backlog notes added, phase archives normally.
+        let report = archive_phase(&plan, "1.0", "2026-05-22", true).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("Backlog"), "no backlog noise:\n{after}");
     }
 }
