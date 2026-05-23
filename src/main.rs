@@ -232,6 +232,38 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Phase 40.7: create a FORMATv2 phase header + N child tasks in a
+    /// single atomic write. CLI-only convenience for scripting/scaffolding
+    /// workflows from outside a Claude session (operator pre-seeds a phase
+    /// before opening the session; reconcile surfaces the unmapped leaves
+    /// on the agent's next prompt for normal TaskCreate mirroring).
+    ///
+    /// `--tasks "0:Lock,1:Audit,2:Driver"` is the leaf list. Each entry is
+    /// `<id_suffix>:<subject>` — the bridge constructs `<PHASE>.<id_suffix>`
+    /// for the leaf id. Subjects may contain colons (split is left-most
+    /// only). Empty entries are skipped.
+    ///
+    /// Refuses to overwrite an existing phase — use `phase-add` for empty
+    /// phase creation and individual `plan_add` (or TaskCreate from a
+    /// session) for adding tasks to an existing phase.
+    PhaseScaffold {
+        #[command(flatten)]
+        project: ProjectArgs,
+        id: String,
+        title: Option<String>,
+        /// Comma-separated `id_suffix:subject` task definitions, e.g.
+        /// `--tasks "0:Lock decisions,1:Audit,2:Driver build"`.
+        #[arg(long, value_delimiter = ',')]
+        tasks: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        depends_on: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        prefer_after: Vec<String>,
+        /// Insert immediately after this existing phase id (positional).
+        /// Defaults to id-sort order.
+        #[arg(long)]
+        after: Option<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -564,6 +596,64 @@ fn main() -> Result<()> {
                     println!("claude-plan-bridge: no active phase to deactivate (no-op)");
                 }
             }
+        }
+        Command::PhaseScaffold {
+            project,
+            id,
+            title,
+            tasks,
+            depends_on,
+            prefer_after,
+            after,
+        } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            if plan.find_phase(&id).is_some() {
+                anyhow::bail!(
+                    "phase `{id}` already exists — use `phase-add` for empty phases \
+                     or add tasks individually with TaskCreate / plan_add"
+                );
+            }
+            let title_str = title.unwrap_or_default();
+            let children: Vec<plan_bridge::ast::Node> = tasks
+                .iter()
+                .filter_map(|spec| parse_task_spec(spec, &id))
+                .collect();
+            let new_phase = plan_bridge::ast::Phase {
+                id: id.clone(),
+                title: title_str.clone(),
+                state: plan_bridge::ast::NodeState::Pending,
+                id_style: plan_bridge::ast::IdStyle::Plain,
+                separator: plan_bridge::ast::Separator::Hyphen,
+                children,
+                annotations: vec![],
+                depends_on,
+                prefer_after,
+                source: plan_bridge::ast::PhaseSource::HeaderV2,
+            };
+            let task_count = new_phase.children.len();
+            if let Some(after_id) = after {
+                let pos = plan
+                    .phases
+                    .iter()
+                    .position(|p| p.id == after_id)
+                    .ok_or_else(|| anyhow::anyhow!("--after target `{after_id}` not found at top level"))?;
+                plan.phases.insert(pos + 1, new_phase);
+            } else {
+                plan.insert_phase(new_phase);
+            }
+            std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                .with_context(|| format!("write {}", plan_path.display()))?;
+            println!(
+                "claude-plan-bridge: scaffolded phase `{id}` - `{title_str}` with {task_count} task(s) in {}",
+                plan_path.display()
+            );
+            println!(
+                "  next: reconcile will surface the new leaves on the agent's next \
+                 prompt for TaskCreate mirroring"
+            );
         }
         Command::Archive {
             project,
@@ -898,6 +988,34 @@ fn format_relative_time(t: std::time::SystemTime) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Parse one `phase-scaffold --tasks` entry: `<id_suffix>:<subject>` →
+/// `Some(Node { id: "<PHASE>.<id_suffix>", title: <subject>, ... })`.
+/// Returns `None` for an empty spec (lets clap's value_delimiter pass
+/// through trailing/leading whitespace cleanly). Subjects may contain
+/// colons — split is left-most only.
+fn parse_task_spec(spec: &str, phase_id: &str) -> Option<plan_bridge::ast::Node> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let (suffix, subject) = match spec.split_once(':') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (spec, ""), // bare suffix with no title — still emits
+    };
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(plan_bridge::ast::Node {
+        id: format!("{phase_id}.{suffix}"),
+        title: subject.to_string(),
+        state: plan_bridge::ast::NodeState::Pending,
+        id_style: plan_bridge::ast::IdStyle::Plain,
+        separator: plan_bridge::ast::Separator::Hyphen,
+        children: vec![],
+        annotations: vec![],
+    })
 }
 
 fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
