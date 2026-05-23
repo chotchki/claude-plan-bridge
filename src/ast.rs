@@ -851,6 +851,49 @@ impl Plan {
         ));
     }
 
+    /// Phase 38.6: append a deferral as a FORMATv2 nested-subtree bullet.
+    /// Top line: `- <id> - <title> *(deferred from phase <phase> on <date>)*`,
+    /// followed by indented children for any descendants. Idempotent on the
+    /// source plan_path — if the top-line already exists in backlog, this is
+    /// a no-op (matches `append_backlog_deferral`'s idempotency).
+    ///
+    /// For leaf nodes the output is a single line; for non-leaf nodes the
+    /// full subtree gets nested under it. Subtask state markers are dropped
+    /// (FORMATv2 backlog entries are notes, not tracked work).
+    pub fn append_backlog_subtree(
+        &mut self,
+        node: &Node,
+        source_phase: &str,
+        date: &str,
+    ) {
+        // Idempotency probe: match on the deferral marker for this plan_path
+        // at the top level (avoids double-add if backlog already had it).
+        let top_marker = format!("(deferred from phase `{source_phase}` on");
+        let id_marker = format!("- {} -", node.id);
+        let already = self.backlog.iter().any(|line| {
+            line.trim_start().starts_with(&id_marker) && line.contains(&top_marker)
+        });
+        if already {
+            return;
+        }
+        // Top-line: id, title, deferral marker.
+        let top = if node.title.is_empty() {
+            format!(
+                "- {} *(deferred from phase `{source_phase}` on {date})*",
+                node.id
+            )
+        } else {
+            format!(
+                "- {} - {} *(deferred from phase `{source_phase}` on {date})*",
+                node.id, node.title
+            )
+        };
+        self.backlog.push(top);
+        for child in &node.children {
+            push_subtree_lines(&mut self.backlog, child, 1);
+        }
+    }
+
     /// Remove the first Backlog bullet whose bolded title matches `title`.
     /// Returns true when a line was removed. Used to clear a no-path note when
     /// its harness task is completed or deleted, so resolved backlog items
@@ -1052,6 +1095,24 @@ fn insert_in_order(siblings: &mut Vec<Node>, new_node: Node) {
         .position(|n| cmp_ids(&new_node.id, &n.id) == std::cmp::Ordering::Less)
         .unwrap_or(siblings.len());
     siblings.insert(pos, new_node);
+}
+
+/// Render a node + its subtree as plain (no-checkbox) backlog bullets at
+/// `depth * 2`-space indent. Recursive — used by [Plan::append_backlog_subtree]
+/// to preserve nested structure when descoping a subtree.
+fn push_subtree_lines(out: &mut Vec<String>, node: &Node, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let body = if node.title.is_empty() {
+        node.id.clone()
+    } else if node.id.is_empty() {
+        node.title.clone()
+    } else {
+        format!("{} - {}", node.id, node.title)
+    };
+    out.push(format!("{indent}- {body}"));
+    for child in &node.children {
+        push_subtree_lines(out, child, depth + 1);
+    }
 }
 
 /// Phase variant of [insert_in_order]: sort-insert a [Phase] into a slice

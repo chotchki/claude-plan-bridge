@@ -921,7 +921,11 @@ mod tests {
         assert!(resp.get("error").is_none(), "got: {resp}");
         let after = std::fs::read_to_string(&s.plan_path).unwrap();
         assert!(after.contains("- [>] 1.1 Task"), "got: {after}");
-        assert!(after.contains("- **Task** — deferred from 1.1 on 2026-05-17."));
+        // Phase 38.6: FORMATv2 backlog bullet ` - id - title *(...)*`.
+        assert!(
+            after.contains("- 1.1 - Task *(deferred from phase `1` on 2026-05-17)*"),
+            "v2 bullet form: {after}"
+        );
     }
 
     #[test]

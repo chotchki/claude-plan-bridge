@@ -7,9 +7,16 @@ use crate::serializer::serialize;
 use crate::state::{State, default_state_path_for};
 
 /// Defer a node at `plan_path`: flip its checkbox to `[>]` (Backlog) and
-/// append a bullet under `## Backlog (not yet phased)` recording the source
-/// path + date. Drops any state mapping pointing at this path so the harness
-/// UI stops tracking the deferred task.
+/// append a FORMATv2 nested-subtree entry under the bottom backlog section
+/// recording the source path + date. Drops any state mapping pointing at
+/// this path so the harness UI stops tracking the deferred task.
+///
+/// Phase 38.6: the backlog entry preserves subtree structure. A leaf becomes
+/// a single bullet `- <id> - <title> *(deferred from phase X on date)*`. A
+/// non-leaf node also emits its children nested below, so the entire
+/// deferred subtree is captured as a record. The original subtree stays in
+/// place under the phase (state-flipped to `[>]`) — archive sweeps it with
+/// the phase, while the backlog entry survives the sweep.
 ///
 /// Errors when:
 /// - the node doesn't exist in PLAN.md
@@ -25,6 +32,11 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
             .with_context(|| format!("read {}", plan_path.display()))?;
         let mut plan = parse(&text)?;
 
+        // Locate the source phase first — needed for the backlog note's
+        // "deferred from phase X" provenance. The phase id is the first
+        // dot-separated segment of the leaf's plan_path.
+        let source_phase = id.split('.').next().unwrap_or(id).to_string();
+
         let node = plan
             .find(id)
             .ok_or_else(|| anyhow::anyhow!("no node with id `{id}` in PLAN.md"))?;
@@ -38,7 +50,9 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
             }
             NodeState::Pending => {}
         }
-        let title = node.title.clone();
+        // Snapshot the subtree before mutating state — the backlog entry
+        // records the node's children as they are at deferral time.
+        let snapshot = node.clone();
 
         if let Some(node) = plan.find_mut(id) {
             node.state = NodeState::Backlog;
@@ -46,7 +60,7 @@ pub fn backlog(plan_path: &Path, id: &str, date: &str) -> Result<String> {
         // Phase 35.2a: deferrals go to the canonical bottom Backlog section.
         // Consolidate first so any legacy preamble Backlog merges down.
         plan.consolidate_backlog();
-        plan.append_backlog_deferral(id, &title, date);
+        plan.append_backlog_subtree(&snapshot, &source_phase, date);
 
         std::fs::write(plan_path, serialize(&plan))
             .with_context(|| format!("write {}", plan_path.display()))?;
@@ -104,15 +118,62 @@ mod tests {
     }
 
     #[test]
-    fn backlog_flips_pending_leaf_and_promotes() {
+    fn backlog_flips_pending_leaf_and_promotes_in_v2_form() {
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
         let msg = backlog(&plan, "1.1", "2026-05-17").unwrap();
         assert!(msg.contains("backlogged 1.1"));
         let after = std::fs::read_to_string(&plan).unwrap();
+        // Subtree stays in phase with state flipped.
         assert!(after.contains("- [>] 1.1 Task"));
-        assert!(after.contains("## Backlog (not yet phased)"));
-        assert!(after.contains("- **Task** — deferred from 1.1 on 2026-05-17."));
+        // Backlog entry uses FORMATv2 ` - id - title *(deferred from …)*`.
+        assert!(
+            after.contains("- 1.1 - Task *(deferred from phase `1` on 2026-05-17)*"),
+            "v2 backlog bullet:\n{after}"
+        );
+    }
+
+    #[test]
+    fn backlog_subtree_preserves_children_as_nested_bullets() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Parent task\n    - [ ] 1.1.0 first child\n    - [ ] 1.1.1 second child\n",
+        );
+        let msg = backlog(&plan, "1.1", "2026-05-22").unwrap();
+        assert!(msg.contains("backlogged 1.1"));
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.contains("- 1.1 - Parent task *(deferred from phase `1` on 2026-05-22)*"),
+            "top-line with markers:\n{after}"
+        );
+        assert!(
+            after.contains("  - 1.1.0 - first child"),
+            "first child nested:\n{after}"
+        );
+        assert!(
+            after.contains("  - 1.1.1 - second child"),
+            "second child nested:\n{after}"
+        );
+    }
+
+    #[test]
+    fn backlog_subtree_is_idempotent_on_top_line() {
+        // Running backlog twice on the same plan_path shouldn't duplicate
+        // the backlog top-line (would-be re-deferral after the parent
+        // already flipped to `[>]` is an early-return "already deferred").
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n    - [ ] 1.1.0 child\n",
+        );
+        backlog(&plan, "1.1", "2026-05-22").unwrap();
+        let after_first = std::fs::read_to_string(&plan).unwrap();
+        // Second call short-circuits because state is already `[>]`.
+        let msg = backlog(&plan, "1.1", "2026-05-22").unwrap();
+        assert!(msg.contains("already deferred"));
+        let after_second = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(after_first, after_second, "second call doesn't mutate");
     }
 
     #[test]
