@@ -9,7 +9,7 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [x] 36.3 Parser recognizes `## Phase X - Title *(depends on: Y)*` + `*(prefer after: Z)*` headers
   - [x] 36.4 Parser recognizes `# Backlog (not yet phased)` h1 + nested descoped subtrees
   - [x] 36.5 Parser buckets phase-level prose (under-header lines not attached to a leaf)
-  - [ ] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
+  - [x] 36.6 Bidirectional parse tests + quicksight PLAN.md fixture under tests/fixtures/
 - [ ] 37.0 FORMATv2 write path (canonicalize on first write)
   - [ ] 37.1 Serializer emits `## Phase X - Title` headers + optional `*(depends on)*`/`*(prefer after)*`
   - [ ] 37.2 Serializer emits `# Backlog (not yet phased)` h1 (was h2)
@@ -31,6 +31,13 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
   - [ ] 39.2 e2e: parse + canonicalize a copy of ../quicksight/PLAN.md without losing content
   - [ ] 39.3 SPEC.md + README.md + CLAUDE.md hint docs updates for FORMATv2
   - [ ] 39.4 Cut release (version bump, RELEASE_NOTES, tag, push)
+- [ ] 40.0 Activation focus (per-project active phase)
+  - [ ] 40.1 Add `active_phase: Option<String>` to state file + accessors
+  - [ ] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
+  - [ ] 40.3 Resume scopes rehydration prompt to active phase (backlog always loaded)
+  - [ ] 40.4 Writeback warns on cross-phase TaskCreate (warn-but-allow); archive auto-clears active_phase
+  - [ ] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
+  - [ ] 40.6 Activation e2e tests + docs (SPEC/README update)
 
 ## Backlog (not yet phased)
 

@@ -105,13 +105,14 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                 title: header.title,
                 state: NodeState::Pending,
                 id_style: IdStyle::Plain,
-                // FORMATv2 canonical: hyphen-space separator. Phase 37.1's
-                // serializer reads this to emit ` - ` on the header line.
                 separator: Separator::Hyphen,
                 children: vec![],
                 annotations: vec![],
                 depends_on: header.depends_on,
                 prefer_after: header.prefer_after,
+                // Mark this phase as v2-sourced so the serializer emits it
+                // back as `## Phase X - Title` rather than a v1 anchor.
+                source: crate::ast::PhaseSource::HeaderV2,
             });
             // Opening a phase header counts as entering the tree — subsequent
             // blank lines coalesce as Annotation::Blank instead of preamble.
@@ -1605,11 +1606,11 @@ Closing prose.
     }
 
     #[test]
-    #[ignore = "v2 round-trip is broken until Phase 37 lands the `## Phase X - Title` \
-                serializer — 36.1's write_phase emits v1 anchor form, and bare-alpha v2 \
-                ids (`AI`, `AQ`) aren't valid v1 ids (no dot, not all digits), so they \
-                re-parse as bare-checkbox titles. Phase 37.6 re-enables this test."]
     fn v2_mixed_fixture_round_trips_through_serialize() {
+        // Phase 37: v2-sourced phases (`source: HeaderV2`) serialize via
+        // `write_phase_v2` (`## Phase X - Title`), v1 anchors via
+        // `write_phase_v1_anchor` (`- [ ] N.0 Title`). The v2_mixed fixture
+        // mixes both — full round-trip is now AST-stable.
         let input = include_str!("../tests/fixtures/v2_mixed.md");
         let plan1 = parse(input).unwrap();
         let out = crate::serializer::serialize(&plan1);

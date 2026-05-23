@@ -66,6 +66,26 @@ pub struct Phase {
     /// ("AS prefers AR has landed first").
     #[serde(default)]
     pub prefer_after: Vec<String>,
+    /// Tracks how this phase appeared on disk so the serializer can preserve
+    /// the format on routine writes. v1 `- [ ] N.0 Title` anchors stay as
+    /// anchors; v2 `## Phase X - Title` headers stay as headers. Explicit
+    /// canonicalize flips every phase to `HeaderV2` for a one-shot
+    /// migration. Default `LegacyAnchor` keeps backward compatibility for
+    /// state-file deserialization and bridge-internal Phase construction.
+    #[serde(default)]
+    pub source: PhaseSource,
+}
+
+/// Origin format of a [Phase] — controls serializer dispatch. New phases
+/// parsed from a v1 `- [ ] N.0` anchor (and Phases created via the legacy
+/// path before 37) are [PhaseSource::LegacyAnchor]; phases parsed from a v2
+/// `## Phase X - Title` header are [PhaseSource::HeaderV2].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseSource {
+    #[default]
+    LegacyAnchor,
+    HeaderV2,
 }
 
 /// A single checkbox node in the plan. Tasks and subtasks share this shape;
@@ -259,7 +279,16 @@ impl Phase {
             annotations: node.annotations,
             depends_on: Vec::new(),
             prefer_after: Vec::new(),
+            source: PhaseSource::LegacyAnchor,
         }
+    }
+
+    /// True when the serializer should emit this phase as a FORMATv2
+    /// `## Phase X - Title` header rather than a v1 `- [ ] N.0` anchor.
+    /// Driven by `Phase::source`; canonicalize is the explicit operation
+    /// that flips legacy anchors to header form.
+    pub fn is_v2_header_form(&self) -> bool {
+        matches!(self.source, PhaseSource::HeaderV2)
     }
 }
 
@@ -559,6 +588,10 @@ fn flush_phase_group(
             annotations: vec![],
             depends_on: vec![],
             prefer_after: vec![],
+            // Standardize-promoted phases (from legacy `### Phase N — Title`
+            // markdown headers) land in HeaderV2 form so the next write emits
+            // them as `## Phase N - Title`.
+            source: PhaseSource::HeaderV2,
         });
     } else {
         // Promote every orphan top-level Node (no captured Phase header
@@ -1129,6 +1162,7 @@ mod tests {
                 }],
                 depends_on: vec![],
                 prefer_after: vec![],
+            source: PhaseSource::LegacyAnchor,
             }],
         };
         let json = serde_json::to_string(&plan).unwrap();
@@ -1178,6 +1212,7 @@ mod tests {
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
+            source: PhaseSource::LegacyAnchor,
             }],
         };
         // Phase 36: top-level phase ids resolve via find_phase / contains_id.
@@ -1205,6 +1240,7 @@ mod tests {
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
+            source: PhaseSource::LegacyAnchor,
             }],
         };
         let child = Node {
@@ -1306,6 +1342,7 @@ mod tests {
             annotations: vec![],
             depends_on: vec![],
             prefer_after: vec![],
+            source: PhaseSource::LegacyAnchor,
         });
         let ids: Vec<&str> = plan.phases.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["1.0", "2.0", "3.0"]);
@@ -1675,6 +1712,7 @@ mod tests {
                 }],
                 depends_on: vec![],
                 prefer_after: vec![],
+            source: PhaseSource::LegacyAnchor,
             }],
         };
         let (_, notes) = plan.standardize_to_canonical().unwrap();

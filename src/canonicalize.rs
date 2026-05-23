@@ -83,7 +83,11 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_promotes_header_phases_to_checkboxes() {
+    fn canonicalize_promotes_header_phases_to_v2_form() {
+        // Phase 37 update: standardize-promoted phases (from legacy
+        // `### Phase N — Title` h3 markdown headers in source) now land in
+        // FORMATv2 `## Phase N - Title` header form, not the old v1 anchor
+        // checkbox. The promotion still happens — just to the new canonical.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
@@ -93,7 +97,10 @@ mod tests {
         assert!(report.changed);
         assert!(!report.notes.is_empty());
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(after.contains("- [ ] 1.0 Build"));
+        assert!(
+            after.contains("## Phase 1.0 - Build") || after.contains("## Phase 1 - Build"),
+            "header phase promoted to v2 header form:\n{after}"
+        );
     }
 
     #[test]

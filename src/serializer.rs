@@ -38,12 +38,59 @@ pub fn serialize(plan: &Plan) -> String {
     out
 }
 
-/// Phase 36 v1 serializer: emit a phase as the legacy `- [<state>] <id> <title>`
-/// checkbox form. Phase 37 will swap this for FORMATv2's `## Phase <id> - <title>
-/// *(depends on: ...)* *(prefer after: ...)*` markdown header. Until then the
-/// phase's [Phase::depends_on] and [Phase::prefer_after] fields are present in
-/// the AST but not yet written to disk.
+/// Per-phase serializer dispatch (Phase 37, user call 2026-05-22): routine
+/// writes preserve the on-disk format — v1 anchors stay as `- [ ] N.0 Title`
+/// checkboxes; v2 header phases (parsed from `## Phase X - Title`) emit as
+/// FORMATv2 headers. The format flip is explicit via `plan-bridge canonicalize`
+/// (Phase 37.5) rather than implicit on every write — preserves user data,
+/// avoids unbounded test cascade, and matches how most Markdown formatters
+/// behave on round-trip.
 fn write_phase(out: &mut String, phase: &Phase) {
+    if phase.is_v2_header_form() {
+        write_phase_v2(out, phase);
+    } else {
+        write_phase_v1_anchor(out, phase);
+    }
+}
+
+/// Phase 37.1–37.4: FORMATv2 header form. `## Phase <id> - <title>` with
+/// optional `*(depends on: ...)*` / `*(prefer after: ...)*` markers, phase
+/// prose at column 0, top-level tasks at depth=0.
+fn write_phase_v2(out: &mut String, phase: &Phase) {
+    if phase.id.is_empty() {
+        out.push_str("## Phase\n");
+    } else {
+        let title_suffix = if phase.title.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", phase.title)
+        };
+        let mut header = format!("## Phase {}{}", phase.id, title_suffix);
+        if !phase.depends_on.is_empty() {
+            header.push_str(&format!(" *(depends on: {})*", phase.depends_on.join(", ")));
+        }
+        if !phase.prefer_after.is_empty() {
+            header.push_str(&format!(
+                " *(prefer after: {})*",
+                phase.prefer_after.join(", ")
+            ));
+        }
+        header.push('\n');
+        out.push_str(&header);
+    }
+    let inner = "";
+    for ann in &phase.annotations {
+        write_annotation(out, ann, inner);
+    }
+    for child in &phase.children {
+        write_node(out, child, 0);
+    }
+}
+
+/// Legacy v1 anchor form: `- [<state>] <id> <title>` checkbox + children
+/// indented at depth=1. Preserves user-applied phase state markers
+/// (`[x]`/`[-]`/`[>]`) until the operator explicitly canonicalizes.
+fn write_phase_v1_anchor(out: &mut String, phase: &Phase) {
     let mark = match phase.state {
         NodeState::Done => "x",
         NodeState::WontDo => "-",
@@ -489,6 +536,70 @@ Prose.
         assert!(
             !out_no.contains("\n\n- [ ] 2.0"),
             "no blank between phases when source had none:\n{out_no}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 37: FORMATv2 serializer dispatch
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn v2_phase_emits_header_form_with_both_markers() {
+        // A round-trip via parse: `## Phase AS - Title *(depends on: AR)*
+        // *(prefer after: AB)*` → Phase with source=HeaderV2 + markers →
+        // re-emit yields the same header line.
+        let input = "\
+## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*
+
+- [ ] AS.0 plan
+";
+        let plan = parse(input).unwrap();
+        let out = serialize(&plan);
+        assert!(
+            out.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
+            "v2 header with both markers round-trips:\n{out}"
+        );
+        // Top-level task lands at column 0 (depth=0) under a v2 phase.
+        assert!(out.contains("\n- [ ] AS.0 plan\n"), "task at column 0:\n{out}");
+        // And no v1-anchor form.
+        assert!(
+            !out.contains("- [ ] AS - Spine") && !out.contains("- [ ] AS.0 - "),
+            "no v1 anchor sneaks in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v1_anchor_phase_keeps_v1_form_on_routine_write() {
+        // Conservative dispatch: a phase parsed from `- [ ] N.0 Title`
+        // (source=LegacyAnchor) round-trips as `- [ ] N.0 Title`. Explicit
+        // canonicalize is the only way to flip to v2.
+        let input = "- [x] 1.0 Done legacy phase\n  - [ ] 1.1 task\n";
+        let plan = parse(input).unwrap();
+        let out = serialize(&plan);
+        assert_eq!(out, input, "v1 anchor preserved on routine write:\n{out}");
+    }
+
+    #[test]
+    fn mixed_v1_and_v2_phases_serialize_each_in_their_own_form() {
+        // A plan with one v1 anchor and one v2 header: each round-trips in
+        // its native form. The fixture covers this end-to-end; this is the
+        // minimal direct assertion.
+        let input = "\
+- [x] 1.0 Legacy
+  - [x] 1.1 done
+
+## Phase AI - New world
+
+- [ ] AI.0 task
+";
+        let plan = parse(input).unwrap();
+        let out = serialize(&plan);
+        assert!(out.contains("- [x] 1.0 Legacy"), "v1 anchor preserved");
+        assert!(out.contains("## Phase AI - New world"), "v2 header preserved");
+        assert!(out.contains("\n- [ ] AI.0 task\n"), "AI.0 at column 0");
+        assert!(
+            out.contains("  - [x] 1.1 done"),
+            "v1 task indented under v1 anchor (depth=1)"
         );
     }
 

@@ -1370,8 +1370,10 @@ mod tests {
         // requested plan_path's parent ONLY exists as a `### Phase N — Title`
         // markdown header (not a checkbox), insert_at_path's conditional
         // fallback runs standardize_to_canonical so the new task can land.
-        // This is the narrow rescue path — the alternative is failing the
-        // hook entirely on Phase-N-header projects.
+        //
+        // Phase 37 update: the promotion target is now a FORMATv2 `## Phase`
+        // header rather than a v1 `- [ ] N.0` checkbox — but the rescue
+        // behavior (header → real phase → child landing) is unchanged.
         let dir = scratch_dir();
         let original = "- [x] 0.1 First\n\n### Phase 1 — Build\n\n- [ ] 1.1 Build it\n";
         let plan = write_plan(&dir, original);
@@ -1380,12 +1382,12 @@ mod tests {
         writeback_create(&payload, &plan).expect("conditional canonicalize fallback");
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            after.contains("- [ ] 1.0 Build"),
+            after.contains("## Phase 1.0 - Build") || after.contains("## Phase 1 - Build"),
             "phase header promoted by fallback:\n{after}"
         );
         assert!(
-            after.contains("  - [ ] 1.2 new sub"),
-            "new task lands under 1.0:\n{after}"
+            after.contains("- [ ] 1.2 new sub"),
+            "new task lands under the promoted phase:\n{after}"
         );
     }
 
