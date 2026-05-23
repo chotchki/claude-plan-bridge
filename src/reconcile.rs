@@ -525,7 +525,11 @@ fn render_delta_block(deltas: &[&Delta], out: &mut String) {
                 out.push_str(&format!(
                     "  ! Phase {phase_id} depends on {} — not yet archived ({})\n",
                     unmet.join(", "),
-                    if unmet.len() == 1 { "still active" } else { "still active phases" }
+                    if unmet.len() == 1 {
+                        "still active"
+                    } else {
+                        "still active phases"
+                    }
                 ));
             }
             Delta::PhasePrefersAfter { phase_id, unmet } => {
@@ -1368,10 +1372,7 @@ mod tests {
             matches!(d, Delta::PhaseDependsOn { phase_id, unmet }
                 if phase_id == "AS" && unmet == &vec!["AR".to_string()])
         });
-        assert!(
-            found,
-            "expected PhaseDependsOn(AS → AR), got: {deltas:#?}"
-        );
+        assert!(found, "expected PhaseDependsOn(AS → AR), got: {deltas:#?}");
     }
 
     #[test]
@@ -1393,7 +1394,9 @@ mod tests {
         );
         // No PhaseDependsOn for the soft hint.
         assert!(
-            !deltas.iter().any(|d| matches!(d, Delta::PhaseDependsOn { .. })),
+            !deltas
+                .iter()
+                .any(|d| matches!(d, Delta::PhaseDependsOn { .. })),
             "soft hint shouldn't trigger hard-dep delta: {deltas:#?}"
         );
     }
@@ -1436,8 +1439,7 @@ mod tests {
             "hard dep uses strong language: {r}"
         );
         assert!(
-            r.contains("Phase AM prefers AI landed first")
-                && r.contains("soft hint"),
+            r.contains("Phase AM prefers AI landed first") && r.contains("soft hint"),
             "soft hint uses gentler language: {r}"
         );
     }
@@ -1448,13 +1450,11 @@ mod tests {
 
     #[test]
     fn render_focused_with_no_active_phase_matches_unfocused() {
-        let deltas = vec![
-            Delta::LeafAdded {
-                plan_path: "AI.1".to_string(),
-                title: "task".to_string(),
-                state: NodeState::Pending,
-            },
-        ];
+        let deltas = vec![Delta::LeafAdded {
+            plan_path: "AI.1".to_string(),
+            title: "task".to_string(),
+            state: NodeState::Pending,
+        }];
         let focused = render_deltas_focused(&deltas, None);
         let unfocused = render_deltas(&deltas);
         assert_eq!(focused, unfocused, "None active = unchanged output");
@@ -1483,10 +1483,7 @@ mod tests {
         // Active block sits before the "Other phases" block.
         let active_pos = r.find("Active phase `AI` drift:").expect("active header");
         let other_pos = r.find("Other phases").expect("other header");
-        assert!(
-            active_pos < other_pos,
-            "active block must come first:\n{r}"
-        );
+        assert!(active_pos < other_pos, "active block must come first:\n{r}");
         // Active block has just the AI.1 add; other block has AM.5 + AM.6.
         let active_block = &r[active_pos..other_pos];
         assert!(active_block.contains("AI.1"));
@@ -1499,13 +1496,11 @@ mod tests {
     fn render_focused_omits_active_header_when_no_active_deltas() {
         // All drift is in other phases — skip the "Active phase X drift:"
         // header, just emit "Other phases / cross-cutting:".
-        let deltas = vec![
-            Delta::LeafAdded {
-                plan_path: "AM.5".to_string(),
-                title: "other".to_string(),
-                state: NodeState::Pending,
-            },
-        ];
+        let deltas = vec![Delta::LeafAdded {
+            plan_path: "AM.5".to_string(),
+            title: "other".to_string(),
+            state: NodeState::Pending,
+        }];
         let r = render_deltas_focused(&deltas, Some("AI"));
         assert!(
             !r.contains("Active phase `AI` drift:"),
@@ -1541,11 +1536,9 @@ mod tests {
     fn render_focused_baseline_only_lives_in_other_block() {
         // BaselineOnly is cross-cutting — always "other phases" regardless
         // of active focus.
-        let deltas = vec![
-            Delta::BaselineOnly {
-                plan_paths: vec!["AI.1".to_string()],
-            },
-        ];
+        let deltas = vec![Delta::BaselineOnly {
+            plan_paths: vec!["AI.1".to_string()],
+        }];
         let r = render_deltas_focused(&deltas, Some("AI"));
         assert!(
             !r.contains("Active phase"),

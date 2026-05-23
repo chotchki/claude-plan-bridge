@@ -919,19 +919,15 @@ impl Plan {
     /// For leaf nodes the output is a single line; for non-leaf nodes the
     /// full subtree gets nested under it. Subtask state markers are dropped
     /// (FORMATv2 backlog entries are notes, not tracked work).
-    pub fn append_backlog_subtree(
-        &mut self,
-        node: &Node,
-        source_phase: &str,
-        date: &str,
-    ) {
+    pub fn append_backlog_subtree(&mut self, node: &Node, source_phase: &str, date: &str) {
         // Idempotency probe: match on the deferral marker for this plan_path
         // at the top level (avoids double-add if backlog already had it).
         let top_marker = format!("(deferred from phase `{source_phase}` on");
         let id_marker = format!("- {} -", node.id);
-        let already = self.backlog.iter().any(|line| {
-            line.trim_start().starts_with(&id_marker) && line.contains(&top_marker)
-        });
+        let already = self
+            .backlog
+            .iter()
+            .any(|line| line.trim_start().starts_with(&id_marker) && line.contains(&top_marker));
         if already {
             return;
         }
@@ -1101,6 +1097,7 @@ fn extract_backlog_from_annotations(node: &mut Node, out: &mut Vec<String>) {
 ///     under a previous bullet; emit `<indent><text>` verbatim
 ///   * `Blank { count }` — preserve blank-line gaps between cluster
 ///     headlines (FORMATv2 backlogs are visually grouped this way)
+///
 /// Stop on column-0 `Text` (a new heading / top-level prose) or any
 /// `CodeBlock` (deliberate boundary — fenced blocks inside a backlog
 /// section are vanishingly rare and signal end-of-list).
@@ -1333,7 +1330,7 @@ mod tests {
                 }],
                 depends_on: vec![],
                 prefer_after: vec![],
-            source: PhaseSource::LegacyAnchor,
+                source: PhaseSource::LegacyAnchor,
             }],
         };
         let json = serde_json::to_string(&plan).unwrap();
@@ -1384,7 +1381,7 @@ mod tests {
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
-            source: PhaseSource::LegacyAnchor,
+                source: PhaseSource::LegacyAnchor,
             }],
         };
         // Phase 36: top-level phase ids resolve via find_phase / contains_id.
@@ -1413,7 +1410,7 @@ mod tests {
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
-            source: PhaseSource::LegacyAnchor,
+                source: PhaseSource::LegacyAnchor,
             }],
         };
         let child = Node {
@@ -1694,11 +1691,15 @@ mod tests {
             "X.10 nested child preserved at indent=2:\n{joined}"
         );
         assert!(
-            plan.backlog.iter().any(|l| l.contains("per-cell chain runs")),
+            plan.backlog
+                .iter()
+                .any(|l| l.contains("per-cell chain runs")),
             "indented prose continuation NOT stranded:\n{joined}"
         );
         assert!(
-            plan.backlog.iter().any(|l| l == "  - X.10.a cell_chain expresses deps, not just order"),
+            plan.backlog
+                .iter()
+                .any(|l| l == "  - X.10.a cell_chain expresses deps, not just order"),
             "X.10.a preserved at indent=2:\n{joined}"
         );
         assert!(
@@ -1954,7 +1955,7 @@ mod tests {
                 }],
                 depends_on: vec![],
                 prefer_after: vec![],
-            source: PhaseSource::LegacyAnchor,
+                source: PhaseSource::LegacyAnchor,
             }],
         };
         let (_, notes) = plan.standardize_to_canonical().unwrap();

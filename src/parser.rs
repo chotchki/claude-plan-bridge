@@ -257,9 +257,7 @@ fn parse_v2_phase_header(line: &str) -> Option<PhaseHeader> {
 
     // Strip the separator (` - ` / ` — ` / bare whitespace). After the rest
     // may still start with `-` or `—` from the separator itself.
-    let after_sep = rest
-        .trim_start_matches(|c: char| c == '—' || c == '-')
-        .trim_start();
+    let after_sep = rest.trim_start_matches(['—', '-']).trim_start();
 
     // Title runs until the first `*(` marker or end-of-line.
     let (title_raw, markers_part) = match after_sep.find("*(") {
@@ -430,9 +428,7 @@ fn attach_annotation(
         Annotation::CodeBlock { indent, .. } => *indent == 0,
         Annotation::Blank { .. } => false,
     };
-    if column0_prose
-        && let Some(phase) = current_phase.as_mut()
-    {
+    if column0_prose && let Some(phase) = current_phase.as_mut() {
         phase.annotations.push(annotation);
         return;
     }
@@ -1363,7 +1359,12 @@ Some prose.
             ]
         );
         // Heading removed from preamble.
-        assert!(!plan.preamble.iter().any(|l| crate::ast::is_backlog_heading(l)));
+        assert!(
+            !plan
+                .preamble
+                .iter()
+                .any(|l| crate::ast::is_backlog_heading(l))
+        );
     }
 
     #[test]
@@ -1395,9 +1396,9 @@ Some intro prose here.
         let p = &plan.phases[0];
         assert_eq!(p.id, "AI");
         assert!(
-            p.annotations
-                .iter()
-                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("intro prose"))),
+            p.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("intro prose"))
+            ),
             "phase-level prose should be captured in annotations: {:?}",
             p.annotations
         );
@@ -1427,13 +1428,17 @@ Random prose that shouldn't be a task, will be swept with the phase.
         // The last task (AI.1) must NOT have the trailing prose attached.
         let ai_1 = &p.children[1];
         assert!(
-            !ai_1.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))),
+            !ai_1.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))
+            ),
             "trailing column-0 prose must NOT attach to AI.1: {:?}",
             ai_1.annotations
         );
         // The phase itself must own the trailing prose.
         assert!(
-            p.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))),
+            p.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("Random prose"))
+            ),
             "trailing column-0 prose must attach to phase: {:?}",
             p.annotations
         );
@@ -1455,13 +1460,17 @@ Random prose that shouldn't be a task, will be swept with the phase.
         let p = &plan.phases[0];
         let ai_0 = &p.children[0];
         assert!(
-            ai_0.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))),
+            ai_0.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))
+            ),
             "indented prose stays with the task it sits under: {:?}",
             ai_0.annotations
         );
         // Phase annotations don't accidentally receive task-level prose.
         assert!(
-            !p.annotations.iter().any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))),
+            !p.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("task-level prose"))
+            ),
             "indented prose must NOT bubble up to phase: {:?}",
             p.annotations
         );
@@ -1552,15 +1561,21 @@ Closing prose.
             })
             .collect();
         assert!(
-            phase_text_blobs.iter().any(|t| t.contains("Intro paragraph")),
+            phase_text_blobs
+                .iter()
+                .any(|t| t.contains("Intro paragraph")),
             "intro prose at phase: {phase_text_blobs:?}"
         );
         assert!(
-            phase_text_blobs.iter().any(|t| t.contains("Prose between tasks")),
+            phase_text_blobs
+                .iter()
+                .any(|t| t.contains("Prose between tasks")),
             "between-task prose at phase: {phase_text_blobs:?}"
         );
         assert!(
-            phase_text_blobs.iter().any(|t| t.contains("Trailing prose for Phase AI")),
+            phase_text_blobs
+                .iter()
+                .any(|t| t.contains("Trailing prose for Phase AI")),
             "trailing prose at phase: {phase_text_blobs:?}"
         );
 
@@ -1569,10 +1584,9 @@ Closing prose.
         let ai_1_1 = &ai_1.children[1];
         assert_eq!(ai_1_1.id, "AI.1.1");
         assert!(
-            ai_1_1
-                .annotations
-                .iter()
-                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Indented prose"))),
+            ai_1_1.annotations.iter().any(
+                |a| matches!(a, Annotation::Text { text, .. } if text.contains("Indented prose"))
+            ),
             "indented task-level prose stays with the task"
         );
 
@@ -1594,17 +1608,31 @@ Closing prose.
         // Backlog: h1 form, both flat notes and nested descoped subtrees.
         assert_eq!(plan.backlog.len(), 6);
         assert!(plan.backlog.iter().any(|l| l.contains("**Plain note**")));
-        assert!(plan.backlog.iter().any(|l| l.contains("**Deferred from a phase**")));
-        assert!(plan.backlog.iter().any(|l| l == "- X.1 - Descoped item from an archived phase"));
-        assert!(plan
-            .backlog
-            .iter()
-            .any(|l| l == "  - X.1.1 - Subtask carried over with structure intact"));
-        assert!(plan
-            .backlog
-            .iter()
-            .any(|l| l == "    Prose continuation under the descoped subtask."));
-        assert!(plan.backlog.iter().any(|l| l == "- Y.7 - Another descoped subtree"));
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l.contains("**Deferred from a phase**"))
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "- X.1 - Descoped item from an archived phase")
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "  - X.1.1 - Subtask carried over with structure intact")
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "    Prose continuation under the descoped subtask.")
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "- Y.7 - Another descoped subtree")
+        );
     }
 
     #[test]

@@ -71,16 +71,15 @@ pub fn canonicalize(plan_path: &Path, dry_run: bool) -> Result<CanonicalizeRepor
             // Idempotent: only add the breadcrumb when there isn't one
             // already, and clear phase.state to Pending so re-canonicalize
             // doesn't keep re-adding.
-            let already_noted = phase.annotations.iter().any(|a| {
-                matches!(a, Annotation::Text { text, .. } if text.contains("was marked"))
-            });
+            let already_noted = phase
+                .annotations
+                .iter()
+                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("was marked")));
             if !already_noted {
                 phase.annotations.insert(
                     0,
                     Annotation::Text {
-                        text: format!(
-                            "*(was marked [{m}] in v1 — archive to make it official)*"
-                        ),
+                        text: format!("*(was marked [{m}] in v1 — archive to make it official)*"),
                         indent: 0,
                     },
                 );

@@ -114,9 +114,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        holder
-            .try_lock()
-            .expect("preconditions: holder grabs lock");
+        holder.try_lock().expect("preconditions: holder grabs lock");
 
         // Short timeout so the test is fast.
         let err = with_state_lock(&state, Duration::from_millis(150), || Ok(()))

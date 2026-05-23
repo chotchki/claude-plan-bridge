@@ -42,11 +42,7 @@ fn activation_full_lifecycle_e2e() {
     // Seed state with mappings for every leaf.
     let state_path = plan_bridge::state::default_state_path_for(&plan_path);
     let mut state = State::default();
-    for (tid, path) in [
-        ("t-AI-0", "AI.0"),
-        ("t-AI-1", "AI.1"),
-        ("t-AM-0", "AM.0"),
-    ] {
+    for (tid, path) in [("t-AI-0", "AI.0"), ("t-AI-1", "AI.1"), ("t-AM-0", "AM.0")] {
         state.record(
             tid,
             Mapping {
@@ -79,7 +75,10 @@ fn activation_full_lifecycle_e2e() {
         msg.contains("Active phase: `AI`"),
         "active-phase header present: {msg}"
     );
-    assert!(msg.contains("AI.0") && msg.contains("AI.1"), "AI leaves: {msg}");
+    assert!(
+        msg.contains("AI.0") && msg.contains("AI.1"),
+        "AI leaves: {msg}"
+    );
     assert!(!msg.contains("AM.0"), "AM filtered out: {msg}");
 
     // ----- (4) cross-phase TaskCreate warn-but-allow -----
@@ -102,12 +101,14 @@ fn activation_full_lifecycle_e2e() {
         "cross-phase warning: {json}"
     );
     let plan_contents = std::fs::read_to_string(&plan_path).unwrap();
-    assert!(plan_contents.contains("AM.5"), "task did land:\n{plan_contents}");
+    assert!(
+        plan_contents.contains("AM.5"),
+        "task did land:\n{plan_contents}"
+    );
 
     // ----- (5) reconcile foregrounds AI drift -----
     let deltas = plan_bridge::reconcile::reconcile(&plan_path).unwrap();
-    let rendered =
-        plan_bridge::reconcile::render_deltas_focused(&deltas, Some("AI"));
+    let rendered = plan_bridge::reconcile::render_deltas_focused(&deltas, Some("AI"));
     // AM has *(depends on: AI)* and AI is still in plan.phases (not yet
     // archived), so a PhaseDependsOn{AM → AI} delta fires — that belongs to
     // the AM block (it's ABOUT AM's dep on AI).

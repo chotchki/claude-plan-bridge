@@ -84,12 +84,16 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 if !item.is_leaf() {
                     return None;
                 }
-                if let Some(active_id) = active.as_deref() {
-                    if crate::state::phase_id_of(&m.plan_path) != active_id {
-                        return None;
-                    }
+                if let Some(active_id) = active.as_deref()
+                    && crate::state::phase_id_of(&m.plan_path) != active_id
+                {
+                    return None;
                 }
-                Some((m.plan_path.clone(), item.title().to_string(), task_id.clone()))
+                Some((
+                    m.plan_path.clone(),
+                    item.title().to_string(),
+                    task_id.clone(),
+                ))
             })
             .collect();
         if open.is_empty() {
@@ -241,7 +245,11 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
                 if let Some(ref pid) = parent_id
                     && let Some(parent_item) = plan.find_item(pid)
                 {
-                    out.push_str(&format!("\n## {} {}\n", parent_item.id(), parent_item.title()));
+                    out.push_str(&format!(
+                        "\n## {} {}\n",
+                        parent_item.id(),
+                        parent_item.title()
+                    ));
                 }
                 current_parent = parent_id;
             }

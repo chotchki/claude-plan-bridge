@@ -38,9 +38,7 @@ fn collect_node_ids(nodes: &[plan_bridge::ast::Node], out: &mut Vec<String>) {
     }
 }
 
-fn collect_dep_metadata(
-    plan: &plan_bridge::ast::Plan,
-) -> Vec<(String, Vec<String>, Vec<String>)> {
+fn collect_dep_metadata(plan: &plan_bridge::ast::Plan) -> Vec<(String, Vec<String>, Vec<String>)> {
     plan.phases
         .iter()
         .map(|p| (p.id.clone(), p.depends_on.clone(), p.prefer_after.clone()))
@@ -62,10 +60,7 @@ fn quicksight_plan_parses_with_all_phases() {
     );
     // Sanity: phase ids look v2-shaped (alphabetic or `AO.R`-style alphanumeric).
     for p in &plan.phases {
-        assert!(
-            !p.id.is_empty(),
-            "every phase has an id (got empty): {p:?}"
-        );
+        assert!(!p.id.is_empty(), "every phase has an id (got empty): {p:?}");
     }
 }
 
@@ -87,14 +82,13 @@ fn quicksight_plan_canonicalize_preserves_ids() {
     let ids_before = collect_all_ids(&original_plan);
     let deps_before = collect_dep_metadata(&original_plan);
 
-    let report = plan_bridge::canonicalize::canonicalize(&dst, false)
-        .expect("canonicalize quicksight copy");
+    let report =
+        plan_bridge::canonicalize::canonicalize(&dst, false).expect("canonicalize quicksight copy");
 
     // Canonicalize is allowed to be a no-op (already v2) OR mutate. Either is
     // fine; what matters is round-trip preserves content.
     let after_text = std::fs::read_to_string(&dst).unwrap();
-    let after_plan = plan_bridge::parser::parse(&after_text)
-        .expect("parse post-canonicalize");
+    let after_plan = plan_bridge::parser::parse(&after_text).expect("parse post-canonicalize");
     let ids_after = collect_all_ids(&after_plan);
     let deps_after = collect_dep_metadata(&after_plan);
 

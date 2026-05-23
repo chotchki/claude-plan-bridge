@@ -466,7 +466,9 @@ fn main() -> Result<()> {
                     .phases
                     .iter()
                     .position(|p| p.id == after_id)
-                    .ok_or_else(|| anyhow::anyhow!("--after target `{after_id}` not found at top level"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--after target `{after_id}` not found at top level")
+                    })?;
                 plan.phases.insert(pos + 1, new_phase);
             } else {
                 plan.insert_phase(new_phase);
@@ -554,12 +556,10 @@ fn main() -> Result<()> {
             state.set_active_phase(Some(id.clone()));
             state.save(&state_path)?;
             match prior {
-                Some(p) if p == id => println!(
-                    "claude-plan-bridge: phase `{id}` already active (no-op)"
-                ),
-                Some(p) => println!(
-                    "claude-plan-bridge: activated phase `{id}` (was `{p}`)"
-                ),
+                Some(p) if p == id => {
+                    println!("claude-plan-bridge: phase `{id}` already active (no-op)")
+                }
+                Some(p) => println!("claude-plan-bridge: activated phase `{id}` (was `{p}`)"),
                 None => println!("claude-plan-bridge: activated phase `{id}`"),
             }
             if !unmet.is_empty() {
@@ -581,9 +581,7 @@ fn main() -> Result<()> {
                 Some(prior) => {
                     state.set_active_phase(None);
                     state.save(&state_path)?;
-                    println!(
-                        "claude-plan-bridge: deactivated focus (was `{prior}`)"
-                    );
+                    println!("claude-plan-bridge: deactivated focus (was `{prior}`)");
                 }
                 None => {
                     println!("claude-plan-bridge: no active phase to deactivate (no-op)");
@@ -629,7 +627,9 @@ fn main() -> Result<()> {
                     .phases
                     .iter()
                     .position(|p| p.id == after_id)
-                    .ok_or_else(|| anyhow::anyhow!("--after target `{after_id}` not found at top level"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--after target `{after_id}` not found at top level")
+                    })?;
                 plan.phases.insert(pos + 1, new_phase);
             } else {
                 plan.insert_phase(new_phase);
@@ -1015,8 +1015,7 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
     let active_phase = plan_bridge::state::State::load(&state_path)
         .ok()
         .and_then(|s| s.active_phase.clone());
-    let rendered =
-        plan_bridge::reconcile::render_deltas_focused(&deltas, active_phase.as_deref());
+    let rendered = plan_bridge::reconcile::render_deltas_focused(&deltas, active_phase.as_deref());
     if rendered.is_empty() {
         Ok(plan_bridge::hook::HookOutput::silent())
     } else {

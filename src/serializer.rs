@@ -576,7 +576,10 @@ Prose.
             "v2 header with both markers round-trips:\n{out}"
         );
         // Top-level task lands at column 0 (depth=0) under a v2 phase.
-        assert!(out.contains("\n- [ ] AS.0 plan\n"), "task at column 0:\n{out}");
+        assert!(
+            out.contains("\n- [ ] AS.0 plan\n"),
+            "task at column 0:\n{out}"
+        );
         // And no v1-anchor form.
         assert!(
             !out.contains("- [ ] AS - Spine") && !out.contains("- [ ] AS.0 - "),
@@ -611,7 +614,10 @@ Prose.
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         assert!(out.contains("- [x] 1.0 Legacy"), "v1 anchor preserved");
-        assert!(out.contains("## Phase AI - New world"), "v2 header preserved");
+        assert!(
+            out.contains("## Phase AI - New world"),
+            "v2 header preserved"
+        );
         assert!(out.contains("\n- [ ] AI.0 task\n"), "AI.0 at column 0");
         assert!(
             out.contains("  - [x] 1.1 done"),

@@ -157,18 +157,16 @@ pub fn archive_phase(
         if descope_pending {
             let descoped = descope_pending_leaves(&mut plan.phases[phase_idx]);
             for path in &descoped {
-                plan.backlog
-                    .push(format!("- {path} - descoped from phase `{phase_id}` on {today}"));
+                plan.backlog.push(format!(
+                    "- {path} - descoped from phase `{phase_id}` on {today}"
+                ));
             }
             // Backlog flipped to h1 alongside descope — descoping IS a v2
             // operation, so the bottom section adopts the FORMATv2 heading.
             plan.backlog_h1 = true;
             if !phase_fully_done(&plan.phases[phase_idx]) {
                 let mut still_unresolved: Vec<String> = Vec::new();
-                collect_unresolved_leaves_in_phase(
-                    &plan.phases[phase_idx],
-                    &mut still_unresolved,
-                );
+                collect_unresolved_leaves_in_phase(&plan.phases[phase_idx], &mut still_unresolved);
                 anyhow::bail!(
                     "phase `{phase_id}` still has unresolved leaves after --descope-pending: {} \
                      (these are non-leaf nodes whose own state is pending; tick or `[-]` them first)",
@@ -274,8 +272,7 @@ fn descope_pending_leaves(phase: &mut Phase) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < phase.children.len() {
-        if phase.children[i].is_leaf()
-            && phase.children[i].state == crate::ast::NodeState::Pending
+        if phase.children[i].is_leaf() && phase.children[i].state == crate::ast::NodeState::Pending
         {
             out.push(phase.children[i].id.clone());
             phase.children.remove(i);
@@ -669,8 +666,14 @@ mod tests {
         );
         let err = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("--descope-pending"), "error mentions the flag: {msg}");
-        assert!(msg.contains("1.2"), "error lists the unresolved leaf: {msg}");
+        assert!(
+            msg.contains("--descope-pending"),
+            "error mentions the flag: {msg}"
+        );
+        assert!(
+            msg.contains("1.2"),
+            "error lists the unresolved leaf: {msg}"
+        );
     }
 
     #[test]
@@ -691,7 +694,7 @@ mod tests {
         assert!(after.contains("- 1.3 - descoped from phase `1.0` on 2026-05-22"));
 
         // PLAN_ARCHIVE.md got the phase with its single done task.
-        let archive_md = std::fs::read_to_string(&dir.join("PLAN_ARCHIVE.md")).unwrap();
+        let archive_md = std::fs::read_to_string(dir.join("PLAN_ARCHIVE.md")).unwrap();
         assert!(archive_md.contains("1.0 Phase"));
         assert!(archive_md.contains("1.1 done"));
         // Descoped leaves were removed before archive, so they're NOT in
@@ -703,7 +706,10 @@ mod tests {
     #[test]
     fn archive_phase_descope_is_noop_when_already_fully_resolved() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [-] 1.2 won't-do\n");
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [-] 1.2 won't-do\n",
+        );
         // descope_pending=true on a fully-resolved phase: no leaves to
         // descope, no backlog notes added, phase archives normally.
         let report = archive_phase(&plan, "1.0", "2026-05-22", true).unwrap();

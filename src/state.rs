@@ -179,7 +179,6 @@ use crate::io_util::tmp_path;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     fn scratch_dir() -> PathBuf {
         crate::test_utils::scratch_dir("state-test")

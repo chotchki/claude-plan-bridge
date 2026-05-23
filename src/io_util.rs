@@ -16,8 +16,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .with_context(|| format!("no parent for {}", path.display()))?;
     if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let tmp = tmp_path(path);
     std::fs::write(&tmp, bytes).with_context(|| format!("write tmp {}", tmp.display()))?;

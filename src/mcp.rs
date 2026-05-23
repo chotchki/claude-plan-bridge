@@ -208,12 +208,22 @@ impl McpServer {
         let depends_on: Vec<String> = args
             .get("depends_on")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         let prefer_after: Vec<String> = args
             .get("prefer_after")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         let after = args.get("after").and_then(Value::as_str).map(String::from);
 
@@ -397,8 +407,7 @@ impl McpServer {
             .get("descope_pending")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let report =
-            crate::archive::archive_phase(&self.plan_path, &id, &date, descope_pending)?;
+        let report = crate::archive::archive_phase(&self.plan_path, &id, &date, descope_pending)?;
         Ok(tool_text_result(&format!(
             "exited and archived phase {}: {} plan paths cleared",
             id,
@@ -751,10 +760,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch_plan(contents: &str) -> (PathBuf, McpServer) {
-        let p = crate::test_utils::write_plan(
-            &crate::test_utils::scratch_dir("mcp"),
-            contents,
-        );
+        let p = crate::test_utils::write_plan(&crate::test_utils::scratch_dir("mcp"), contents);
         let s = McpServer::new(p.clone());
         (p, s)
     }
@@ -850,9 +856,8 @@ mod tests {
 
     #[test]
     fn plan_rename_phase_rewrites_title_only() {
-        let (_, s) = scratch_plan(
-            "## Phase AI - Old title *(depends on: AR)*\n\n- [ ] AI.0 task\n",
-        );
+        let (_, s) =
+            scratch_plan("## Phase AI - Old title *(depends on: AR)*\n\n- [ ] AI.0 task\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
@@ -889,9 +894,7 @@ mod tests {
 
     #[test]
     fn plan_set_phase_deps_replaces_both_lists() {
-        let (_, s) = scratch_plan(
-            "## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
-        );
+        let (_, s) = scratch_plan("## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
@@ -997,9 +1000,7 @@ mod tests {
     fn plan_activate_no_unmet_dep_note_when_deps_already_archived() {
         // AS depends on AR, but only AS is in the plan — AR is implicitly
         // archived. No "depends on" suffix in the response.
-        let (_, s) = scratch_plan(
-            "## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n",
-        );
+        let (_, s) = scratch_plan("## Phase AS - Spine *(depends on: AR)*\n\n- [ ] AS.0 plan\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
