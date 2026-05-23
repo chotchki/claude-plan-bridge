@@ -10,18 +10,10 @@ fn scratch_dir() -> PathBuf {
 }
 
 fn binary() -> PathBuf {
-    // `cargo test` builds the binary alongside the test deps under
-    // CARGO_TARGET_DIR (or the workspace target/debug). Resolve by
-    // probing the workspace target directory.
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest.join("target/debug/claude-plan-bridge");
-    if candidate.exists() {
-        return candidate;
-    }
-    panic!(
-        "claude-plan-bridge binary not built — run `cargo build` first (looked for {})",
-        candidate.display()
-    );
+    // Cargo sets CARGO_BIN_EXE_<name> for integration tests, pointing at
+    // the built binary regardless of target dir (works under `cargo test`
+    // and `cargo llvm-cov`, which uses target/llvm-cov-target).
+    PathBuf::from(env!("CARGO_BIN_EXE_claude-plan-bridge"))
 }
 
 #[test]
