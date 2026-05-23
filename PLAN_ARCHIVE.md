@@ -458,3 +458,16 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
   - [x] 39.3 SPEC.md + README.md + CLAUDE.md hint docs updates for FORMATv2
   - [x] 39.4 Cut release (version bump, RELEASE_NOTES, tag, push)
 
+---
+
+## 2026-05-23
+
+- [ ] 40.0 Activation focus (per-project active phase)
+  - [x] 40.1 Add `active_phase: Option<String>` to state file + accessors
+  - [x] 40.2 `plan_activate <PHASE>` / `plan_deactivate` MCP + CLI verbs
+  - [x] 40.3 Resume scopes rehydration prompt to active phase (backlog always loaded)
+  - [x] 40.4 Writeback warns on cross-phase TaskCreate (warn-but-allow); archive auto-clears active_phase
+  - [x] 40.5 Reconcile foregrounds active-phase drift; `plan_activate` notes unmet hard deps
+  - [x] 40.6 Activation e2e tests + docs (SPEC/README update)
+  - [x] 40.7 CLI `plan-bridge phase-scaffold <ID> <title> --tasks "...,...,..."`
+
