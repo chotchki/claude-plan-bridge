@@ -1078,6 +1078,32 @@ fn extract_backlog_from_annotations(node: &mut Node, out: &mut Vec<String>) {
 /// Inner sweep: walk a single annotation list, pulling out backlog blocks.
 /// Shared by [extract_backlog_from_annotations] (Node) and the Phase-level
 /// walker used in [Plan::consolidate_backlog].
+///
+/// Phase 41.6: previously the walker only captured contiguous
+/// `Annotation::Bullet`s after the heading AND stripped their indent on
+/// the way out — both bugs surfaced by the quicksight upstream report
+/// (2026-05-22), where a `## Backlog` block attached to a phase
+/// contained nested bullets with indented prose continuations:
+///
+///     - Model-driven docs (drift reduction)
+///       - X.10 — Runner: intra-cell layer DAG
+///         The per-cell chain ...
+///       - X.10.a cell_chain expresses deps
+///
+/// The old logic broke on the first Text (prose continuation), stranding
+/// every subsequent bullet/prose line in the source; and the bullets it
+/// DID extract lost their indent. Result: 90 lines of orphaned markdown
+/// between the last phase and the new `# Backlog` heading.
+///
+/// New rule: keep walking while each annotation is one of
+///   * `Bullet { indent }` — emit `<indent>- <text>` preserving depth
+///   * `Text { indent: n }` where `n > 0` — indented prose continuation
+///     under a previous bullet; emit `<indent><text>` verbatim
+///   * `Blank { count }` — preserve blank-line gaps between cluster
+///     headlines (FORMATv2 backlogs are visually grouped this way)
+/// Stop on column-0 `Text` (a new heading / top-level prose) or any
+/// `CodeBlock` (deliberate boundary — fenced blocks inside a backlog
+/// section are vanishingly rare and signal end-of-list).
 fn extract_backlog_from_annotation_list(annotations: &mut Vec<Annotation>, out: &mut Vec<String>) {
     let mut i = 0;
     while i < annotations.len() {
@@ -1088,11 +1114,27 @@ fn extract_backlog_from_annotation_list(annotations: &mut Vec<Annotation>, out: 
         if is_heading {
             let mut end = i + 1;
             while end < annotations.len() {
-                if let Annotation::Bullet { text, .. } = &annotations[end] {
-                    out.push(format!("- {text}"));
-                    end += 1;
-                } else {
-                    break;
+                match &annotations[end] {
+                    Annotation::Bullet { text, indent } => {
+                        out.push(format!("{}- {}", " ".repeat(*indent), text));
+                        end += 1;
+                    }
+                    Annotation::Text { text, indent } if *indent > 0 => {
+                        // Indented prose continuation under a previous
+                        // bullet (e.g., the "The per-cell chain ..."
+                        // detail under "- X.10 — Runner ..."). Preserve
+                        // verbatim with its original indent.
+                        out.push(format!("{}{}", " ".repeat(*indent), text));
+                        end += 1;
+                    }
+                    Annotation::Blank { count } => {
+                        for _ in 0..*count {
+                            out.push(String::new());
+                        }
+                        end += 1;
+                    }
+                    // Column-0 Text or CodeBlock — boundary.
+                    _ => break,
                 }
             }
             annotations.drain(i..end);
@@ -1602,6 +1644,74 @@ mod tests {
                 "- **Dup** — added 2026-05-19.",
                 "- **Unique** — added 2026-05-19."
             ]
+        );
+    }
+
+    #[test]
+    fn consolidate_preserves_nested_bullets_and_prose_under_backlog_headline() {
+        // Phase 41.6 regression: quicksight 2026-05-22 upstream report.
+        // A `## Backlog (not yet phased)` block attached to a phase
+        // (mid-document, not trailing — so trail-peel misses it) with
+        // nested bullets + indented prose continuations under a headline.
+        // Pre-41.6: the walker captured only the top-line bullet, broke
+        // on the first indented prose, and stripped indent from the
+        // bullets it did extract — stranding the children in source.
+        // Post-41.6: every bullet + indented continuation + blank-line
+        // gap survives the move with indent intact.
+        let input = "\
+- [ ] 1.0 Phase
+
+## Backlog (not yet phased)
+
+- Model-driven docs (drift reduction)
+  - X.10 — Runner: intra-cell layer DAG
+    The per-cell chain runs strictly serially today, but db / app2 /
+    deploy only depend on seed_variant — they're true siblings.
+
+  - X.10.a cell_chain expresses deps, not just order
+  - X.10.b _run_one_variant gathers the sibling layers
+- AA.A.10 (stretch) — Tree-walk picker→column derivation
+  Even after AA.A.9, PickerSpec.column is still hand-mapped.
+
+- [ ] 2.0 Next phase
+";
+        let mut plan = parse_for_test(input);
+        plan.consolidate_backlog();
+        let joined = plan.backlog.join("\n");
+
+        // Headline + every nested child + the prose continuation all
+        // land in plan.backlog with indent preserved.
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "- Model-driven docs (drift reduction)"),
+            "headline present at column 0:\n{joined}"
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "  - X.10 — Runner: intra-cell layer DAG"),
+            "X.10 nested child preserved at indent=2:\n{joined}"
+        );
+        assert!(
+            plan.backlog.iter().any(|l| l.contains("per-cell chain runs")),
+            "indented prose continuation NOT stranded:\n{joined}"
+        );
+        assert!(
+            plan.backlog.iter().any(|l| l == "  - X.10.a cell_chain expresses deps, not just order"),
+            "X.10.a preserved at indent=2:\n{joined}"
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l == "- AA.A.10 (stretch) — Tree-walk picker→column derivation"),
+            "second cluster headline preserved:\n{joined}"
+        );
+        assert!(
+            plan.backlog
+                .iter()
+                .any(|l| l.contains("AA.A.9, PickerSpec.column")),
+            "second cluster's prose preserved:\n{joined}"
         );
     }
 
