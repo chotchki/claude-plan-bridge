@@ -106,8 +106,7 @@ Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-lev
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
 - **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set. With no `plan_path`, the work is unphased — it's recorded as a tracked note in the canonical `## Backlog (not yet phased)` section at the bottom of `PLAN.md` (mapped to a synthetic `backlog:<task_id>` path) and promoted into a real phase later by a deliberate planning move. Idempotent on `task_id`.
-  - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level `N.0` exists, the bridge synthesizes the anchor for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback). No more manual "add the 10.0 row, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
-  - **Top-level enforcement.** If an `N.0` exists but is nested under another phase (e.g. hand-added at the wrong indent), the bridge refuses the insert rather than silently parking children under the misplaced anchor. Fix the indent and retry.
+  - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level phase `N` exists, the bridge synthesizes a `## Phase N - <title>` header for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback), with the new task hyphen-separated under it. No more manual "add the phase header, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
   - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
 - **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work. Same `\"` → `"` normalization as create.
 
@@ -325,7 +324,8 @@ Intro paragraph at the phase level — sweeps with the phase to archive.
 ```
 
 - **Phases**: `## Phase <ID> - <Title>` (h2 header). The id is a bare
-  alphabetic prefix (`AI`, `AS`) or numeric (`1`, `1.0`). Title optional.
+  alphabetic prefix (`AI`, `AS`) or numeric (`1`); a legacy `.0` anchor
+  suffix is stripped on read (`## Phase 1.0` → phase id `1`). Title optional.
 - **Phase dependency markers**: `*(depends on: X, Y)*` (hard sequencing
   hint) and/or `*(prefer after: A, B)*` (soft hint). Informational only —
   reconcile surfaces them; the bridge never blocks an operation.

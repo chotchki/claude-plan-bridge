@@ -269,10 +269,7 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
         // them all. So the `else` branch is purely the resume/compact case.
         if dropped > 0 {
             out.push_str(&format!(
-                "\nNote: the bridge cleared {dropped} stale mapping(s) from the state \
-                 file before emitting this prompt (source=`{source}` guarantees a fresh \
-                 harness). Your TaskCreates will land cleanly — no `Refusing to silently \
-                 move` warnings expected.",
+                "\nNote: cleared {dropped} stale mapping(s); fresh harness (source=`{source}`).",
             ));
         } else {
             out.push_str(&format!(
@@ -511,16 +508,16 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First phase\n  - [ ] 1.1 First task\n  - [ ] 1.2 Second task\n\
-             - [ ] 3.0 Third phase\n  - [ ] 3.1 Lone task\n\
-             - [ ] 5.0 Standalone phase\n",
+            "## Phase 1 - First phase\n- [ ] 1.1 - First task\n- [ ] 1.2 - Second task\n\n\
+             ## Phase 3 - Third phase\n- [ ] 3.1 - Lone task\n\n\
+             ## Phase 5 - Standalone phase\n",
         );
         let mut state = State::default();
         for (id, path, title) in [
             ("a", "1.1", "First task"),
             ("b", "1.2", "Second task"),
             ("c", "3.1", "Lone task"),
-            ("d", "5.0", "Standalone phase"),
+            ("d", "5", "Standalone phase"),
         ] {
             state.record(
                 id,
@@ -536,29 +533,29 @@ mod tests {
         let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
 
         // Parent headers appear for grouped leaves; childless top-level
-        // leaf (5.0) has no header (parent_id_for returns None).
+        // phase leaf (5) has no header (parent_id_for returns None).
         assert!(
-            msg.contains("## 1.0 First phase"),
-            "missing parent header for 1.0: {msg}"
+            msg.contains("## 1 First phase"),
+            "missing parent header for phase 1: {msg}"
         );
         assert!(
-            msg.contains("## 3.0 Third phase"),
-            "missing parent header for 3.0: {msg}"
+            msg.contains("## 3 Third phase"),
+            "missing parent header for phase 3: {msg}"
         );
         assert!(
-            !msg.contains("## 5.0 Standalone phase"),
-            "5.0 is itself a leaf (no parent), should not get a header: {msg}"
+            !msg.contains("## 5 Standalone phase"),
+            "phase 5 is itself a leaf (no parent), should not get a header: {msg}"
         );
 
         // Header position: each parent header precedes its leaves.
-        let pos_h10 = msg.find("## 1.0").expect("header 1.0");
+        let pos_h10 = msg.find("## 1 ").expect("header 1");
         let pos_11 = msg.find("  - 1.1").expect("leaf 1.1");
         let pos_12 = msg.find("  - 1.2").expect("leaf 1.2");
-        let pos_h30 = msg.find("## 3.0").expect("header 3.0");
+        let pos_h30 = msg.find("## 3 ").expect("header 3");
         let pos_31 = msg.find("  - 3.1").expect("leaf 3.1");
         assert!(
             pos_h10 < pos_11 && pos_11 < pos_12,
-            "1.0 header should precede its leaves: header@{pos_h10} 1.1@{pos_11} 1.2@{pos_12}"
+            "phase 1 header should precede its leaves: header@{pos_h10} 1.1@{pos_11} 1.2@{pos_12}"
         );
         assert!(
             pos_12 < pos_h30 && pos_h30 < pos_31,
@@ -574,17 +571,17 @@ mod tests {
 
     #[test]
     fn childless_phase_node_is_treated_as_leaf() {
-        // A phase stubbed with no children (e.g., a freshly-added `- [ ] 5.0
-        // Future phase` with nothing under it) IS a leaf by `is_leaf()` and
-        // should rehydrate — otherwise newly-stubbed phases would silently
-        // vanish from the harness on restart.
+        // A phase stubbed with no children (e.g., a freshly-added
+        // `## Phase 5 - Future phase` with nothing under it) IS a leaf by
+        // `is_leaf()` and should rehydrate — otherwise newly-stubbed phases
+        // would silently vanish from the harness on restart.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 5.0 Future phase\n");
+        let plan = write_plan(&dir, "## Phase 5 - Future phase\n");
         let mut state = State::default();
         state.record(
             "1",
             Mapping {
-                plan_path: "5.0".to_string(),
+                plan_path: "5".to_string(),
                 last_synced_title: "Future phase".to_string(),
                 ..Default::default()
             },
@@ -593,7 +590,7 @@ mod tests {
 
         let msg = build_resume_message(&plan, "startup").unwrap().unwrap();
         assert!(
-            msg.contains("5.0 Future phase"),
+            msg.contains("5 Future phase"),
             "childless phase should emit as leaf: {msg}"
         );
     }

@@ -967,7 +967,7 @@ mod tests {
         assert!(resp.get("error").is_none(), "got: {resp}");
         let after = std::fs::read_to_string(&s.plan_path).unwrap();
         assert!(
-            after.contains("## Phase 1.0 - Legacy phase *(depends on: 0.0)*"),
+            after.contains("## Phase 1 - Legacy phase *(depends on: 0.0)*"),
             "phase flipped to v2 form with marker:\n{after}"
         );
     }

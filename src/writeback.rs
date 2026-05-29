@@ -241,45 +241,73 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         };
         state.save(&state_path)?;
 
-        let mut message = format!(
-            "claude-plan-bridge: {action} `{}` at {} in {}",
-            input.subject,
-            assigned_path,
-            plan_path.display()
-        );
-        if let Some(anchor_id) = anchor_created {
-            message.push_str(&format!(
-                " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
-            ));
-        }
-        if let Some(n) = rehydration_total {
-            message.push_str(&format!(
-                "\nrehydration complete: {n}/{n} mapped — state file synced"
-            ));
-        }
-        if !stale_ids.is_empty() {
-            message.push_str(&format!(
-                " (replaced stale mapping(s) for task(s) {})",
-                stale_ids.join(", ")
-            ));
-        }
-        // Phase 40.4: cross-phase TaskCreate warn-but-allow. When a phase is
-        // active and the new task lands on a different phase, the create
-        // still succeeds (the bridge is peripheral, never blocks); the hook
-        // output adds a one-liner so the agent sees the focus drift and can
-        // decide whether to widen / switch / continue.
-        if let Some(active_id) = state.active_phase()
-            && !assigned_path.starts_with(crate::reconcile::BACKLOG_PREFIX)
-            && crate::state::phase_id_of(&assigned_path) != active_id
-        {
-            message.push_str(&format!(
-                "\n  NOTE: cross-phase TaskCreate — `{assigned_path}` is in phase \
-                 `{}`, but active phase is `{active_id}`. Run \
-                 `plan_activate {}` to switch focus, or `plan_deactivate` to widen.",
-                crate::state::phase_id_of(&assigned_path),
-                crate::state::phase_id_of(&assigned_path),
-            ));
-        }
+        // Phase 42.2: a rehydration-burst TaskCreate (one whose plan_path was
+        // in `pending_rehydration`) gets a compact one-liner instead of the
+        // full "added `<title>` at <path> in <plan>" block. On session
+        // restart the resume prompt fires N of these back-to-back; N verbose
+        // confirmations flood context to restore state the user never asked
+        // to lose. These creates re-attach a fresh harness id to an EXISTING
+        // PLAN.md line, so anchor / stale-mapping / cross-phase notes can't
+        // apply — the compact form drops them safely. Genuine (non-rehydrate)
+        // creates keep the full message.
+        let message = if evicted_from_rehydration {
+            match rehydration_total {
+                Some(n) => format!(
+                    "claude-plan-bridge: rehydrated {assigned_path}; \
+                     rehydration complete: {n}/{n} mapped — state file synced"
+                ),
+                None => {
+                    let total = state.rehydration_announced;
+                    if total > 0 {
+                        let done = total.saturating_sub(state.pending_rehydration.len() as u32);
+                        format!("claude-plan-bridge: rehydrated {assigned_path} ({done}/{total})")
+                    } else {
+                        format!("claude-plan-bridge: rehydrated {assigned_path}")
+                    }
+                }
+            }
+        } else {
+            let mut message = format!(
+                "claude-plan-bridge: {action} `{}` at {} in {}",
+                input.subject,
+                assigned_path,
+                plan_path.display()
+            );
+            if let Some(anchor_id) = anchor_created {
+                message.push_str(&format!(
+                    " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
+                ));
+            }
+            if let Some(n) = rehydration_total {
+                message.push_str(&format!(
+                    "\nrehydration complete: {n}/{n} mapped — state file synced"
+                ));
+            }
+            if !stale_ids.is_empty() {
+                message.push_str(&format!(
+                    " (replaced stale mapping(s) for task(s) {})",
+                    stale_ids.join(", ")
+                ));
+            }
+            // Phase 40.4: cross-phase TaskCreate warn-but-allow. When a phase is
+            // active and the new task lands on a different phase, the create
+            // still succeeds (the bridge is peripheral, never blocks); the hook
+            // output adds a one-liner so the agent sees the focus drift and can
+            // decide whether to widen / switch / continue.
+            if let Some(active_id) = state.active_phase()
+                && !assigned_path.starts_with(crate::reconcile::BACKLOG_PREFIX)
+                && crate::state::phase_id_of(&assigned_path) != active_id
+            {
+                message.push_str(&format!(
+                    "\n  NOTE: cross-phase TaskCreate — `{assigned_path}` is in phase \
+                     `{}`, but active phase is `{active_id}`. Run \
+                     `plan_activate {}` to switch focus, or `plan_deactivate` to widen.",
+                    crate::state::phase_id_of(&assigned_path),
+                    crate::state::phase_id_of(&assigned_path),
+                ));
+            }
+            message
+        };
         Ok(HookOutput::context(&payload.hook_event_name, message))
     })
 }
@@ -510,18 +538,6 @@ struct InsertResult {
     anchor_created: Option<String>,
 }
 
-/// Phase 40.4: under FORMATv2 a task id like `AI.0` lives correctly nested
-/// inside the v2 header phase `## Phase AI`. The legacy "parent has top-
-/// level shape but found nested" refusal would false-positive on this, so
-/// we suppress it when the v2 parent phase exists at top level (the bare
-/// prefix without the `.0` suffix matches a `Plan.phases[i].id`).
-fn v2_parent_phase_exists(plan: &Plan, parent_id: &str) -> bool {
-    let Some(prefix) = parent_id.strip_suffix(".0") else {
-        return false;
-    };
-    plan.phases.iter().any(|p| p.id == prefix)
-}
-
 fn insert_at_path(
     plan: Plan,
     plan_path: &str,
@@ -541,11 +557,11 @@ fn insert_at_path(
         title: subject.to_string(),
         state: NodeState::Pending,
         id_style: crate::ast::IdStyle::Plain,
-        // Routine TaskCreates preserve the conservative format dispatch:
-        // new tasks land with plain space separator (matches v1 in-place).
-        // `plan-bridge canonicalize` is the single op that flips every task
-        // separator to FORMATv2 ` - ` hyphen-space.
-        separator: crate::ast::Separator::Space,
+        // Phase 42.4: new tasks land in canonical FORMATv2 form with the
+        // ` - ` hyphen-space separator, matching `canonicalize` output and
+        // the documented plan format. (The frozen archive keeps its older
+        // space-separated leaves; they aren't re-serialized.)
+        separator: crate::ast::Separator::Hyphen,
         children: vec![],
         annotations: vec![],
     };
@@ -573,11 +589,10 @@ fn insert_at_path(
                 } else if parent_id_for(&parent_id).is_none() {
                     // Phase 38.7: auto-anchor synthesizes a FORMATv2
                     // `## Phase X - Title` header (source=HeaderV2) instead
-                    // of the legacy `- [ ] X.0 Title` checkbox. The phase id
-                    // preserves the `.0` suffix from `parent_id` for
-                    // backward-compatible parent lookups — the header will
-                    // render as `## Phase X.0 - Title` until the operator
-                    // runs `canonicalize` to strip cosmetically.
+                    // of the legacy `- [ ] X.0 Title` checkbox.
+                    // Phase 42.4: `parent_id` is a bare phase id now, so the
+                    // header renders directly as `## Phase X - Title` with no
+                    // `.0` to strip.
                     let anchor_title = plan_phase
                         .map(str::to_string)
                         .unwrap_or_else(|| synthesize_anchor_title(&parent_id));
@@ -604,22 +619,18 @@ fn insert_at_path(
                          see how the bridge would normalize the structure."
                     );
                 }
-            } else if parent_id_for(&parent_id).is_none()
-                && !plan.phases.iter().any(|p| p.id == parent_id)
-                && !v2_parent_phase_exists(&plan, &parent_id)
-            {
-                // Phase 31.3: parent has the top-level shape (e.g. `10.0`,
-                // `AH.0`) but was found nested under another node — usually
-                // because the user hand-added `- [ ] 10.0 ...` at the wrong
-                // indent. Refuse rather than silently parenting the new task
-                // under whatever leaf the misplaced anchor wound up beneath
-                // (the shakeout symptom: 10.1–10.13 landed indented under
-                // `6.13 Staging / beta deployment`).
+            } else if parent_id_for(&parent_id).is_none() && plan.find_phase(&parent_id).is_none() {
+                // Phase 31.3: parent has top-level (bare phase) shape but was
+                // found nested under another node as a task — usually because
+                // the user hand-added an anchor at the wrong indent. Refuse
+                // rather than silently parenting the new task under whatever
+                // leaf the misplaced anchor wound up beneath.
                 //
-                // Phase 40.4 update: skip the refusal when the v2 parent
-                // phase exists at top level (id matches the prefix without
-                // `.0`). E.g., `AI.0` correctly nested under `## Phase AI`
-                // is NOT a misplaced anchor.
+                // Phase 42.4: with bare phase ids, `find_phase` (shim-aware)
+                // already distinguishes a real top-level phase from a nested
+                // task that merely shares the id shape — so the standalone
+                // `v2_parent_phase_exists` check that special-cased `X.0` is
+                // gone.
                 anyhow::bail!(
                     "inserting {plan_path}: parent `{parent_id}` exists in PLAN.md but is \
                      nested inside another phase. `{parent_id}` has top-level phase shape \
@@ -641,13 +652,10 @@ fn insert_at_path(
 
 /// Title for an auto-synthesized phase anchor when the TaskCreate didn't
 /// carry `metadata.plan_phase`. The output is deliberately bland — Claude can
-/// `TaskUpdate(plan_path=N.0, subject=...)` later to give the phase a real
-/// title without renaming the children.
+/// `TaskUpdate(plan_path=N, subject=...)` later to give the phase a real
+/// title without renaming the children. `parent_id` is a bare phase id.
 fn synthesize_anchor_title(parent_id: &str) -> String {
-    match parent_id.strip_suffix(".0") {
-        Some(prefix) => format!("Phase {prefix}"),
-        None => format!("Phase {parent_id}"),
-    }
+    format!("Phase {parent_id}")
 }
 
 #[cfg(test)]
@@ -694,7 +702,7 @@ mod tests {
         let out = writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            new_contents.contains("    - [ ] 1.1.1 New subtask"),
+            new_contents.contains("    - [ ] 1.1.1 - New subtask"),
             "got:\n{new_contents}"
         );
         assert!(out.to_json().contains("added"));
@@ -708,7 +716,7 @@ mod tests {
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            new_contents.contains("  - [ ] 1.1 First task"),
+            new_contents.contains("  - [ ] 1.1 - First task"),
             "got:\n{new_contents}"
         );
     }
@@ -1085,6 +1093,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rehydration_create_emits_compact_message_not_verbose_block() {
+        // Phase 42.2: a TaskCreate whose plan_path is in pending_rehydration
+        // is part of a session-restart burst. Its hook output is a compact
+        // one-liner with progress — NOT the full "added `<title>` at <path>
+        // in <plan>" block — so N back-to-back rehydration creates don't
+        // flood context. (Genuine creates keep the verbose form; see below.)
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut seed = State::default();
+        seed.pending_rehydration.insert("1.1".to_string());
+        seed.pending_rehydration.insert("1.2".to_string());
+        seed.rehydration_announced = 2;
+        seed.save(&state_path).unwrap();
+
+        let out = writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan)
+            .unwrap()
+            .to_json();
+        assert!(
+            out.contains("rehydrated 1.1 (1/2)"),
+            "intermediate rehydration create should be compact with progress; got: {out}"
+        );
+        assert!(
+            !out.contains("added `First`"),
+            "rehydration create must not emit the verbose added block; got: {out}"
+        );
+    }
+
+    #[test]
+    fn genuine_create_keeps_verbose_added_message() {
+        // Counterpart to the 42.2 compact path: a create whose plan_path is
+        // NOT in pending_rehydration is genuine new work and keeps the full
+        // "added `<title>` at <path>" confirmation.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Existing\n");
+        let out = writeback_create(&payload_for_create("t-1", "Brand new", Some("1.2")), &plan)
+            .unwrap()
+            .to_json();
+        assert!(
+            out.contains("added `Brand new` at 1.2"),
+            "genuine create should keep verbose message; got: {out}"
+        );
+        assert!(
+            !out.contains("rehydrated"),
+            "genuine create must not use the rehydration compact form; got: {out}"
+        );
+    }
+
     fn payload_for_update(task_id: &str, status: &str) -> HookPayload {
         HookPayload {
             session_id: String::new(),
@@ -1169,7 +1229,7 @@ mod tests {
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update("t-1", "completed"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(contents.contains("  - [x] 1.1 Task"), "got:\n{contents}");
+        assert!(contents.contains("  - [x] 1.1 - Task"), "got:\n{contents}");
     }
 
     #[test]
@@ -1195,7 +1255,7 @@ mod tests {
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            after.contains("- [>] 1.1 Task"),
+            after.contains("- [>] 1.1 - Task"),
             "leaf should flip to [>]: {after}"
         );
         assert!(
@@ -1300,7 +1360,7 @@ mod tests {
         writeback_update(&payload_for_update_subject("t-1", "New title"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [ ] 1.1 New title"),
+            contents.contains("  - [ ] 1.1 - New title"),
             "PLAN.md not renamed:\n{contents}"
         );
         assert!(
@@ -1334,7 +1394,7 @@ mod tests {
         writeback_update(&combined, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [x] 1.1 New"),
+            contents.contains("  - [x] 1.1 - New"),
             "expected ticked + renamed line:\n{contents}"
         );
     }
@@ -1509,7 +1569,7 @@ mod tests {
             "phase header promoted by fallback:\n{after}"
         );
         assert!(
-            after.contains("- [ ] 1.2 new sub"),
+            after.contains("- [ ] 1.2 - new sub"),
             "new task lands under the promoted phase:\n{after}"
         );
     }
@@ -1531,7 +1591,7 @@ mod tests {
             "sub-section header preserved verbatim:\n{after}"
         );
         assert!(
-            after.contains("- [ ] 1.3 new sub"),
+            after.contains("- [ ] 1.3 - new sub"),
             "new leaf inserted:\n{after}"
         );
     }
@@ -1548,7 +1608,7 @@ mod tests {
         writeback_create(&payload, &plan).expect("narrative headers don't block");
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            after.contains("- [ ] 1.2 new sub"),
+            after.contains("- [ ] 1.2 - new sub"),
             "new task inserted:\n{after}"
         );
         assert!(
@@ -1636,7 +1696,7 @@ mod tests {
 
         let contents = std::fs::read_to_string(plan.as_path()).unwrap();
         for i in 1..=n {
-            let needle = format!("- [ ] 1.{i} child {i}");
+            let needle = format!("- [ ] 1.{i} - child {i}");
             assert!(
                 contents.contains(&needle),
                 "missing 1.{i} in PLAN.md:\n{contents}"
@@ -1696,7 +1756,7 @@ mod tests {
         writeback_create(&payload, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [ ] 1.1 Build \"/blog\" listing"),
+            contents.contains("- [ ] 1.1 - Build \"/blog\" listing"),
             "PLAN.md should have clean quotes:\n{contents}"
         );
         assert!(
@@ -1729,7 +1789,7 @@ mod tests {
         writeback_update(&rename, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [ ] 1.1 Build \"/blog\" listing"),
+            contents.contains("- [ ] 1.1 - Build \"/blog\" listing"),
             "rename should clean quotes:\n{contents}"
         );
     }
@@ -1740,22 +1800,23 @@ mod tests {
         // used to bail with "parent 10.0 not found". Now the bridge synthesizes
         // the anchor at top level.
         //
-        // Phase 38.7 update: the auto-anchor is now a FORMATv2 `## Phase X.0 -
+        // Phase 38.7 update: the auto-anchor is now a FORMATv2 `## Phase X -
         // Title` header (source=HeaderV2), not a v1 `- [ ] X.0` checkbox.
+        // Phase 42.4: bare phase id (`## Phase 10`, not `10.0`) and the child
+        // lands hyphen-separated (canonical FORMATv2).
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
         let payload = payload_for_create("t-1", "First task of phase 10", Some("10.1"));
         let out = writeback_create(&payload, &plan).expect("auto-anchor should not bail");
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("## Phase 10.0 - Phase 10"),
-            "auto-anchor lands as v2 header at top level:\n{contents}"
+            contents.contains("## Phase 10 - Phase 10"),
+            "auto-anchor lands as bare v2 header at top level:\n{contents}"
         );
         // The child task sits at column 0 under the v2 header (no v1
-        // indentation since the phase isn't a checkbox). Separator stays
-        // plain-space on routine TaskCreate; canonicalize flips it to ` - `.
+        // indentation since the phase isn't a checkbox), hyphen-separated.
         assert!(
-            contents.contains("\n- [ ] 10.1 First task of phase 10\n"),
+            contents.contains("\n- [ ] 10.1 - First task of phase 10\n"),
             "child task at column 0:\n{contents}"
         );
         let json = out.to_json();
@@ -1790,33 +1851,38 @@ mod tests {
         writeback_create(&payload, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("## Phase 10.0 - Dropdown audit pass"),
+            contents.contains("## Phase 10 - Dropdown audit pass"),
             "plan_phase drives v2 anchor title:\n{contents}"
         );
     }
 
     #[test]
-    fn create_refuses_misplaced_phase_anchor_as_parent() {
-        // Phase 31.3: the user hand-added `- [ ] 10.0 ...` at the wrong indent,
-        // so it ended up nested under `1.5`. Bridge should refuse to use it
-        // as a parent rather than silently dropping 10.1 under the nesting.
+    fn create_synthesizes_phase_when_only_a_misplaced_anchor_exists() {
+        // Phase 42.4: under the bare-id model the old Phase 31.3 footgun
+        // dissolves. A stray nested `10.0` is just an oddly-named task — it
+        // no longer captures the bare parent `10` of `10.1` (find_phase only
+        // matches a real top-level phase). So inserting 10.1 synthesizes a
+        // clean `## Phase 10` at the top level and nests 10.1 under it,
+        // instead of refusing. The misplaced node is left untouched.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
             "- [ ] 1.0 First phase\n  - [ ] 1.5 some leaf\n    - [ ] 10.0 misplaced anchor\n",
         );
         let payload = payload_for_create("t-1", "First", Some("10.1"));
-        let err = writeback_create(&payload, &plan).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("nested") || msg.contains("top-level"),
-            "error should explain the structural problem: {msg}"
-        );
-        // PLAN.md untouched.
+        writeback_create(&payload, &plan).expect("should synthesize a fresh top-level phase");
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            !after.contains("- [ ] 10.1"),
-            "no leaf should have been written: {after}"
+            after.contains("## Phase 10 - Phase 10"),
+            "a clean top-level phase 10 should be synthesized:\n{after}"
+        );
+        assert!(
+            after.contains("\n- [ ] 10.1 - First\n"),
+            "10.1 should land hyphen-separated under the new phase:\n{after}"
+        );
+        assert!(
+            after.contains("10.0 misplaced anchor"),
+            "the misplaced node is left where it was:\n{after}"
         );
     }
 
@@ -1830,7 +1896,7 @@ mod tests {
         writeback_create(&payload, &plan).expect("top-level anchor should be accepted");
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [ ] 10.1 First child"),
+            contents.contains("  - [ ] 10.1 - First child"),
             "child should land under existing top-level anchor:\n{contents}"
         );
     }

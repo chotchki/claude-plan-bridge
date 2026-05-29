@@ -483,3 +483,15 @@ Adopter session imploded with `read ./PLAN.md: No such file or directory` blocki
 - [x] 41.5 Cut v0.3.1 release (patch — no behavior changes)
 - [x] 41.6 Canonicalize bug: preserve nested children + indented prose continuations under backlog bullets
 
+---
+
+## 2026-05-28
+
+## Phase 42 - Bridge UX from session feedback
+- [x] 42.1 - Compress the stale-mapping cleanup note in resume.rs to one line
+- [x] 42.2 - Suppress per-TaskCreate writeback chatter during rehydration burst
+- [x] 42.3 - id-model keystone: bare phase ids in parent_id_for + strip-.0 normalization on parse
+- [x] 42.4 - Serializer + insert_at_path: bare `## Phase X` anchors, hyphen-separated new leaves
+- [x] 42.5 - canonicalize: flip v1 anchors to bare `## Phase X` (no .0)
+- [x] 42.6 - Migrate live plan, sweep remaining X.0 assumptions, docs + full test/clippy/fmt
+

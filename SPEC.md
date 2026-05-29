@@ -53,8 +53,10 @@ Trailing prose — also phase-level, sweeps with the phase to PLAN_ARCHIVE.md.
 ### Structure
 
 - **Phases** are markdown h2 headers: `## Phase <ID> - <Title>`. The id is
-  a bare alphanumeric prefix (`AI`, `AS`, `AO`, `1`, `1.0`). The title is
-  optional; the separator is hyphen-space.
+  a bare alphanumeric prefix (`AI`, `AS`, `AO`, `1`; dotted phase numbers
+  like `3.5` are kept verbatim). Phase 42.3: a legacy `.0` anchor suffix is
+  stripped on read, so `## Phase 1.0` normalizes to phase id `1`. The title
+  is optional; the separator is hyphen-space.
 - **Tasks** under a phase sit at column 0: `- [<state>] <PHASE>.<N> -
   <title>`. Subtasks indent two spaces per level: `<PHASE>.<N>.<K>`.
 - **Two checkbox separators tolerated on read** (` - `, ` — `, plain space);
@@ -197,26 +199,26 @@ This is intentionally lossy on format (bold/em-dash → plain) so the canonical 
 
 - Every **leaf node** (no nested `- [ ]` children) becomes exactly one TaskCreate item.
 - Non-leaf nodes (phases, intermediate tasks) live only in PLAN.md and are **never** represented as TaskCreate items. The bridge does NOT auto-tick parents when all children complete — parent ticking is a deliberate validation step ("did the children meet this phase's goal?") that the user/agent owns. Archive operates on subtree state, so leaving a parent box unticked doesn't block phase sweeping; the parent box ticked vs. unticked is signal about whether the phase was *validated*, not whether the work was *done*.
-- **Top-level phase anchors (`N.0` form) are not tracked tasks either.** They're document-structural — the parent for a phase's children. The bridge does NOT emit `LeafAdded` drift for them (Phase 31.5): a manually-edited or auto-synthesized `- [ ] 10.0 Phase 10` won't nag the agent to `TaskCreate` it. Phases stay user/agent-owned by convention.
+- **Phases (`## Phase X` headers, bare ids) are not tracked tasks either.** They're document-structural — the parent for a phase's children. The bridge does NOT emit `LeafAdded` drift for them (Phase 31.5): a manually-edited or auto-synthesized `## Phase 10 - …` won't nag the agent to `TaskCreate` it. Phases stay user/agent-owned by convention. (Phase 42.3: phase ids are bare — `10`, `AI` — not the legacy `10.0` anchor form.)
 - TaskCreate fields the bridge cares about:
   - `subject`: leaf title (without the `N.M.K` prefix). Subjects are normalized on the way in — stray `\"` sequences (an over-escape pattern markdown doesn't need) get stripped to plain `"` before storage so PLAN.md never holds the ugly form.
   - `metadata.plan_path`: dotted address (e.g., `"1.2.3"`).
-  - `metadata.plan_phase`: optional human-readable phase title. Used as the title when the bridge auto-synthesizes a missing top-level anchor (Phase 31.2). Fallback when absent: `Phase N` (e.g. `Phase 10` for a `10.0` synthesis).
+  - `metadata.plan_phase`: optional human-readable phase title. Used as the title when the bridge auto-synthesizes a missing phase header (Phase 31.2). Fallback when absent: `Phase N` (e.g. `Phase 10` for a `10.X` insert).
   - `status`: `pending` for `[ ]`, `completed` for `[x]`. (`in_progress` is set by Claude during active work; it doesn't reflect to PLAN.md until completion.)
 - TaskCreate fields the bridge does **not** read (Claude may set them freely for harness UI ergonomics):
   - `description` — recommended value is the `plan_path` itself, since the bridge ignores it and using the plan_path keeps the harness UI from showing the same text as `subject` twice.
 - `blocks` / `blockedBy` dependencies are **not** auto-populated. PLAN.md only encodes parent-child nesting and document order, not explicit "this depends on that" — inferring dependencies from nesting alone would be guessing. Adding explicit dependency syntax to PLAN.md is a possible future direction, not a v1 concern.
 
-### Anchor handling on first-child insert (Phase 31)
+### Phase handling on first-child insert (Phase 31, 42.4)
 
-When `TaskCreate(plan_path=N.X)` arrives for a phase that doesn't yet have an `N.0` anchor:
+When `TaskCreate(plan_path=N.X)` arrives for a phase `N` that doesn't yet exist:
 
-| State of `N.0` | Bridge behavior |
+| State of phase `N` | Bridge behavior |
 |---|---|
-| Missing entirely | Synthesizes `- [ ] N.0 <plan_phase or "Phase N">` at top level, then inserts `N.X` under it. Hook output announces the auto-creation. |
-| Exists at top level | Inserts `N.X` as a child of the existing anchor (the canonical path). |
-| Exists nested under another phase | Refuses with a clear "move it to column 0" error. Refusing is deliberate — silently parenting children under a misplaced anchor was the Phase 31.3 shakeout bug (10.1–10.13 landed under `6.13 Staging / beta deployment`). |
-| Lives only as a `### Phase N — Title` markdown header | Falls back to `standardize_to_canonical()` to promote the header into a checkbox, then inserts. (Pre-Phase-31 fallback, preserved.) |
+| Missing entirely | Synthesizes `## Phase N - <plan_phase or "Phase N">` at top level, then inserts `N.X` under it (hyphen-separated). Hook output announces the auto-creation. |
+| Exists at top level | Inserts `N.X` as a child of the existing phase (the canonical path). |
+| Only a nested node shares the id shape | Phase 42.4: with bare phase ids a stray nested `N.0` no longer captures the bare parent `N` — `find_phase` matches only a real top-level phase — so the bridge synthesizes a clean `## Phase N` instead of the pre-42.4 refusal. The misplaced node is left untouched. |
+| Lives only as a `### Phase N — Title` markdown header | Falls back to `standardize_to_canonical()` to promote the header into a phase, then inserts. (Pre-Phase-31 fallback, preserved.) |
 
 Missing **intermediate** parents (e.g. `1.2` blocking a `1.2.3` insert) still error with the canonicalize hint — auto-creating non-anchor structure would invent nesting the user didn't ask for.
 
@@ -334,7 +336,7 @@ TaskCreate at all.
 - **`UserPromptSubmit` reconcile cost.** Re-parsing PLAN.md every prompt is cheap (small file, line-oriented). Re-emitting full state in `additionalContext` is the bigger concern — should emit a compact delta, not the whole tree.
 
   The delta MUST cover, at minimum:
-  - Leaves added, removed, or moved. (Top-level `N.0` phase anchors are excluded from the `LeafAdded` channel — they're not tracked tasks; see Phase 31.5.)
+  - Leaves added, removed, or moved. (Top-level phases (`## Phase X`, bare ids) are excluded from the `LeafAdded` channel — they're not tracked tasks; see Phase 31.5.)
   - Box-state flips (`[ ]` ↔ `[x]`).
   - Leaf title edits.
   - **Sub-leaf annotations** — any non-checkbox bullet, indented note, or trailing prose attached to a leaf. Common case: user adds context under an existing item between turns and tells Claude "go look." Reconcile must surface the new annotation text, not just structural diffs. Column-0 markdown section headers (`## Phase 10 — …` between phase blocks) are filtered out of the diff: the parser attaches them to whichever leaf was open, but they're document-structural dividers, not leaf-scoped content (Phase 31.4).

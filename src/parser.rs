@@ -102,7 +102,12 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                 plan.phases.push(p);
             }
             current_phase = Some(Phase {
-                id: header.id,
+                // Phase 42.3: phases are bare ids under FORMATv2. Strip a
+                // trailing `.0` left over from the legacy convention
+                // (`## Phase 42.0`) so in-memory phase ids are always bare,
+                // regardless of on-disk form — old plans auto-migrate to
+                // `## Phase 42` on the next write.
+                id: bare_phase_id(&header.id),
                 title: header.title,
                 state: NodeState::Pending,
                 id_style: IdStyle::Plain,
@@ -220,6 +225,13 @@ struct PhaseHeader {
     title: String,
     depends_on: Vec<String>,
     prefer_after: Vec<String>,
+}
+
+/// Phase 42.3: normalize a phase id to its bare FORMATv2 form by dropping a
+/// trailing `.0` left over from the legacy `X.0` convention. Bare ids and
+/// dotted phase numbers (`3.5`) pass through unchanged.
+fn bare_phase_id(id: &str) -> String {
+    id.strip_suffix(".0").unwrap_or(id).to_string()
 }
 
 /// Match a FORMATv2 phase header line. Returns None for any line that isn't

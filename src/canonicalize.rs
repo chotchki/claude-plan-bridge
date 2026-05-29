@@ -204,16 +204,13 @@ mod tests {
             "h2 backlog should be gone:\n{after}"
         );
         let backlog_pos = after.find("# Backlog").unwrap();
-        // v1 phase 1.0 was flipped to `## Phase 1.0 - Phase`; either form
-        // means "the phase content sits above the backlog".
+        // Phase 42.5: v1 phase 1.0 was flipped to the bare `## Phase 1 - Phase`
+        // header; the phase content sits above the backlog.
         assert!(
-            after.contains("## Phase 1.0 - Phase") || after.contains("- [ ] 1.0 Phase"),
-            "phase 1.0 emitted in some form:\n{after}"
+            after.contains("## Phase 1 - Phase"),
+            "phase 1 emitted as bare v2 header:\n{after}"
         );
-        let phase_pos = after
-            .find("## Phase 1.0")
-            .or_else(|| after.find("- [ ] 1.0"))
-            .unwrap();
+        let phase_pos = after.find("## Phase 1").unwrap();
         assert!(
             backlog_pos > phase_pos,
             "backlog should sit below the phases:\n{after}"
@@ -255,8 +252,8 @@ mod tests {
         );
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            after.contains("## Phase 1.0 - Phase title"),
-            "v1 anchor flipped to v2 header:\n{after}"
+            after.contains("## Phase 1 - Phase title"),
+            "v1 anchor flipped to bare v2 header:\n{after}"
         );
         // Tasks now sit at column 0 under the v2 phase, with hyphen-space
         // separator throughout.
@@ -286,7 +283,7 @@ mod tests {
         );
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            after.contains("## Phase 1.0 - Phase that was ticked"),
+            after.contains("## Phase 1 - Phase that was ticked"),
             "v2 header emitted:\n{after}"
         );
         assert!(

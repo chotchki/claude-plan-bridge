@@ -334,6 +334,11 @@ impl Phase {
         self.source = PhaseSource::HeaderV2;
         self.separator = Separator::Hyphen;
         self.id_style = IdStyle::Plain;
+        // Phase 42.5: v2 header phases carry bare ids — drop the legacy `.0`
+        // anchor suffix so the header emits as `## Phase N`, not `## Phase N.0`.
+        if let Some(bare) = self.id.strip_suffix(".0") {
+            self.id = bare.to_string();
+        }
     }
 
     /// True when the serializer should emit this phase as a FORMATv2
@@ -550,11 +555,10 @@ fn parse_id_with_separator(s: &str) -> Option<(String, String)> {
         return None;
     }
 
-    let id = if id_part.contains('.') {
-        id_part.to_string()
-    } else {
-        format!("{id_part}.0")
-    };
+    // Phase 42.5: phase ids are bare under FORMATv2 — use the header id
+    // verbatim (`Phase 1` -> `1`, `Phase AA` -> `AA`) instead of appending
+    // the legacy `.0` anchor suffix.
+    let id = id_part.to_string();
     let title = after_id
         .trim_start_matches('—')
         .trim_start_matches('-')
@@ -634,6 +638,8 @@ fn flush_phase_group(
         return;
     }
     if let Some((id, title)) = current_header.take() {
+        // Phase 42.5: promoted header phases carry bare ids too.
+        let id = id.strip_suffix(".0").map(str::to_string).unwrap_or(id);
         let children: Vec<Node> = std::mem::take(pending);
         out.push(Phase {
             id,
@@ -709,11 +715,11 @@ impl Plan {
 
     /// Find a phase by id at the top level.
     pub fn find_phase(&self, id: &str) -> Option<&Phase> {
-        self.phases.iter().find(|p| p.id == id)
+        self.phases.iter().find(|p| phase_id_matches(&p.id, id))
     }
 
     pub fn find_phase_mut(&mut self, id: &str) -> Option<&mut Phase> {
-        self.phases.iter_mut().find(|p| p.id == id)
+        self.phases.iter_mut().find(|p| phase_id_matches(&p.id, id))
     }
 
     /// True when `id` matches any phase OR any task in the plan. Cheap
@@ -734,7 +740,7 @@ impl Plan {
     }
 
     pub fn find_item_mut(&mut self, id: &str) -> Option<PlanItemMut<'_>> {
-        if let Some(idx) = self.phases.iter().position(|p| p.id == id) {
+        if let Some(idx) = self.phases.iter().position(|p| phase_id_matches(&p.id, id)) {
             return Some(PlanItemMut::Phase(&mut self.phases[idx]));
         }
         for phase in &mut self.phases {
@@ -753,7 +759,11 @@ impl Plan {
     /// lands in that phase's task list. Otherwise the bridge searches every
     /// phase's task subtree for a Node with the matching id.
     pub fn add_child_of(&mut self, parent_id: &str, child: Node) -> Result<(), String> {
-        if let Some(phase) = self.phases.iter_mut().find(|p| p.id == parent_id) {
+        if let Some(phase) = self
+            .phases
+            .iter_mut()
+            .find(|p| phase_id_matches(&p.id, parent_id))
+        {
             insert_in_order(&mut phase.children, child);
             return Ok(());
         }
@@ -1265,18 +1275,28 @@ fn split_numeric_prefix(s: &str) -> (Option<u64>, &str) {
     (num, rest)
 }
 
-/// Derive the parent id for a canonical plan_path. Returns None for top-level
-/// (e.g. `1.0`, `AH.0`). For 2-part non-`.0` ids like `1.1` the parent is
-/// `1.0` (the phase). For 3+ parts, parent is the prefix without the last
-/// segment.
+/// Derive the parent id for a canonical plan_path. Returns None for a bare
+/// top-level phase id (`42`, `AH`). The parent of any deeper id is that id
+/// minus its last dot-segment: `42.1` -> `42`, `42.1.1` -> `42.1`.
+///
+/// Phase 42.3: phases are bare ids under FORMATv2; the legacy `.0` special-
+/// case (phase `X.0`, parent-of-`X.1` == `X.0`) is gone.
 pub fn parent_id_for(plan_path: &str) -> Option<String> {
     let parts: Vec<&str> = plan_path.split('.').collect();
-    match parts.as_slice() {
-        [] | [_] => None,
-        [_, "0"] => None,
-        [head, _] => Some(format!("{head}.0")),
-        many => Some(many[..many.len() - 1].join(".")),
+    if parts.len() <= 1 {
+        None
+    } else {
+        Some(parts[..parts.len() - 1].join("."))
     }
+}
+
+/// Phase 42.3: phases are bare ids (`42`) under FORMATv2, but during migration
+/// one may still be parsed/stored in the legacy `X.0` form. Treat a bare query
+/// `X` as matching a phase whose id is `X` or the legacy `X.0`. Transitional —
+/// once `canonicalize` has flipped every phase to the bare form this only ever
+/// hits the exact-match arm.
+fn phase_id_matches(phase_id: &str, query: &str) -> bool {
+    phase_id == query || phase_id.strip_suffix(".0") == Some(query)
 }
 
 /// A non-checkbox line attached to a node — context for the work, not work itself.
@@ -1340,11 +1360,12 @@ mod tests {
 
     #[test]
     fn parent_id_for_handles_canonical_shapes() {
-        assert_eq!(parent_id_for("1.0"), None);
-        assert_eq!(parent_id_for("AH.0"), None);
+        // Phase 42.3: bare phase ids have no parent; any deeper id drops its
+        // last dot-segment. The legacy `.0` special-case is gone.
         assert_eq!(parent_id_for("1"), None);
-        assert_eq!(parent_id_for("1.1"), Some("1.0".to_string()));
-        assert_eq!(parent_id_for("AH.3"), Some("AH.0".to_string()));
+        assert_eq!(parent_id_for("AH"), None);
+        assert_eq!(parent_id_for("1.1"), Some("1".to_string()));
+        assert_eq!(parent_id_for("AH.3"), Some("AH".to_string()));
         assert_eq!(parent_id_for("1.1.1"), Some("1.1".to_string()));
         assert_eq!(parent_id_for("X.4.a.1"), Some("X.4.a".to_string()));
     }
@@ -1769,22 +1790,22 @@ mod tests {
     #[test]
     fn standardize_promotes_phase_n_header_to_canonical_phase() {
         // The shakeout shape: `### Phase 1 — Build` between checkboxes.
-        // After standardize: phases 1.1+ become children of a new 1.0 node.
+        // After standardize: phases 1.1+ become children of a new bare `1` node.
         let plan = parse_for_test(
             "- [ ] 0.1 First\n- [ ] 0.5 Last in zero\n\n### Phase 1 — Build\n\n- [ ] 1.1 Build it\n- [ ] 1.2 Build more\n",
         );
         let (out, notes) = plan.standardize_to_canonical().unwrap();
         assert_eq!(notes.len(), 1);
         assert!(
-            notes[0].contains("1.0"),
+            notes[0].contains("Phase 1"),
             "note should call out promotion: {notes:?}"
         );
 
         let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
         // 0.1 and 0.5 are orphans (no preceding Phase header for them), stay top-level.
-        // 1.0 is the synthesized phase parent, with 1.1 and 1.2 as children.
-        assert_eq!(ids, vec!["0.1", "0.5", "1.0"], "got phases: {ids:?}");
-        let p10 = out.phases.iter().find(|n| n.id == "1.0").unwrap();
+        // Phase 42.5: the synthesized phase parent is bare `1`, with 1.1/1.2 as children.
+        assert_eq!(ids, vec!["0.1", "0.5", "1"], "got phases: {ids:?}");
+        let p10 = out.phases.iter().find(|n| n.id == "1").unwrap();
         assert_eq!(p10.title, "Build");
         let child_ids: Vec<&str> = p10.children.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(child_ids, vec!["1.1", "1.2"]);
@@ -1826,16 +1847,17 @@ mod tests {
     }
 
     #[test]
-    fn standardize_alpha_only_id_gets_zero_appended() {
-        // `### AA — Title` → id="AA.0" (children like "AA.1" → parent "AA.0").
+    fn standardize_alpha_only_id_stays_bare() {
+        // Phase 42.5: `### AA — Title` → bare id "AA" (children like "AA.1"
+        // resolve their parent as "AA" via parent_id_for). No `.0` appended.
         let plan =
             parse_for_test("- [ ] 0.1 First\n\n### AA — Top-level alpha\n\n- [ ] AA.1 Sub\n");
         let (out, _) = plan.standardize_to_canonical().unwrap();
         let p_aa = out
             .phases
             .iter()
-            .find(|n| n.id == "AA.0")
-            .expect("AA.0 phase created");
+            .find(|n| n.id == "AA")
+            .expect("AA phase created");
         assert_eq!(p_aa.title, "Top-level alpha");
     }
 
