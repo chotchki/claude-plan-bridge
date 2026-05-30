@@ -131,8 +131,16 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 let InsertResult {
                     plan,
                     anchor_created,
+                    attached_existing,
                 } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
-                (plan, p, "added".to_string(), anchor_created)
+                // Phase BY.3: "added" is misleading when the leaf already
+                // existed and the bridge only re-linked the mapping. Say so.
+                let action = if attached_existing {
+                    "attached to existing"
+                } else {
+                    "added"
+                };
+                (plan, p, action.to_string(), anchor_created)
             }
             None => {
                 // Phase BY.11: metadata.plan_path is absent — but the
@@ -150,8 +158,16 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                         let InsertResult {
                             plan,
                             anchor_created,
+                            ..
                         } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
-                        (plan, p, "attached via description".to_string(), anchor_created)
+                        // The description fallback only ever adopts a
+                        // pre-existing id, so this is always an attach.
+                        (
+                            plan,
+                            p,
+                            "attached to existing (via description)".to_string(),
+                            anchor_created,
+                        )
                     }
                     None => {
                         // Phase 35: no plan_path means the work is real but
@@ -296,9 +312,43 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 plan_path.display()
             );
             if let Some(anchor_id) = anchor_created {
-                message.push_str(&format!(
-                    " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
-                ));
+                // Phase BY.9: only nag to pass `metadata.plan_phase` when it
+                // wasn't already provided. When the TaskCreate DID carry
+                // plan_phase, the anchor title is already real — telling the
+                // agent to "pass plan_phase to give the phase a real title"
+                // asks for something it just did. Announce the anchor plainly
+                // instead.
+                if plan_phase_hint.is_some() {
+                    message.push_str(&format!(
+                        " (auto-created top-level phase anchor `{anchor_id}`, titled from `metadata.plan_phase`)"
+                    ));
+                } else {
+                    message.push_str(&format!(
+                        " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
+                    ));
+                }
+            }
+            // Phase BY.2: a create that landed in `## Backlog` did so because
+            // no usable plan_path was found. Say so loudly and point at the
+            // two common causes: a missing/mis-shaped plan_path, or (the big
+            // one) TaskCreate's deferred schema not being loaded — which makes
+            // the client drop `metadata` silently. Also flag a file-path-shaped
+            // description, the exact "plan_path looks like PLAN.md" confusion.
+            if assigned_path.starts_with(crate::reconcile::BACKLOG_PREFIX) {
+                message.push_str(
+                    "\n  NOTE: no usable plan_path, so this landed in `## Backlog`, not under a \
+                     phase. To phase it, pass `metadata.plan_path=<leaf id>` — a dotted id like \
+                     `BT.5` or `1.3.2`, NOT a path to PLAN.md. If you DID pass metadata, confirm \
+                     TaskCreate's schema is loaded (`ToolSearch select:TaskCreate`): an unloaded \
+                     deferred schema makes the client drop `metadata` before the hook sees it.",
+                );
+                let desc = input.description.trim();
+                if desc.ends_with(".md") || desc.contains('/') {
+                    message.push_str(&format!(
+                        "\n  (the description `{desc}` looks like a file path — plan_path is a \
+                         per-leaf id, not a path to the plan file)"
+                    ));
+                }
             }
             if let Some(n) = rehydration_total {
                 message.push_str(&format!(
@@ -554,10 +604,14 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
 /// Result of `insert_at_path`. `anchor_created` is `Some(parent_id)` when the
 /// bridge auto-synthesized the top-level phase anchor for this insert (Phase
 /// 31.2), so the hook output can announce it. `None` when no anchor synthesis
-/// happened.
+/// happened. `attached_existing` (Phase BY.3) is `true` when the plan_path
+/// already named a line in PLAN.md, so the bridge only re-linked the mapping
+/// rather than inserting a new leaf — the hook message says "attached to
+/// existing" instead of "added" to stop the misleading "added" wording.
 struct InsertResult {
     plan: Plan,
     anchor_created: Option<String>,
+    attached_existing: bool,
 }
 
 fn insert_at_path(
@@ -572,6 +626,7 @@ fn insert_at_path(
         return Ok(InsertResult {
             plan,
             anchor_created: None,
+            attached_existing: true,
         });
     }
     let new_node = Node {
@@ -669,6 +724,7 @@ fn insert_at_path(
     Ok(InsertResult {
         plan,
         anchor_created,
+        attached_existing: false,
     })
 }
 
@@ -741,6 +797,103 @@ mod tests {
             tool_response: serde_json::json!({"id": task_id}),
             source: String::new(),
         }
+    }
+
+    /// Build a create payload carrying both `plan_path` and `plan_phase` in
+    /// metadata — for the BY.9 anchor-hint tests, which need a plan_phase to be
+    /// present (or absent) to exercise the two hint branches.
+    fn payload_create_with_phase(
+        task_id: &str,
+        subject: &str,
+        plan_path: &str,
+        plan_phase: &str,
+    ) -> HookPayload {
+        HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskCreate".to_string(),
+            tool_input: serde_json::json!({
+                "subject": subject,
+                "description": subject,
+                "metadata": {"plan_path": plan_path, "plan_phase": plan_phase},
+            }),
+            tool_response: serde_json::json!({"id": task_id}),
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn by3_existing_leaf_says_attached_not_added() {
+        // BY.3: a TaskCreate whose plan_path already names a PLAN.md line only
+        // re-links the mapping — the message must say "attached to existing",
+        // not the misleading "added".
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let out = writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
+        let j = out.to_json();
+        assert!(j.contains("attached to existing"), "{j}");
+        assert!(!j.contains("added `"), "should not claim 'added': {j}");
+    }
+
+    #[test]
+    fn by9_anchor_with_plan_phase_omits_nag() {
+        // BY.9: when the create carries metadata.plan_phase, the auto-anchor's
+        // title is already real — the message must NOT tell the agent to "pass
+        // metadata.plan_phase" (it just did).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let out = writeback_create(
+            &payload_create_with_phase("t-9", "First task", "9.1", "Ninth phase"),
+            &plan,
+        )
+        .unwrap();
+        let j = out.to_json();
+        assert!(j.contains("titled from"), "should announce anchor: {j}");
+        assert!(
+            !j.contains("pass `metadata.plan_phase`"),
+            "must not nag when plan_phase was provided: {j}"
+        );
+    }
+
+    #[test]
+    fn by9_anchor_without_plan_phase_keeps_nag() {
+        // Counterpart: no plan_phase → the bland synthesized title stands, so
+        // the nag to set a real title remains useful.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let out = writeback_create(&payload_for_create("t-9", "First task", Some("9.1")), &plan)
+            .unwrap();
+        let j = out.to_json();
+        assert!(
+            j.contains("pass `metadata.plan_phase`"),
+            "should still nag when no plan_phase: {j}"
+        );
+    }
+
+    #[test]
+    fn by2_backlog_landing_explains_and_reminds_about_schema() {
+        // BY.2: a no-plan_path create that lands in Backlog must say so and
+        // point at the schema-eviction cause.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let out = writeback_create(&payload_for_create("t-b", "loose work", None), &plan).unwrap();
+        let j = out.to_json();
+        assert!(j.contains("added to Backlog"), "{j}");
+        assert!(j.contains("ToolSearch select:TaskCreate"), "schema reminder missing: {j}");
+        assert!(j.contains("NOT a path to PLAN.md"), "shape hint missing: {j}");
+    }
+
+    #[test]
+    fn by2_file_path_shaped_description_is_flagged() {
+        // BY.2: when the description looks like a file path (the "plan_path is
+        // PLAN.md" confusion), call it out explicitly.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let payload = payload_create_desc("t-f", "do the thing", "docs/PLAN.md", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        let j = out.to_json();
+        assert!(j.contains("looks like a file path"), "{j}");
     }
 
     #[test]
@@ -933,7 +1086,7 @@ mod tests {
         let payload = payload_create_desc("t-r", "Task", "1.1", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
-            out.to_json().contains("attached via description"),
+            out.to_json().contains("attached to existing (via description)"),
             "{}",
             out.to_json()
         );

@@ -11,18 +11,18 @@ Source: session feedback (2026-05-30) on the dogfood bridge. Items keyed to the 
 **ROOT CAUSE (confirmed via live payload capture, BY.13):** the harness forwards `metadata` fully intact — `tool_input.metadata.plan_path`, `plan_phase`, even arbitrary keys all survive — and `description` too (`tool_response` is `{"task":{"id":"<n>"}}`, id a string). The bridge honors all of it. The early "everything landed in `## Backlog`" failures were **`TaskCreate` schema eviction**: `TaskCreate` is a *deferred* tool, and whenever its schema isn't loaded the model serializes `metadata` as a string → the client parser rejects it (`metadata expected as record, provided as string`) → the hook sees no `plan_path` → correct Backlog landing. Not a bridge bug; very likely also what hit the reporter (#1/#2/#5). The documented plan_path-shape confusion is real and still worth fixing, but it was not the mechanism here. Phase BY was hand-authored + `baseline`d because the schema kept getting evicted mid-session.
 
 - [ ] BY.1 - Document plan_path shape (per-leaf id like `BT.5`, not a file path) in global CLAUDE.md + README; note plan_path also rides in `description` per the resume convention [feedback #1]
-- [ ] BY.2 - writeback: when a create lands in Backlog with no plan_path, say so loudly + remind that `TaskCreate`'s schema must be loaded for `metadata` to survive; detect file-path-shaped input and name the per-leaf shape [feedback #2, #5]
-- [ ] BY.3 - writeback: say "attached to existing BY.N" instead of "added" when the leaf already exists [feedback #7]
+- [x] BY.2 - writeback: when a create lands in Backlog with no plan_path, say so loudly + remind that `TaskCreate`'s schema must be loaded for `metadata` to survive; detect file-path-shaped input and name the per-leaf shape [feedback #2, #5]
+- [x] BY.3 - writeback: say "attached to existing BY.N" instead of "added" when the leaf already exists [feedback #7]
 - [ ] BY.4 - main.rs: add `plan_activate` / `plan_deactivate` CLI aliases for `activate` / `deactivate` [feedback #4]
 - [ ] BY.5 - archive: sweep state mappings for archived leaves atomically [feedback #3]
 - [ ] BY.6 - add `drop-mapping <plan_path>` CLI verb to release a stale mapping [feedback #6]
 - [ ] BY.7 - reconcile: auto-release mappings whose leaf is already archived (passive backstop) [feedback #3]
 - [ ] BY.8 - resume: tighten rehydration batch hint to require a distinct plan_path per create [feedback #5]
-- [ ] BY.9 - writeback: suppress the "pass metadata.plan_phase" anchor hint when plan_phase was already provided [live find]
+- [x] BY.9 - writeback: suppress the "pass metadata.plan_phase" anchor hint when plan_phase was already provided [live find]
 - [ ] BY.10 - writeback: don't no-op a TaskCreate against a stale prior-session mapping for a reused harness id (cross-session id reuse silently drops the task) [live find]
 - [x] BY.11 - writeback: fall back to plan_path parsed from `description` when `metadata.plan_path` is absent (id-grammar gated to a dotted id that already exists in PLAN.md; metadata still preferred). Rescues rehydration-burst creates against schema eviction — the resume prompt already puts plan_path in `description`. `is_valid_plan_id` added in ast.rs; 4 tests; 399 unit tests green [root-cause mitigation]
-- [x] BY.13 - state.debug flag + `claude-plan-bridge debug on|off` toggle; writeback appends verbatim hook payloads to `.claude/plan-bridge-debug.jsonl` when on. Off by default, omitted from state when false, per-project scoped, gitignored. Confirmed the root cause above. Tests added; 395 unit tests green [investigation tooling]
 - [ ] BY.12 - docs (README for `debug` verb + plan_path shape), fix pre-existing ast.rs doctest, cargo fmt + clippy + full suite green, then sweep Phase BY to PLAN_ARCHIVE.md
+- [x] BY.13 - state.debug flag + `claude-plan-bridge debug on|off` toggle; writeback appends verbatim hook payloads to `.claude/plan-bridge-debug.jsonl` when on. Off by default, omitted from state when false, per-project scoped, gitignored. Confirmed the root cause above. Tests added; 395 unit tests green [investigation tooling]
 
 ## Backlog (not yet phased)
 
