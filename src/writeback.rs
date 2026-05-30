@@ -82,44 +82,57 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         let mut state = State::load(&state_path)?;
         let requested_path = input.metadata.as_ref().and_then(|m| m.plan_path.clone());
 
-        // No-op check: same task_id already mapped, and either no incoming
-        // plan_path or one that matches the existing mapping. Different
-        // plan_path is an inconsistency — refuse to silently re-link.
-        if let Some(existing) = state.plan_path(&task_id) {
-            let existing = existing.to_string();
-            match requested_path.as_deref() {
-                None => {
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!(
-                            "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
-                        ),
-                    ));
-                }
-                Some(req) if req == existing => {
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!(
-                            "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
-                        ),
-                    ));
-                }
-                Some(req) => {
-                    return Ok(HookOutput::context(
-                        &payload.hook_event_name,
-                        format!(
-                            "claude-plan-bridge: WARNING task {task_id} is already mapped to {existing}, \
-                             but TaskCreate carries plan_path={req}. Refusing to silently move it. \
-                             If you meant to retarget, delete the task and re-create with the desired plan_path."
-                        ),
-                    ));
-                }
-            }
-        }
-
+        // Read + parse PLAN.md up front: the no-op/refuse check below needs to
+        // know whether the existing mapping still points at a live line (BY.10).
         let plan_text = std::fs::read_to_string(plan_path)
             .with_context(|| format!("read {}", plan_path.display()))?;
         let parsed = parse(&plan_text)?;
+
+        // No-op check: same task_id already mapped to a path that's STILL LIVE
+        // in PLAN.md (or a Backlog note) — then either no incoming plan_path or
+        // one that matches is a no-op, and a differing plan_path is an
+        // inconsistency we refuse rather than silently re-link.
+        //
+        // BY.10: when the existing mapping is STALE (its leaf was archived or
+        // hand-deleted, so it's gone from PLAN.md) the harness has almost
+        // certainly REUSED this low id for a brand-new, unrelated task. Don't
+        // no-op or refuse against a dead mapping — fall through and let the
+        // create replace it, otherwise the new task is silently dropped.
+        if let Some(existing) = state.plan_path(&task_id).map(str::to_string) {
+            let existing_is_live = parsed.contains_id(&existing)
+                || existing.starts_with(crate::reconcile::BACKLOG_PREFIX);
+            if existing_is_live {
+                match requested_path.as_deref() {
+                    None => {
+                        return Ok(HookOutput::context(
+                            &payload.hook_event_name,
+                            format!(
+                                "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
+                            ),
+                        ));
+                    }
+                    Some(req) if req == existing => {
+                        return Ok(HookOutput::context(
+                            &payload.hook_event_name,
+                            format!(
+                                "claude-plan-bridge: task {task_id} already at {existing} in PLAN.md (no-op)"
+                            ),
+                        ));
+                    }
+                    Some(req) => {
+                        return Ok(HookOutput::context(
+                            &payload.hook_event_name,
+                            format!(
+                                "claude-plan-bridge: WARNING task {task_id} is already mapped to {existing}, \
+                                 but TaskCreate carries plan_path={req}. Refusing to silently move it. \
+                                 If you meant to retarget, delete the task and re-create with the desired plan_path."
+                            ),
+                        ));
+                    }
+                }
+            }
+            // else: stale mapping for a reused id — fall through to create.
+        }
 
         let plan_phase_hint = input
             .metadata
