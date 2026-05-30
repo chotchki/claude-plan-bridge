@@ -33,10 +33,23 @@ pub struct State {
     /// behavior — all open leaves load, no scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_phase: Option<String>,
+    /// Phase BY.11: opt-in raw hook-payload capture. When `true`, the
+    /// writeback hook appends each verbatim stdin payload to a sibling
+    /// `plan-bridge-debug.jsonl` so an operator can confirm exactly what the
+    /// harness forwarded (notably whether `metadata.plan_path` survived).
+    /// Off by default and omitted from the serialized file when false, so
+    /// existing state files and every non-opted-in project are untouched.
+    /// Flip per-project with `claude-plan-bridge debug on`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub debug: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for State {
@@ -47,6 +60,7 @@ impl Default for State {
             pending_rehydration: BTreeSet::new(),
             rehydration_announced: 0,
             active_phase: None,
+            debug: false,
         }
     }
 }
@@ -323,6 +337,47 @@ mod tests {
         let loaded = State::load(&path).unwrap();
         assert_eq!(loaded.active_phase(), None);
         assert_eq!(loaded.plan_path("task-1"), Some("1.2.3"));
+    }
+
+    #[test]
+    fn default_state_has_debug_off() {
+        assert!(!State::default().debug);
+    }
+
+    #[test]
+    fn save_omits_debug_field_when_false() {
+        // Off-by-default must not pollute state files for projects that never
+        // opt in — the field is absent when false.
+        let dir = scratch_dir();
+        let path = dir.join("state.json");
+        let mut s = State::default();
+        s.insert("t1", "1.0");
+        s.save(&path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("debug"),
+            "debug shouldn't appear when false:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn debug_true_roundtrips_via_save_load() {
+        let dir = scratch_dir();
+        let path = dir.join("state.json");
+        let mut s = State::default();
+        s.debug = true;
+        s.save(&path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"debug\": true"), "got:\n{contents}");
+        assert!(State::load(&path).unwrap().debug);
+    }
+
+    #[test]
+    fn legacy_state_file_without_debug_field_loads_with_debug_off() {
+        let dir = scratch_dir();
+        let path = dir.join("legacy.json");
+        std::fs::write(&path, r#"{"version":1,"mappings":{}}"#).unwrap();
+        assert!(!State::load(&path).unwrap().debug);
     }
 
     #[test]

@@ -124,6 +124,17 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Toggle raw hook-payload capture for this project. When on, every
+    /// writeback hook appends the verbatim stdin payload to
+    /// `.claude/plan-bridge-debug.jsonl` — ground truth for diagnosing whether
+    /// `metadata.plan_path` reaches the bridge. Persists in the state file;
+    /// scoped to this project only. With no argument, prints the current state.
+    Debug {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// `on` / `off` (also accepts `true`/`false`, `1`/`0`). Omit to query.
+        setting: Option<String>,
+    },
     /// Emit a SessionStart additionalContext that drives Claude to rehydrate
     /// the in-session task list from the persisted state file. Intended for
     /// the `SessionStart` hook; safe to run any time (silent no-op when
@@ -387,6 +398,46 @@ fn main() -> Result<()> {
         }
         Command::Status { project } => {
             run_status(&project)?;
+        }
+        Command::Debug { project, setting } => {
+            let plan = project.plan_path();
+            let state_path = plan_bridge::state::default_state_path_for(&plan);
+            let mut state = plan_bridge::state::State::load(&state_path)?;
+            let log_path = state_path.with_file_name("plan-bridge-debug.jsonl");
+            match setting.as_deref() {
+                None => {
+                    let onoff = if state.debug { "on" } else { "off" };
+                    println!("claude-plan-bridge: debug is {onoff}");
+                    if state.debug {
+                        println!("  capturing raw hook payloads to {}", log_path.display());
+                    }
+                }
+                Some(s) => {
+                    let want = match s.to_ascii_lowercase().as_str() {
+                        "on" | "true" | "1" | "yes" => true,
+                        "off" | "false" | "0" | "no" => false,
+                        other => anyhow::bail!("debug: expected `on` or `off` (got `{other}`)"),
+                    };
+                    if state.debug == want {
+                        let onoff = if want { "on" } else { "off" };
+                        println!("claude-plan-bridge: debug already {onoff} (no-op)");
+                    } else {
+                        state.debug = want;
+                        state.save(&state_path)?;
+                        if want {
+                            println!(
+                                "claude-plan-bridge: debug ON — raw hook payloads will append to {}",
+                                log_path.display()
+                            );
+                        } else {
+                            println!(
+                                "claude-plan-bridge: debug OFF — {} is no longer written (delete it to clean up)",
+                                log_path.display()
+                            );
+                        }
+                    }
+                }
+            }
         }
         Command::Resume { project } => {
             let plan = project.plan_path();
@@ -705,11 +756,43 @@ fn run_writeback(
     std::io::stdin()
         .read_to_string(&mut buf)
         .context("read hook payload from stdin")?;
+    maybe_debug_dump(plan, &buf);
     let payload: plan_bridge::hook::HookPayload =
         serde_json::from_str(&buf).context("parse hook payload JSON")?;
     match event {
         WritebackEvent::Create => plan_bridge::writeback::writeback_create(&payload, plan),
         WritebackEvent::Update => plan_bridge::writeback::writeback_update(&payload, plan),
+    }
+}
+
+/// Phase BY.11: when `debug` is enabled in the project state file, append the
+/// raw hook payload (verbatim) to a sibling `plan-bridge-debug.jsonl` as one
+/// JSON line `{"ts":<unix_secs>,"raw":<payload>}`. The capture is ground truth
+/// for "what did the harness actually send?" — it records fields the bridge's
+/// typed structs deliberately ignore, so it can confirm whether
+/// `metadata.plan_path` arrived. Best-effort: any failure is swallowed so
+/// debugging never breaks the hook. Off by default (state read returns
+/// `debug=false`), so this is a no-op for every project that hasn't opted in.
+fn maybe_debug_dump(plan: &std::path::Path, raw: &str) {
+    let state_path = plan_bridge::state::default_state_path_for(plan);
+    let debug_on = plan_bridge::state::State::load(&state_path)
+        .map(|s| s.debug)
+        .unwrap_or(false);
+    if !debug_on {
+        return;
+    }
+    let log_path = state_path.with_file_name("plan-bridge-debug.jsonl");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(f, "{{\"ts\":{stamp},\"raw\":{}}}", raw.trim());
     }
 }
 
