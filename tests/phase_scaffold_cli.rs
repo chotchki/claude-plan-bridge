@@ -120,3 +120,43 @@ fn phase_scaffold_refuses_existing_phase() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// BY.4: `plan_activate` / `plan_deactivate` are accepted as clap aliases for
+/// `activate` / `deactivate`, so the CLI verb matches the MCP tool names and
+/// the wording the bridge emits in hook output + global CLAUDE.md. Driven
+/// through the real binary so the `visible_alias` wiring is exercised.
+#[test]
+fn plan_activate_deactivate_aliases_drive_activate_deactivate() {
+    let dir = scratch_dir();
+    let plan = dir.join("PLAN.md");
+    std::fs::write(&plan, "## Phase AS - Build\n\n- [ ] AS.1 - Task one\n").unwrap();
+
+    let activate = Command::new(binary())
+        .args(["plan_activate", "--plan"])
+        .arg(&plan)
+        .arg("AS")
+        .output()
+        .expect("run plan_activate");
+    assert!(
+        activate.status.success(),
+        "plan_activate alias failed: stderr={}",
+        String::from_utf8_lossy(&activate.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&activate.stdout);
+    assert!(stdout.contains("activated phase `AS`"), "got: {stdout}");
+
+    let deactivate = Command::new(binary())
+        .args(["plan_deactivate", "--plan"])
+        .arg(&plan)
+        .output()
+        .expect("run plan_deactivate");
+    assert!(
+        deactivate.status.success(),
+        "plan_deactivate alias failed: stderr={}",
+        String::from_utf8_lossy(&deactivate.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&deactivate.stdout);
+    assert!(stdout.contains("deactivated focus"), "got: {stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

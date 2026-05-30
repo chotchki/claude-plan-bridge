@@ -231,6 +231,11 @@ enum Command {
     /// Persists in `.claude/plan-bridge-state.json` — survives /clear and
     /// outlives the Claude session. Surfaces any unmet `*(depends on)*`
     /// markers so sequencing constraints land up front.
+    ///
+    /// `plan_activate` is accepted as an alias so the CLI verb matches the
+    /// `plan_activate` MCP tool name and the wording used in hook output /
+    /// global CLAUDE.md (BY.4).
+    #[command(visible_alias = "plan_activate")]
     Activate {
         #[command(flatten)]
         project: ProjectArgs,
@@ -239,6 +244,10 @@ enum Command {
     /// Clear the active phase focus. After this, resume + reconcile +
     /// writeback behave as if activation had never been set. No-op when
     /// nothing was active.
+    ///
+    /// `plan_deactivate` is accepted as an alias to match the MCP tool name
+    /// and the hook-output / CLAUDE.md wording (BY.4).
+    #[command(visible_alias = "plan_deactivate")]
     Deactivate {
         #[command(flatten)]
         project: ProjectArgs,
