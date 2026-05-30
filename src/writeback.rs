@@ -135,18 +135,40 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 (plan, p, "added".to_string(), anchor_created)
             }
             None => {
-                // Phase 35: no plan_path means the work is real but unphased.
-                // It lands as a tracked note in the canonical Backlog section
-                // (consolidated to the bottom first), NOT in an auto-invented
-                // Inbox phase. A planning move promotes it later. The mapping
-                // is keyed to a synthetic `backlog:<task_id>` path so the
-                // harness task stays linked (idempotent re-runs, clean delete)
-                // without pretending to be a phased leaf.
-                let mut plan = parsed;
-                plan.consolidate_backlog();
-                plan.append_backlog_note(&input.subject, &crate::today::today_utc());
-                let p = format!("{}{task_id}", crate::reconcile::BACKLOG_PREFIX);
-                (plan, p, "added to Backlog".to_string(), None)
+                // Phase BY.11: metadata.plan_path is absent — but the
+                // SessionStart resume prompt mirrors the plan_path into
+                // `description` too. A harness that strips `metadata` from the
+                // hook payload, or a TaskCreate whose deferred schema wasn't
+                // loaded (so `metadata` degraded to a string and was dropped
+                // client-side), still carries the id there. Recover it before
+                // falling to Backlog. Conservative: only adopts a dotted,
+                // well-formed id that ALREADY exists in PLAN.md, so prose
+                // descriptions (spaces fail the grammar) and brand-new ids
+                // never auto-create a leaf — those still land in Backlog.
+                match plan_path_from_description(&input.description, &parsed) {
+                    Some(p) => {
+                        let InsertResult {
+                            plan,
+                            anchor_created,
+                        } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
+                        (plan, p, "attached via description".to_string(), anchor_created)
+                    }
+                    None => {
+                        // Phase 35: no plan_path means the work is real but
+                        // unphased. It lands as a tracked note in the canonical
+                        // Backlog section (consolidated to the bottom first),
+                        // NOT in an auto-invented Inbox phase. A planning move
+                        // promotes it later. The mapping is keyed to a synthetic
+                        // `backlog:<task_id>` path so the harness task stays
+                        // linked (idempotent re-runs, clean delete) without
+                        // pretending to be a phased leaf.
+                        let mut plan = parsed;
+                        plan.consolidate_backlog();
+                        plan.append_backlog_note(&input.subject, &crate::today::today_utc());
+                        let p = format!("{}{task_id}", crate::reconcile::BACKLOG_PREFIX);
+                        (plan, p, "added to Backlog".to_string(), None)
+                    }
+                }
             }
         };
 
@@ -658,6 +680,33 @@ fn synthesize_anchor_title(parent_id: &str) -> String {
     format!("Phase {parent_id}")
 }
 
+/// Phase BY.11: recover a plan_path from a TaskCreate's `description` when
+/// `metadata.plan_path` is absent. The SessionStart resume prompt writes the
+/// plan_path into `description` as well as `metadata`, so this rescues
+/// rehydration-burst creates against the two ways metadata goes missing:
+/// a harness that strips `metadata` from the hook payload, or a TaskCreate
+/// whose deferred schema wasn't loaded (metadata serializes as a string and is
+/// dropped client-side — the dominant cause of "my creates keep landing in
+/// Backlog").
+///
+/// Deliberately strict to avoid false matches: the trimmed description must be
+/// a well-formed dotted id (so prose with spaces, and bare phase ids like
+/// `BY`, never qualify) AND must already name a node in PLAN.md. Adopting only
+/// pre-existing ids means a genuinely-new leaf whose metadata was lost still
+/// falls through to Backlog rather than fabricating a phantom leaf from an
+/// arbitrary description.
+fn plan_path_from_description(description: &str, plan: &Plan) -> Option<String> {
+    let candidate = description.trim();
+    if crate::ast::is_valid_plan_id(candidate)
+        && candidate.contains('.')
+        && plan.contains_id(candidate)
+    {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +892,106 @@ mod tests {
         // Tracked via a synthetic backlog:<task_id> mapping.
         let state = State::load(&default_state_path_for(&plan)).unwrap();
         assert_eq!(state.plan_path("t-loose"), Some("backlog:t-loose"));
+    }
+
+    /// BY.11 helper: build a TaskCreate payload with `description` decoupled
+    /// from `subject`, and optional `metadata.plan_path`. Lets the
+    /// description-fallback tests drive the exact shape the harness sends
+    /// during a rehydration burst (`description=<plan_path>`).
+    fn payload_create_desc(
+        task_id: &str,
+        subject: &str,
+        description: &str,
+        plan_path: Option<&str>,
+    ) -> HookPayload {
+        let mut tool_input = serde_json::json!({
+            "subject": subject,
+            "description": description,
+        });
+        if let Some(p) = plan_path {
+            tool_input["metadata"] = serde_json::json!({"plan_path": p});
+        }
+        HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskCreate".to_string(),
+            tool_input,
+            tool_response: serde_json::json!({"id": task_id}),
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn no_metadata_description_is_existing_id_attaches_to_leaf() {
+        // BY.11: metadata absent, but `description` carries an id that already
+        // exists in PLAN.md (the rehydration-burst shape). The bridge recovers
+        // the plan_path from description and attaches the task to that leaf
+        // instead of dropping it into Backlog.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let payload = payload_create_desc("t-r", "Task", "1.1", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("attached via description"),
+            "{}",
+            out.to_json()
+        );
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-r"), Some("1.1"));
+        // No Backlog section invented.
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(!contents.contains("## Backlog"), "got:\n{contents}");
+    }
+
+    #[test]
+    fn no_metadata_prose_description_lands_in_backlog() {
+        // BY.11 guard: a normal prose description (spaces → fails the id
+        // grammar) must NOT be mistaken for a plan_path; it still backlogs.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let payload = payload_create_desc("t-p", "Some work", "just some prose", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added to Backlog"),
+            "{}",
+            out.to_json()
+        );
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-p"), Some("backlog:t-p"));
+    }
+
+    #[test]
+    fn no_metadata_nonexistent_id_description_lands_in_backlog_not_phantom_leaf() {
+        // BY.11 guard: a well-formed dotted id that ISN'T in PLAN.md must not
+        // fabricate a leaf — it falls through to Backlog. Only pre-existing
+        // ids are adopted, which is exactly the rehydration case.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let payload = payload_create_desc("t-x", "New thing", "9.9", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added to Backlog"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(!contents.contains("9.9"), "phantom leaf created:\n{contents}");
+    }
+
+    #[test]
+    fn metadata_plan_path_takes_precedence_over_description() {
+        // BY.11: when both are present, metadata wins and the description
+        // fallback never runs (it only fires in the no-metadata arm).
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+        );
+        let payload = payload_create_desc("t-m", "x", "1.1", Some("1.2"));
+        writeback_create(&payload, &plan).unwrap();
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-m"), Some("1.2"));
     }
 
     #[test]

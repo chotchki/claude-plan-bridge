@@ -1290,6 +1290,18 @@ pub fn parent_id_for(plan_path: &str) -> Option<String> {
     }
 }
 
+/// True when `s` is a well-formed plan id: only ASCII alphanumerics and dots,
+/// with no empty dot-separated segments (`..`, `1.`, `.1` all rejected).
+/// Mirrors the parser's `is_valid_id` character set but is exposed for callers
+/// like the BY.11 description fallback that feed it arbitrary text (a
+/// TaskCreate's `description`) rather than a pre-filtered token slice — prose
+/// with spaces fails immediately.
+pub fn is_valid_plan_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+        && s.split('.').all(|seg| !seg.is_empty())
+}
+
 /// Phase 42.3: phases are bare ids (`42`) under FORMATv2, but during migration
 /// one may still be parsed/stored in the legacy `X.0` form. Treat a bare query
 /// `X` as matching a phase whose id is `X` or the legacy `X.0`. Transitional —

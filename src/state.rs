@@ -364,8 +364,10 @@ mod tests {
     fn debug_true_roundtrips_via_save_load() {
         let dir = scratch_dir();
         let path = dir.join("state.json");
-        let mut s = State::default();
-        s.debug = true;
+        let s = State {
+            debug: true,
+            ..Default::default()
+        };
         s.save(&path).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"debug\": true"), "got:\n{contents}");

@@ -20,7 +20,7 @@ Source: session feedback (2026-05-30) on the dogfood bridge. Items keyed to the 
 - [ ] BY.8 - resume: tighten rehydration batch hint to require a distinct plan_path per create [feedback #5]
 - [ ] BY.9 - writeback: suppress the "pass metadata.plan_phase" anchor hint when plan_phase was already provided [live find]
 - [ ] BY.10 - writeback: don't no-op a TaskCreate against a stale prior-session mapping for a reused harness id (cross-session id reuse silently drops the task) [live find]
-- [ ] BY.11 - writeback: fall back to plan_path parsed from `description` when `metadata.plan_path` is absent (id-grammar gated; metadata still preferred). Rescues rehydration-burst creates against schema eviction — the resume prompt already puts plan_path in `description` [root-cause mitigation]
+- [x] BY.11 - writeback: fall back to plan_path parsed from `description` when `metadata.plan_path` is absent (id-grammar gated to a dotted id that already exists in PLAN.md; metadata still preferred). Rescues rehydration-burst creates against schema eviction — the resume prompt already puts plan_path in `description`. `is_valid_plan_id` added in ast.rs; 4 tests; 399 unit tests green [root-cause mitigation]
 - [x] BY.13 - state.debug flag + `claude-plan-bridge debug on|off` toggle; writeback appends verbatim hook payloads to `.claude/plan-bridge-debug.jsonl` when on. Off by default, omitted from state when false, per-project scoped, gitignored. Confirmed the root cause above. Tests added; 395 unit tests green [investigation tooling]
 - [ ] BY.12 - docs (README for `debug` verb + plan_path shape), fix pre-existing ast.rs doctest, cargo fmt + clippy + full suite green, then sweep Phase BY to PLAN_ARCHIVE.md
 
