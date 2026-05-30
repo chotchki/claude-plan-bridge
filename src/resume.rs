@@ -192,8 +192,11 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             );
             out.push_str(tool_search_hint);
             out.push_str(
-                " All TaskCreate calls are independent — batch them in a single tool-call \
-                 block.\n",
+                " The TaskCreate calls are independent — batch them in a single tool-call \
+                 block — but each MUST carry its OWN distinct `plan_path` (the leading token \
+                 of its bullet). Don't copy one plan_path across the batch: every create takes \
+                 the bridge's state lock and duplicates collide on the same path (only the \
+                 first lands; the rest no-op).\n",
             );
         } else {
             // Phase 33.1: resume/compact path. The harness preserved its
@@ -221,7 +224,8 @@ pub fn build_resume_message(plan_path: &Path, source: &str) -> Result<Option<Str
             out.push_str(tool_search_hint);
             out.push_str(
                 " Backfill TaskCreates (if any) are independent — batch them in a single \
-                 tool-call block.\n",
+                 tool-call block — but each MUST carry its OWN distinct `plan_path` (don't \
+                 copy one across the batch; duplicates collide on the state lock and no-op).\n",
             );
         }
 
@@ -911,6 +915,12 @@ mod tests {
         assert!(
             msg.contains("batch") && msg.contains("single tool-call block"),
             "26.4 parallel-batch hint missing: {msg}"
+        );
+        // BY.8: the batch hint must also demand a DISTINCT plan_path per create
+        // — a copy-pasted plan_path collides on the state lock and no-ops.
+        assert!(
+            msg.contains("distinct `plan_path`"),
+            "BY.8 distinct-plan_path hint missing: {msg}"
         );
     }
 
