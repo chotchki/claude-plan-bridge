@@ -875,8 +875,8 @@ mod tests {
         // the nag to set a real title remains useful.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
-        let out = writeback_create(&payload_for_create("t-9", "First task", Some("9.1")), &plan)
-            .unwrap();
+        let out =
+            writeback_create(&payload_for_create("t-9", "First task", Some("9.1")), &plan).unwrap();
         let j = out.to_json();
         assert!(
             j.contains("pass `metadata.plan_phase`"),
@@ -893,8 +893,14 @@ mod tests {
         let out = writeback_create(&payload_for_create("t-b", "loose work", None), &plan).unwrap();
         let j = out.to_json();
         assert!(j.contains("added to Backlog"), "{j}");
-        assert!(j.contains("ToolSearch select:TaskCreate"), "schema reminder missing: {j}");
-        assert!(j.contains("NOT a path to PLAN.md"), "shape hint missing: {j}");
+        assert!(
+            j.contains("ToolSearch select:TaskCreate"),
+            "schema reminder missing: {j}"
+        );
+        assert!(
+            j.contains("NOT a path to PLAN.md"),
+            "shape hint missing: {j}"
+        );
     }
 
     #[test]
@@ -1099,7 +1105,8 @@ mod tests {
         let payload = payload_create_desc("t-r", "Task", "1.1", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
-            out.to_json().contains("attached to existing (via description)"),
+            out.to_json()
+                .contains("attached to existing (via description)"),
             "{}",
             out.to_json()
         );
@@ -1142,7 +1149,10 @@ mod tests {
             out.to_json()
         );
         let contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(!contents.contains("9.9"), "phantom leaf created:\n{contents}");
+        assert!(
+            !contents.contains("9.9"),
+            "phantom leaf created:\n{contents}"
+        );
     }
 
     #[test]

@@ -1091,10 +1091,12 @@ fn extract_backlog_from_annotations(node: &mut Node, out: &mut Vec<String>) {
 /// (2026-05-22), where a `## Backlog` block attached to a phase
 /// contained nested bullets with indented prose continuations:
 ///
-///     - Model-driven docs (drift reduction)
-///       - X.10 — Runner: intra-cell layer DAG
-///         The per-cell chain ...
-///       - X.10.a cell_chain expresses deps
+/// ```text
+/// - Model-driven docs (drift reduction)
+///   - X.10 — Runner: intra-cell layer DAG
+///     The per-cell chain ...
+///   - X.10.a cell_chain expresses deps
+/// ```
 ///
 /// The old logic broke on the first Text (prose continuation), stranding
 /// every subsequent bullet/prose line in the source; and the bullets it
