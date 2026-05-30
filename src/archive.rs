@@ -787,6 +787,53 @@ mod tests {
     }
 
     #[test]
+    fn archive_phase_drops_state_mappings_for_archived_nodes() {
+        // BY.5: the per-phase archive path (separate code from bulk `archive`)
+        // must also drop state mappings whose plan_path lives in the moved
+        // subtree, so no stale mapping survives to collide with a later
+        // harness id (feedback #3). Unrelated mappings are preserved.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "- [ ] 1.0 Phase one\n  - [x] 1.1 done\n- [ ] 2.0 Phase two\n  - [ ] 2.1 pending\n",
+        );
+        let state_path = default_state_path_for(&plan);
+        let mut state = State::default();
+        state.record(
+            "t-1-1",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "done".to_string(),
+                last_synced_state: NodeState::Done,
+                ..Default::default()
+            },
+        );
+        state.record(
+            "t-2-1",
+            Mapping {
+                plan_path: "2.1".to_string(),
+                last_synced_title: "pending".to_string(),
+                last_synced_state: NodeState::Pending,
+                ..Default::default()
+            },
+        );
+        state.save(&state_path).unwrap();
+
+        archive_phase(&plan, "1.0", "2026-05-30", false).unwrap();
+        let loaded = State::load(&state_path).unwrap();
+        assert_eq!(
+            loaded.plan_path("t-1-1"),
+            None,
+            "archived phase's mapping should be dropped"
+        );
+        assert_eq!(
+            loaded.plan_path("t-2-1"),
+            Some("2.1"),
+            "mapping for the still-live phase must remain"
+        );
+    }
+
+    #[test]
     fn bulk_archive_preserves_state_active_phase_when_not_swept() {
         let dir = scratch_dir();
         let plan = write_plan(
