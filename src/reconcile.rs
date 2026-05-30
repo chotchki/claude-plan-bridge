@@ -229,15 +229,27 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
     // unphased item doesn't nag as "Removed (consider TaskUpdate deleted)" on
     // every prompt. They quietly persist until the item is completed/deleted
     // (writeback_update clears the bullet + mapping) or promoted to a phase.
+    // BY.7: a mapping whose leaf was *hand-archived* (moved out of PLAN.md into
+    // PLAN_ARCHIVE.md without running the `archive` command, so the command's
+    // own mapping-sweep never fired) should be released passively rather than
+    // nagging as `LeafRemoved` every prompt. A leaf absent from BOTH PLAN.md
+    // and the archive is a genuine deletion — keep emitting `LeafRemoved` so
+    // the agent mirrors it via `TaskUpdate(deleted)`.
+    let archived = archived_node_paths(plan_path);
+    let mut to_release: Vec<String> = Vec::new();
     for (task_id, mapping) in &state.mappings {
         if mapping.plan_path.starts_with(BACKLOG_PREFIX) {
             continue;
         }
         if !all_node_paths.contains(&mapping.plan_path) {
-            deltas.push(Delta::LeafRemoved {
-                plan_path: mapping.plan_path.clone(),
-                task_id: task_id.clone(),
-            });
+            if archived.contains(&mapping.plan_path) {
+                to_release.push(task_id.clone());
+            } else {
+                deltas.push(Delta::LeafRemoved {
+                    plan_path: mapping.plan_path.clone(),
+                    task_id: task_id.clone(),
+                });
+            }
         }
     }
 
@@ -318,7 +330,49 @@ pub fn reconcile(plan_path: &Path) -> Result<Vec<Delta>> {
         });
     }
 
+    // BY.7: persist the passive release of archived-leaf mappings. Done under
+    // the state lock with a fresh reload so a concurrent writeback's changes
+    // aren't clobbered. Silent by design — no agent action is needed, and the
+    // dropped mappings simply stop appearing as drift next turn.
+    if !to_release.is_empty() {
+        crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
+            let mut s = State::load(&state_path)?;
+            for tid in &to_release {
+                s.remove(tid);
+            }
+            s.save(&state_path)?;
+            Ok(())
+        })?;
+    }
+
     Ok(deltas)
+}
+
+/// BY.7: collect every node id present in `PLAN_ARCHIVE.md` (the sibling of
+/// PLAN.md). Reconcile uses this to tell a hand-archived leaf (release its
+/// mapping silently) from a genuinely-deleted one (keep nagging as
+/// `LeafRemoved`). Best-effort: a missing or unparseable archive yields an
+/// empty set, so reconcile stays conservative — it treats nothing as archived
+/// and falls back to the old `LeafRemoved` behavior on any read/parse failure.
+fn archived_node_paths(plan_path: &Path) -> HashSet<String> {
+    let archive_path = plan_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("PLAN_ARCHIVE.md");
+    let Ok(text) = std::fs::read_to_string(&archive_path) else {
+        return HashSet::new();
+    };
+    let Ok(plan) = parse(&text) else {
+        return HashSet::new();
+    };
+    let mut set = HashSet::new();
+    for phase in &plan.phases {
+        set.insert(phase.id.clone());
+        for child in &phase.children {
+            collect_all_paths(child, &mut set);
+        }
+    }
+    set
 }
 
 fn collect_parent_inconsistencies(node: &Node, out: &mut Vec<Delta>) {
