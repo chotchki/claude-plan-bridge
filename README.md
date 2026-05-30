@@ -107,6 +107,8 @@ PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` +
 
 - **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set. With no `plan_path`, the work is unphased — it's recorded as a tracked note in the canonical `## Backlog (not yet phased)` section at the bottom of `PLAN.md` (mapped to a synthetic `backlog:<task_id>` path) and promoted into a real phase later by a deliberate planning move. Idempotent on `task_id`.
   - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level phase `N` exists, the bridge synthesizes a `## Phase N - <title>` header for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback), with the new task hyphen-separated under it. No more manual "add the phase header, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
+  - **What `plan_path` is.** It's the **per-leaf id** of the task — a dotted id like `BT.5`, `AT.2`, or `1.3.2` (phase id + dotted index). It is **not** a path to the `PLAN.md` file. File-shaped input (`PLAN.md`, `docs/PLAN.md`) matches no leaf, so the item lands in `## Backlog`; the hook output flags the file-path shape. The same id is mirrored into `description`, so the bridge recovers it from there if `metadata` is missing.
+  - **Gotcha: load the `TaskCreate` schema first.** `TaskCreate` is a *deferred* tool. If its schema isn't loaded in the session, the `metadata` object serializes as a string, the client drops it, and the hook never sees `plan_path` — so the item silently falls into `## Backlog`. This is the usual cause of "my TaskCreates keep landing in Backlog." Run `ToolSearch select:TaskCreate` before metadata-carrying creates.
   - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
 - **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work. Same `\"` → `"` normalization as create.
 
@@ -191,6 +193,9 @@ markers can render.
 
 ### `activate <PHASE>` / `deactivate`
 
+Aliases `plan_activate` / `plan_deactivate` are also accepted, matching the
+MCP tool names and the wording the bridge emits in hook output.
+
 Phase 40 focus mode. `activate AS` scopes the bridge's surface to a
 single phase:
 
@@ -232,6 +237,14 @@ Seed the state file with synthetic `baseline:<plan_path>` mappings for every lea
 **Adopting baselined leaves into TaskList.** On a fresh session against a pre-populated `PLAN.md`, the harness's TaskList starts empty even though state has baseline mappings for every leaf. Reconcile surfaces a one-line advisory listing the baseline-only `plan_path`s so the agent sees them. To adopt: `TaskCreate(metadata.plan_path="N.M", subject="...")` — `writeback` dedupes against the existing line (no duplicate inserted) and replaces the `baseline:` mapping with the real `task_id`. Hand-editing the line directly also works; the bridge picks up the change via the next reconcile.
 
 **Leaves with empty ids** (bare-checkbox bullets like `- [ ] no id here`) are *skipped*: they have no stable `plan_path` to key state by, so the bridge can't track them. `baseline` reports the count under "NOTE: skipped N bare-checkbox leaf(s)…" — add a dotted id (`- [ ] 1.2.3 description`) to make a leaf trackable.
+
+### `drop-mapping <target>`
+
+Release a stale state mapping without touching `PLAN.md`. `<target>` matches either the dotted leaf id (`BT.5`) or the raw task id (`68`, `baseline:BT.5`). The recovery path when a leaf was hand-archived or hand-deleted so its mapping no longer points at a live line — the `archive` command already drops mappings for the leaves it moves, and reconcile auto-releases mappings whose leaf landed in `PLAN_ARCHIVE.md`, so reach for this only when `PLAN.md` changed outside the bridge in a way neither covers. Idempotent: a target with no match is a clean no-op.
+
+### `debug on|off`
+
+Toggle raw hook-payload capture for this project. When on, every writeback hook appends the verbatim stdin payload to `.claude/plan-bridge-debug.jsonl` (one `{"ts","raw"}` line) — ground truth for diagnosing whether `metadata.plan_path` actually reaches the bridge. Off by default, omitted from the state file when off, per-project scoped (won't affect other projects sharing the binary), and gitignored. With no argument, prints the current state.
 
 ### `serve` (MCP)
 
