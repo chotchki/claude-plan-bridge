@@ -135,6 +135,19 @@ enum Command {
         /// `on` / `off` (also accepts `true`/`false`, `1`/`0`). Omit to query.
         setting: Option<String>,
     },
+    /// Release a stale state mapping without touching PLAN.md (BY.6). The
+    /// recovery path for a mapping whose target leaf was hand-archived or
+    /// hand-deleted, so its task id no longer points at a live line. The
+    /// `archive` command already drops mappings for leaves it moves; use this
+    /// when PLAN.md changed outside the bridge. `<target>` matches either the
+    /// dotted leaf id (`BS.5`) or the raw task id (`baseline:BS.5`, `68`).
+    /// Idempotent — a target with no matching mapping is a clean no-op.
+    DropMapping {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// plan_path (e.g. `BS.5`) or task id (e.g. `68`, `baseline:BS.5`).
+        target: String,
+    },
     /// Emit a SessionStart additionalContext that drives Claude to rehydrate
     /// the in-session task list from the persisted state file. Intended for
     /// the `SessionStart` hook; safe to run any time (silent no-op when
@@ -446,6 +459,23 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Command::DropMapping { project, target } => {
+            let plan = project.plan_path();
+            let report = plan_bridge::drop_mapping::drop_mapping(&plan, &target)?;
+            if report.dropped.is_empty() {
+                println!(
+                    "claude-plan-bridge: no mapping matched `{}` (no-op)",
+                    report.target
+                );
+            } else {
+                println!(
+                    "claude-plan-bridge: dropped {} mapping(s) for `{}`: {}",
+                    report.dropped.len(),
+                    report.target,
+                    report.dropped.join(", ")
+                );
             }
         }
         Command::Resume { project } => {
