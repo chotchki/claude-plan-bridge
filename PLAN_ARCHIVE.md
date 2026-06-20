@@ -519,3 +519,14 @@ Source: session feedback (2026-05-30) on the dogfood bridge. Items keyed to the 
 - [x] BY.12 - docs (README for `debug` verb + plan_path shape), fix pre-existing ast.rs doctest, cargo fmt + clippy + full suite green, then sweep Phase BY to PLAN_ARCHIVE.md
 - [x] BY.13 - state.debug flag + `claude-plan-bridge debug on|off` toggle; writeback appends verbatim hook payloads to `.claude/plan-bridge-debug.jsonl` when on. Off by default, omitted from state when false, per-project scoped, gitignored. Confirmed the root cause above. Tests added; 395 unit tests green [investigation tooling]
 
+---
+
+## 2026-06-20
+
+## Phase CA - Path-portable hook wiring across checkouts
+- [x] CA.1 - Portable hook commands (no baked absolute path)
+- [x] CA.2 - upgrade-hooks replaces stale entries in place
+- [x] CA.3 - Fail loud on unresolvable PLAN.md + status diagnostics
+- [x] CA.4 - Cross-checkout state story + fresh-clone flow
+- [x] CA.5 - Migrate this repo + e2e + phase exit
+

@@ -79,8 +79,7 @@ pub fn init(cwd: &Path, force: bool) -> Result<InitReport> {
     } else {
         json!({})
     };
-    let abs_cwd = absolute_project_root(cwd)?;
-    let merged = merge_hooks(existing, &abs_cwd);
+    let merged = merge_hooks(existing);
     std::fs::write(
         &settings_path,
         serde_json::to_string_pretty(&merged)? + "\n",
@@ -132,34 +131,30 @@ pub fn init(cwd: &Path, force: bool) -> Result<InitReport> {
     Ok(report)
 }
 
-/// Resolve the project root to a canonical absolute path. Hook commands bake
-/// this into `--cwd` so the subprocess's working directory (which can drift
-/// if Claude `cd`s mid-session) doesn't determine where the bridge looks for
-/// PLAN.md. Falls back to joining `cwd` onto `current_dir()` if
-/// `canonicalize` fails (rare — directory must exist for init/upgrade).
-pub fn absolute_project_root(cwd: &Path) -> Result<std::path::PathBuf> {
-    if let Ok(canon) = std::fs::canonicalize(cwd) {
-        return Ok(canon);
-    }
-    let here = std::env::current_dir().context("current_dir")?;
-    Ok(here.join(cwd))
-}
+/// The drift-proof, checkout-portable project-root reference baked into every
+/// hook command. Claude Code sets `$CLAUDE_PROJECT_DIR` to the absolute project
+/// root for every hook event (SessionStart / UserPromptSubmit / PostToolUse),
+/// independent of the subprocess cwd. Using it instead of a hard-coded absolute
+/// path fixes BOTH historical failure modes:
+///   - Phase 32 (cwd drift): a relative/absent `--cwd` broke when Claude `cd`d
+///     into a subdirectory mid-session. `$CLAUDE_PROJECT_DIR` always resolves
+///     to the project root regardless of subprocess cwd.
+///   - Phase CA (checkout portability): a machine-specific absolute path baked
+///     into a committed `.claude/settings.json` broke on every rename, fresh
+///     clone, other machine, and git worktree. The variable reference is
+///     byte-identical across all checkouts, so the file is safe to commit.
+///
+/// Double-quoted so the shell expands the variable (single quotes would not).
+/// `claude-plan-bridge` additionally falls back to the env var / current dir
+/// when `--cwd` arrives empty (the rare headless context where the var is
+/// unset), so a misconfigured hook fails loudly rather than silently
+/// mis-resolving PLAN.md.
+const HOOK_CWD: &str = "\"$CLAUDE_PROJECT_DIR\"";
 
-/// Quote a path for embedding into a shell command string. Hook commands are
-/// run through `sh -c`, so a project root containing spaces, `$`, or other
-/// shell metacharacters would otherwise break tokenization. Single-quote +
-/// escape internal single quotes (`'` → `'\''`).
-pub fn shell_quote(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{escaped}'")
-}
-
-/// Canonical hook entries the bridge installs. Each command bakes an absolute
-/// `--cwd <project root>` so the subprocess CWD is irrelevant — see Phase 32
-/// (cwd-drift session implode).
-fn plan_bridge_hooks(project_root: &Path) -> Value {
-    let q = shell_quote(project_root);
+/// Canonical hook entries the bridge installs. Each command passes
+/// `--cwd "$CLAUDE_PROJECT_DIR"` so the subprocess CWD is irrelevant and the
+/// committed settings.json is portable across checkouts — see [`HOOK_CWD`].
+fn plan_bridge_hooks() -> Value {
     // NOTE: `--cwd` is a subcommand-level flag (it lives on `ProjectArgs`,
     // which clap flattens into each subcommand), so it MUST appear AFTER
     // the subcommand token. Putting it before makes clap reject with
@@ -169,13 +164,13 @@ fn plan_bridge_hooks(project_root: &Path) -> Value {
         "SessionStart": [{
             "hooks": [{
                 "type": "command",
-                "command": format!("claude-plan-bridge resume --cwd {q}"),
+                "command": format!("claude-plan-bridge resume --cwd {HOOK_CWD}"),
             }],
         }],
         "UserPromptSubmit": [{
             "hooks": [{
                 "type": "command",
-                "command": format!("claude-plan-bridge reconcile --cwd {q}"),
+                "command": format!("claude-plan-bridge reconcile --cwd {HOOK_CWD}"),
             }],
         }],
         "PostToolUse": [
@@ -183,14 +178,14 @@ fn plan_bridge_hooks(project_root: &Path) -> Value {
                 "matcher": "TaskCreate",
                 "hooks": [{
                     "type": "command",
-                    "command": format!("claude-plan-bridge writeback --event create --cwd {q}"),
+                    "command": format!("claude-plan-bridge writeback --event create --cwd {HOOK_CWD}"),
                 }],
             },
             {
                 "matcher": "TaskUpdate",
                 "hooks": [{
                     "type": "command",
-                    "command": format!("claude-plan-bridge writeback --event update --cwd {q}"),
+                    "command": format!("claude-plan-bridge writeback --event update --cwd {HOOK_CWD}"),
                 }],
             },
         ],
@@ -241,7 +236,7 @@ pub fn outdated_hook_cwd_warning(cwd: &Path) -> Option<String> {
     if !any_plan_bridge {
         return None;
     }
-    if hooks_have_absolute_cwd(&settings) {
+    if hooks_have_drift_proof_cwd(&settings) {
         return None;
     }
     Some(
@@ -249,8 +244,9 @@ pub fn outdated_hook_cwd_warning(cwd: &Path) -> Option<String> {
          (or absent) `--cwd` flag. If Claude `cd`s into a subdirectory \
          mid-session, the hook subprocess inherits that cwd and the bridge \
          silently no-ops against PLAN.md until the session restarts. Run \
-         `claude-plan-bridge upgrade-hooks` to bake the absolute project root \
-         into every hook command (idempotent)."
+         `claude-plan-bridge upgrade-hooks` to rewrite every hook command to \
+         `--cwd \"$CLAUDE_PROJECT_DIR\"` — drift-proof and portable across \
+         checkouts (idempotent)."
             .to_string(),
     )
 }
@@ -304,10 +300,12 @@ pub fn hook_command_present(settings: &Value, event: &str, subcommand: &str) -> 
     })
 }
 
-/// True when *every* installed plan-bridge hook command bakes an absolute
-/// `--cwd` flag. Used by reconcile/writeback to detect legacy installs that
-/// still rely on subprocess cwd to resolve PLAN.md — Phase 32.
-pub fn hooks_have_absolute_cwd(settings: &Value) -> bool {
+/// True when *every* installed plan-bridge hook command resolves the project
+/// root in a drift-proof way: each `--cwd` is either a `$CLAUDE_PROJECT_DIR`
+/// reference (Phase CA portable form) or an absolute path (legacy Phase 32
+/// baked form). Used by reconcile / writeback / status to detect legacy
+/// installs that still rely on subprocess cwd to resolve PLAN.md.
+pub fn hooks_have_drift_proof_cwd(settings: &Value) -> bool {
     let Some(hooks) = settings.pointer("/hooks").and_then(Value::as_object) else {
         return false;
     };
@@ -328,7 +326,7 @@ pub fn hooks_have_absolute_cwd(settings: &Value) -> bool {
                     continue;
                 }
                 saw_any = true;
-                if !command_has_absolute_cwd(cmd) {
+                if !command_has_drift_proof_cwd(cmd) {
                     return false;
                 }
             }
@@ -337,22 +335,88 @@ pub fn hooks_have_absolute_cwd(settings: &Value) -> bool {
     saw_any
 }
 
-/// True when `cmd` carries `--cwd <abs path>` where the path is absolute.
-/// Tokenizes on whitespace; tolerates single-quoted paths from `shell_quote`.
-fn command_has_absolute_cwd(cmd: &str) -> bool {
-    let toks: Vec<&str> = cmd.split_whitespace().collect();
-    for (i, t) in toks.iter().enumerate() {
-        if *t != "--cwd" {
-            continue;
-        }
-        let Some(arg) = toks.get(i + 1) else {
-            return false;
-        };
-        // `shell_quote` wraps in single quotes; strip them for the check.
-        let unquoted = arg.trim_start_matches('\'').trim_end_matches('\'');
-        return std::path::Path::new(unquoted).is_absolute();
+/// True when `cmd` carries a `--cwd` whose argument resolves to the project
+/// root regardless of subprocess cwd — either a `$CLAUDE_PROJECT_DIR`
+/// reference (the portable form `init` / `upgrade-hooks` now emit) or an
+/// absolute filesystem path (legacy baked form). Tokenizes on whitespace;
+/// tolerates single- or double-quoted arguments.
+fn command_has_drift_proof_cwd(cmd: &str) -> bool {
+    match cwd_arg_of(cmd) {
+        Some(arg) => cwd_arg_is_drift_proof(arg),
+        None => false,
     }
-    false
+}
+
+/// Extract the raw token following `--cwd` in a hook command string (still
+/// quoted as it appears on disk). Returns `None` when there is no `--cwd` or
+/// nothing follows it.
+fn cwd_arg_of(cmd: &str) -> Option<&str> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let pos = toks.iter().position(|t| *t == "--cwd")?;
+    toks.get(pos + 1).copied()
+}
+
+/// Diagnose installed plan-bridge hooks whose baked absolute `--cwd` points
+/// somewhere broken — a directory that no longer exists, or one with no
+/// PLAN.md. This is the exact failure that silently no-ops the bridge when a
+/// committed settings.json carries another machine's (or a renamed repo's)
+/// path. Returns one message per distinct broken path. The portable
+/// `$CLAUDE_PROJECT_DIR` form has no fixed path to check and is skipped.
+pub fn stale_baked_cwd_warnings(settings: &Value) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    let Some(hooks) = settings.pointer("/hooks").and_then(Value::as_object) else {
+        return out;
+    };
+    for entries in hooks.values() {
+        let Some(arr) = entries.as_array() else {
+            continue;
+        };
+        for entry in arr {
+            let Some(hs) = entry.get("hooks").and_then(Value::as_array) else {
+                continue;
+            };
+            for h in hs {
+                let Some(cmd) = h.get("command").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !cmd.contains("claude-plan-bridge") {
+                    continue;
+                }
+                let Some(arg) = cwd_arg_of(cmd) else {
+                    continue;
+                };
+                let unquoted = arg.trim_matches(|c| c == '\'' || c == '"');
+                if unquoted.contains("CLAUDE_PROJECT_DIR") {
+                    continue;
+                }
+                let p = std::path::Path::new(unquoted);
+                if !p.is_absolute() || !seen.insert(unquoted.to_string()) {
+                    continue;
+                }
+                if !p.exists() {
+                    out.push(format!(
+                        "hook `--cwd` points at a directory that no longer exists: {unquoted}"
+                    ));
+                } else if !p.join("PLAN.md").exists() {
+                    out.push(format!("hook `--cwd` directory has no PLAN.md: {unquoted}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Classify a raw `--cwd` argument token (as it appears in the hook command
+/// string, possibly still quoted). A `$CLAUDE_PROJECT_DIR` reference resolves
+/// to the project root in any subprocess cwd; so does an absolute path. A
+/// relative token (`.`, `sub/dir`) does not.
+fn cwd_arg_is_drift_proof(arg: &str) -> bool {
+    let unquoted = arg.trim_matches(|c| c == '\'' || c == '"');
+    if unquoted.contains("CLAUDE_PROJECT_DIR") {
+        return true;
+    }
+    std::path::Path::new(unquoted).is_absolute()
 }
 
 /// Idempotently merge the latest plan-bridge hooks into an existing
@@ -379,8 +443,7 @@ pub fn upgrade_hooks(cwd: &Path) -> Result<UpgradeHooksReport> {
     } else {
         json!({})
     };
-    let abs_cwd = absolute_project_root(cwd)?;
-    let merged = merge_hooks(existing.clone(), &abs_cwd);
+    let merged = merge_hooks(existing.clone());
     if existed && merged == existing {
         report.no_change = true;
         return Ok(report);
@@ -398,11 +461,11 @@ pub fn upgrade_hooks(cwd: &Path) -> Result<UpgradeHooksReport> {
     Ok(report)
 }
 
-fn merge_hooks(mut existing: Value, project_root: &Path) -> Value {
+fn merge_hooks(mut existing: Value) -> Value {
     if !existing.is_object() {
         existing = json!({});
     }
-    let our = plan_bridge_hooks(project_root);
+    let our = plan_bridge_hooks();
 
     let target = existing.as_object_mut().expect("settings is object");
     let hooks_entry = target.entry("hooks".to_string()).or_insert(json!({}));
@@ -491,30 +554,26 @@ mod tests {
     }
 
     #[test]
-    fn fresh_init_bakes_absolute_cwd_into_every_hook_command() {
-        // Phase 32.2: every installed hook command must carry `--cwd <abs>`
-        // so subprocess cwd drift (Claude `cd`s mid-session) doesn't break
-        // PLAN.md resolution.
-        //
-        // Phase 34.1: walk the parsed settings instead of doing a raw-byte
-        // substring against the JSON file. On Windows the canonical path
-        // is `\\?\C:\...` and JSON serialization escapes every backslash,
-        // so the on-disk bytes (`\\\\?\\C:\\...`) never match the
-        // unescaped `abs_str`. The parsed `command` field is already
-        // unescaped, so comparing against that works on both platforms.
+    fn fresh_init_uses_claude_project_dir_in_every_hook_command() {
+        // Phase CA: every installed hook command must carry
+        // `--cwd "$CLAUDE_PROJECT_DIR"`. That one form is BOTH drift-proof
+        // (Claude `cd`ing mid-session can't change where PLAN.md resolves —
+        // the Phase 32 concern) AND portable across checkouts (no
+        // machine-specific absolute path baked into a committed
+        // settings.json — the Phase CA bug). The generated string is
+        // byte-identical no matter where the project lives on disk.
         let dir = scratch_dir();
         init(&dir, false).unwrap();
-        let abs = std::fs::canonicalize(&dir).unwrap();
-        let abs_str = abs.to_string_lossy().to_string();
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
         )
         .unwrap();
         assert!(
-            hooks_have_absolute_cwd(&settings),
-            "expected every plan-bridge hook command to carry --cwd <abs>: {settings:#?}"
+            hooks_have_drift_proof_cwd(&settings),
+            "expected every plan-bridge hook command to resolve a drift-proof cwd: {settings:#?}"
         );
-        let expected = format!("--cwd '{abs_str}'");
+        let expected = "--cwd \"$CLAUDE_PROJECT_DIR\"";
+        let machine_path = dir.to_string_lossy().to_string();
         let hooks = settings
             .pointer("/hooks")
             .and_then(Value::as_object)
@@ -532,8 +591,13 @@ mod tests {
                         .and_then(Value::as_str)
                         .expect("hook entry has a command string");
                     assert!(
-                        cmd.contains(&expected),
+                        cmd.contains(expected),
                         "command missing `{expected}`: {cmd}"
+                    );
+                    assert!(
+                        !cmd.contains(&machine_path),
+                        "command must NOT bake the machine-specific project path \
+                         `{machine_path}`: {cmd}"
                     );
                     checked += 1;
                 }
@@ -594,24 +658,33 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_hooks_migrates_relative_cwd_to_absolute() {
-        // Phase 32.3: pre-32 installs ship `claude-plan-bridge reconcile`
-        // (no --cwd). After upgrade_hooks, every command bakes the absolute
-        // project root, and the install self-heals against cwd drift.
+    fn upgrade_hooks_migrates_baked_absolute_to_project_dir() {
+        // Phase CA: a Phase-32-era install baked a machine-specific absolute
+        // `--cwd '/some/abs/path'` into every command. That works locally but
+        // breaks the moment the repo is renamed or cloned elsewhere — the bug
+        // that started this phase (this very repo carried a stale
+        // `/Users/.../plan_to_task_bridge` after a rename). upgrade_hooks must
+        // rewrite every command to the portable `--cwd "$CLAUDE_PROJECT_DIR"`
+        // form and drop the stale absolute path entirely.
         let dir = scratch_dir();
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        let stale_abs = if cfg!(windows) {
+            r"C:\old\checkout\path"
+        } else {
+            "/old/checkout/path"
+        };
         let legacy = json!({
             "hooks": {
                 "SessionStart": [{
                     "hooks": [{
                         "type": "command",
-                        "command": "claude-plan-bridge resume"
+                        "command": format!("claude-plan-bridge resume --cwd '{stale_abs}'")
                     }]
                 }],
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
-                        "command": "claude-plan-bridge reconcile"
+                        "command": format!("claude-plan-bridge reconcile --cwd '{stale_abs}'")
                     }]
                 }],
                 "PostToolUse": [
@@ -619,14 +692,14 @@ mod tests {
                         "matcher": "TaskCreate",
                         "hooks": [{
                             "type": "command",
-                            "command": "claude-plan-bridge writeback --event create"
+                            "command": format!("claude-plan-bridge writeback --event create --cwd '{stale_abs}'")
                         }]
                     },
                     {
                         "matcher": "TaskUpdate",
                         "hooks": [{
                             "type": "command",
-                            "command": "claude-plan-bridge writeback --event update"
+                            "command": format!("claude-plan-bridge writeback --event update --cwd '{stale_abs}'")
                         }]
                     }
                 ]
@@ -640,13 +713,15 @@ mod tests {
 
         let report = upgrade_hooks(&dir).unwrap();
         assert!(report.updated_settings, "expected updated_settings");
-        let settings: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
-        )
-        .unwrap();
+        let raw = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
         assert!(
-            hooks_have_absolute_cwd(&settings),
-            "post-upgrade settings still lack absolute --cwd: {settings:#?}"
+            !raw.contains(stale_abs),
+            "stale absolute path survived the upgrade: {raw}"
+        );
+        let settings: Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            hooks_have_drift_proof_cwd(&settings),
+            "post-upgrade settings still lack a drift-proof cwd: {settings:#?}"
         );
 
         // Second upgrade is a no-op.
@@ -658,21 +733,180 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_handles_paths_with_spaces_and_quotes() {
-        use std::path::PathBuf;
-        assert_eq!(shell_quote(&PathBuf::from("/tmp/abc")), "'/tmp/abc'");
+    fn upgrade_hooks_collapses_duplicate_plan_bridge_entries() {
+        // A settings.json that somehow accumulated DUPLICATE plan-bridge
+        // entries for an event (a past merge that appended instead of
+        // replacing, or two installs that wired different absolute paths)
+        // must collapse to exactly one entry per event after upgrade.
+        // merge_hooks matches plan-bridge entries by the `claude-plan-bridge`
+        // command prefix, retains everything else, and re-adds one canonical
+        // set.
+        let dir = scratch_dir();
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        let dupes = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge reconcile --cwd '/old/path/a'"
+                        }]
+                    },
+                    {
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge reconcile --cwd '/old/path/b'"
+                        }]
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": "TaskCreate",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge writeback --event create --cwd '/old/path/a'"
+                        }]
+                    },
+                    {
+                        "matcher": "TaskCreate",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge writeback --event create --cwd '/old/path/b'"
+                        }]
+                    },
+                    {
+                        "matcher": "TaskUpdate",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "claude-plan-bridge writeback --event update --cwd '/old/path/a'"
+                        }]
+                    },
+                    {
+                        "matcher": "Edit",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "my-user-script /tmp/log"
+                        }]
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&dupes).unwrap(),
+        )
+        .unwrap();
+
+        upgrade_hooks(&dir).unwrap();
+        let raw = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&raw).unwrap();
+
+        // Exactly one plan-bridge UserPromptSubmit entry survives.
+        let ups = settings
+            .pointer("/hooks/UserPromptSubmit")
+            .and_then(Value::as_array)
+            .unwrap();
         assert_eq!(
-            shell_quote(&PathBuf::from("/tmp/with space")),
-            "'/tmp/with space'"
+            ups.iter().filter(|e| is_plan_bridge_entry(e)).count(),
+            1,
+            "UserPromptSubmit must collapse to one plan-bridge entry: {ups:#?}"
         );
+
+        // PostToolUse collapses to exactly two plan-bridge entries (TaskCreate
+        // + TaskUpdate); the unrelated user hook is preserved.
+        let post = settings
+            .pointer("/hooks/PostToolUse")
+            .and_then(Value::as_array)
+            .unwrap();
         assert_eq!(
-            shell_quote(&PathBuf::from("/tmp/o'reilly")),
-            "'/tmp/o'\\''reilly'"
+            post.iter().filter(|e| is_plan_bridge_entry(e)).count(),
+            2,
+            "PostToolUse must collapse to two plan-bridge entries: {post:#?}"
         );
+        let has_user = post.iter().any(|e| {
+            e.get("hooks")
+                .and_then(Value::as_array)
+                .map(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| c.contains("my-user-script"))
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_user, "unrelated user hook must survive upgrade");
+
+        // No stale path remains, and the result is drift-proof + portable.
+        assert!(!raw.contains("/old/path/"), "stale paths survived: {raw}");
+        assert!(hooks_have_drift_proof_cwd(&settings));
     }
 
     #[test]
-    fn hooks_have_absolute_cwd_rejects_relative() {
+    fn stale_baked_cwd_warnings_flags_dead_absolute_path() {
+        // The bug that started Phase CA: a committed hook baking an absolute
+        // path that no longer exists (here, the repo's pre-rename name).
+        let dead = if cfg!(windows) {
+            r"C:\Users\x\workspace\plan_to_task_bridge"
+        } else {
+            "/Users/x/workspace/plan_to_task_bridge"
+        };
+        let settings = json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "TaskCreate",
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("claude-plan-bridge writeback --event create --cwd '{dead}'")
+                    }]
+                }]
+            }
+        });
+        let warns = stale_baked_cwd_warnings(&settings);
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].contains(dead), "{warns:?}");
+        assert!(warns[0].contains("no longer exists"), "{warns:?}");
+    }
+
+    #[test]
+    fn stale_baked_cwd_warnings_quiet_for_project_dir_form() {
+        let settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "claude-plan-bridge reconcile --cwd \"$CLAUDE_PROJECT_DIR\""
+                    }]
+                }]
+            }
+        });
+        assert!(stale_baked_cwd_warnings(&settings).is_empty());
+    }
+
+    #[test]
+    fn stale_baked_cwd_warnings_flags_dir_without_plan() {
+        // An absolute --cwd that exists but has no PLAN.md (the wrong
+        // directory) is also a misconfiguration worth surfacing.
+        let dir = scratch_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs = dir.to_string_lossy().to_string();
+        let settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("claude-plan-bridge reconcile --cwd '{abs}'")
+                    }]
+                }]
+            }
+        });
+        let warns = stale_baked_cwd_warnings(&settings);
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].contains("no PLAN.md"), "{warns:?}");
+    }
+
+    #[test]
+    fn hooks_have_drift_proof_cwd_rejects_relative() {
         let settings = json!({
             "hooks": {
                 "UserPromptSubmit": [{
@@ -683,17 +917,33 @@ mod tests {
                 }]
             }
         });
-        assert!(!hooks_have_absolute_cwd(&settings));
+        assert!(!hooks_have_drift_proof_cwd(&settings));
     }
 
     #[test]
-    fn hooks_have_absolute_cwd_accepts_absolute() {
-        // Phase 34.2: pick a platform-appropriate absolute path. Windows
-        // requires a drive letter — `Path::new("/abs/path").is_absolute()`
-        // returns false there — so the synthetic command must use the
-        // local platform's absolute-path syntax. The function under test
-        // delegates to `Path::is_absolute`, which is the correct behavior;
-        // the test just needs an honestly-absolute example per platform.
+    fn hooks_have_drift_proof_cwd_accepts_project_dir() {
+        // Phase CA: the portable form `init` / `upgrade-hooks` now emit. The
+        // `$CLAUDE_PROJECT_DIR` reference is drift-proof even though it is not
+        // a literal absolute path — Claude Code expands it to the project root
+        // for every hook event.
+        let settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "claude-plan-bridge reconcile --cwd \"$CLAUDE_PROJECT_DIR\""
+                    }]
+                }]
+            }
+        });
+        assert!(hooks_have_drift_proof_cwd(&settings));
+    }
+
+    #[test]
+    fn hooks_have_drift_proof_cwd_accepts_absolute() {
+        // A legacy Phase-32 baked absolute path still resolves correctly on
+        // the machine that wrote it, so it stays "drift-proof" — it's only the
+        // cross-checkout portability that upgrade-hooks improves.
         let abs = if cfg!(windows) {
             r"C:\abs\path"
         } else {
@@ -710,13 +960,13 @@ mod tests {
                 }]
             }
         });
-        assert!(hooks_have_absolute_cwd(&settings));
+        assert!(hooks_have_drift_proof_cwd(&settings));
     }
 
     #[test]
-    fn hooks_have_absolute_cwd_rejects_when_cwd_arg_relative() {
-        // A bogus `--cwd .` shouldn't pass — relative paths are exactly what
-        // Phase 32 is trying to eliminate.
+    fn hooks_have_drift_proof_cwd_rejects_when_cwd_arg_relative() {
+        // A bogus `--cwd .` shouldn't pass — a relative cwd is exactly what
+        // drift-proofing eliminates.
         let settings = json!({
             "hooks": {
                 "UserPromptSubmit": [{
@@ -727,7 +977,7 @@ mod tests {
                 }]
             }
         });
-        assert!(!hooks_have_absolute_cwd(&settings));
+        assert!(!hooks_have_drift_proof_cwd(&settings));
     }
 
     #[test]

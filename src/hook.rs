@@ -148,9 +148,44 @@ where
     F: FnOnce() -> anyhow::Result<HookOutput>,
 {
     if !plan.exists() {
-        return HookOutput::silent();
+        // Phase CA: a missing PLAN.md used to be a fully silent no-op, which
+        // is exactly how a stale `--cwd` (or cwd drift) hid itself — the
+        // bridge looked alive while mirroring nothing. Now, when the bridge is
+        // actually configured in this project, surface a loud-but-NON-BLOCKING
+        // notice so the misconfiguration is visible. Still never blocks (the
+        // Phase 32 contract): an unconfigured project stays silent.
+        return match missing_plan_notice(plan) {
+            Some(msg) => HookOutput::context(event, msg),
+            None => HookOutput::silent(),
+        };
     }
     f().unwrap_or_else(|e| HookOutput::context(event, format!("claude-plan-bridge: {e:#}")))
+}
+
+/// Decide what to say when PLAN.md is absent at the resolved path. Returns
+/// `None` (stay silent) when this project shows no sign of using the bridge —
+/// no state file and no plan-bridge hooks — so we don't nag projects that
+/// simply don't have a PLAN.md. Returns a non-blocking warning when the bridge
+/// IS configured here, because then a missing PLAN.md means a real
+/// misconfiguration (most often a stale/dead hook `--cwd`).
+fn missing_plan_notice(plan: &std::path::Path) -> Option<String> {
+    let claude_dir = plan.parent()?.join(".claude");
+    let state_exists = claude_dir.join("plan-bridge-state.json").exists();
+    let hooks_here = std::fs::read_to_string(claude_dir.join("settings.json"))
+        .map(|t| t.contains("claude-plan-bridge"))
+        .unwrap_or(false);
+    if !state_exists && !hooks_here {
+        return None;
+    }
+    Some(format!(
+        "claude-plan-bridge: ⚠ PLAN.md not found at {} — the bridge is installed \
+         in this project but can't read the plan, so task changes are NOT being \
+         mirrored. This usually means a stale or dead hook `--cwd`. Run \
+         `claude-plan-bridge status` to diagnose, then `claude-plan-bridge \
+         upgrade-hooks` to rewrite the hooks to the portable \
+         `--cwd \"$CLAUDE_PROJECT_DIR\"` form.",
+        plan.display()
+    ))
 }
 
 /// Pull a task id out of `tool_response`. Real-world shapes seen in Claude Code:
@@ -311,6 +346,44 @@ mod tests {
             panic!("handler must not be invoked when PLAN.md is missing")
         });
         assert_eq!(out.to_json(), "{}", "expected silent no-op");
+    }
+
+    #[test]
+    fn guard_missing_plan_warns_loudly_when_bridge_configured_but_plan_absent() {
+        // Phase CA: a configured bridge (plan-bridge hooks present) with no
+        // PLAN.md at the resolved path is the silent-no-op trap. It must now
+        // surface a visible, NON-BLOCKING notice pointing at `status`.
+        let dir = std::env::temp_dir().join(format!(
+            "plan-bridge-guard-configured-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\
+             \"command\":\"claude-plan-bridge reconcile --cwd x\"}]}]}}",
+        )
+        .unwrap();
+        let plan = dir.join("PLAN.md");
+        assert!(!plan.exists(), "PLAN.md must be absent for this test");
+        let out = guard_missing_plan(&plan, "UserPromptSubmit", || {
+            panic!("handler must not run when PLAN.md is missing")
+        });
+        let json = out.to_json();
+        assert!(
+            !json.contains("\"decision\":\"block\""),
+            "must not block: {json}"
+        );
+        assert!(
+            json.contains("PLAN.md not found"),
+            "expected loud notice: {json}"
+        );
+        assert!(json.contains("status"), "expected a fix hint: {json}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "claude-plan-bridge writeback --event create --cwd '/Users/chotchki/workspace/plan_to_task_bridge'",
+            "command": "claude-plan-bridge writeback --event create --cwd \"$CLAUDE_PROJECT_DIR\"",
             "type": "command"
           }
         ],
@@ -13,7 +13,7 @@
       {
         "hooks": [
           {
-            "command": "claude-plan-bridge writeback --event update --cwd '/Users/chotchki/workspace/plan_to_task_bridge'",
+            "command": "claude-plan-bridge writeback --event update --cwd \"$CLAUDE_PROJECT_DIR\"",
             "type": "command"
           }
         ],
@@ -24,7 +24,7 @@
       {
         "hooks": [
           {
-            "command": "claude-plan-bridge resume --cwd '/Users/chotchki/workspace/plan_to_task_bridge'",
+            "command": "claude-plan-bridge resume --cwd \"$CLAUDE_PROJECT_DIR\"",
             "type": "command"
           }
         ]
@@ -34,7 +34,7 @@
       {
         "hooks": [
           {
-            "command": "claude-plan-bridge reconcile --cwd '/Users/chotchki/workspace/plan_to_task_bridge'",
+            "command": "claude-plan-bridge reconcile --cwd \"$CLAUDE_PROJECT_DIR\"",
             "type": "command"
           }
         ]

@@ -38,7 +38,7 @@ cd your-project/
 claude-plan-bridge upgrade-hooks
 ```
 
-`upgrade-hooks` is idempotent and only touches `.claude/settings.json` — your `PLAN.md` and `.gitignore` stay untouched. Restart Claude Code so it picks up any new hook wiring. See [`upgrade-hooks`](#upgrade-hooks---cwd-path) for details on when this is needed (notably anything predating the `SessionStart` hook or absolute `--cwd` baking).
+`upgrade-hooks` is idempotent and only touches `.claude/settings.json` — your `PLAN.md` and `.gitignore` stay untouched. Restart Claude Code so it picks up any new hook wiring. See [`upgrade-hooks`](#upgrade-hooks---cwd-path) for details on when this is needed (notably anything predating the `SessionStart` hook or the portable `--cwd "$CLAUDE_PROJECT_DIR"` wiring, or a project carrying a stale baked `--cwd` after a rename).
 
 ## Quickstart
 
@@ -91,7 +91,7 @@ claude-plan-bridge archive
 
 Every project-scoped subcommand below accepts the same two scope flags:
 
-- `--cwd PATH` — project directory (default `.`). Useful for scripting from outside the project, e.g. `claude-plan-bridge baseline --cwd ../some-project/`.
+- `--cwd PATH` — project directory (default `.`). Useful for scripting from outside the project, e.g. `claude-plan-bridge baseline --cwd ../some-project/`. When left at the default, the bridge falls back to `$CLAUDE_PROJECT_DIR` (the project root Claude Code sets for hooks) before the literal working directory — which is why the installed hooks pass `--cwd "$CLAUDE_PROJECT_DIR"` and resolve correctly no matter the subprocess cwd.
 - `--plan PATH` — explicit PLAN.md path override. When set, takes precedence over `--cwd`-derived default.
 
 If neither is given, the plan resolves to `./PLAN.md`. Both are interchangeable for the common case; pick whichever matches what you have on hand.
@@ -271,19 +271,23 @@ Wire it into your MCP client config — for Claude Code, point an `mcpServers` e
 
 Scaffold a new project. Creates a starter `PLAN.md`, merges the four hooks into `.claude/settings.json` (preserving any other hooks you've configured), and appends the state file + lock file to `.gitignore`. Idempotent. `--force` overwrites an existing `PLAN.md` with the template.
 
-Each installed hook command bakes the **absolute project root** as `--cwd '/abs/path'`. This makes the subprocess CWD irrelevant — if Claude `cd`s into a subdirectory mid-session, the hook still finds the right `PLAN.md`. (Added in Phase 32 after a session imploded with every prompt blocked because an inherited wrong cwd made `./PLAN.md` unreadable.)
+Each installed hook command passes `--cwd "$CLAUDE_PROJECT_DIR"` — the absolute project root Claude Code injects into every hook event. This is both **drift-proof** (if Claude `cd`s into a subdirectory mid-session, the hook still resolves the right `PLAN.md` — the Phase 32 fix) and **checkout-portable**: the generated `settings.json` is byte-identical no matter where the repo lives on disk, so it is safe to commit and survives renames, fresh clones, other machines, and git worktrees. (Earlier versions baked a machine-specific absolute path, which silently broke the bridge the moment the repo moved — see Troubleshooting.)
 
 ### `upgrade-hooks [--cwd PATH]`
 
-Re-merge the latest hook set into an existing `.claude/settings.json` without touching `PLAN.md` or `.gitignore`. Use after upgrading the bridge binary on a project installed with an older version — notably anything predating the `SessionStart` hook (added in v0.1.11) or the absolute `--cwd` baking (added in v0.1.20). Idempotent: a no-op when the file is already current. The `reconcile` and `writeback` hooks yell a one-line warning on every fire when either the `SessionStart` hook is missing or the installed commands lack absolute `--cwd`, so you'll notice quickly without having to remember to check.
+Re-merge the latest hook set into an existing `.claude/settings.json` without touching `PLAN.md` or `.gitignore`. Use after upgrading the bridge binary on a project installed with an older version — notably anything predating the `SessionStart` hook (added in v0.1.11) or the portable `--cwd "$CLAUDE_PROJECT_DIR"` wiring. Running it on a project whose hooks still carry a baked absolute path (or a stale one left behind by a rename) matches every plan-bridge entry by its `claude-plan-bridge` command prefix, drops them, and re-adds one canonical, portable set — so duplicates collapse and the old path is gone. Idempotent: a no-op when the file is already current. The `reconcile` and `writeback` hooks yell a one-line warning on every fire when the `SessionStart` hook is missing or a hook's `--cwd` isn't drift-proof, so you'll notice quickly without having to remember to check.
 
 ## Troubleshooting
 
-**Symptom**: every prompt blocked with `claude-plan-bridge: read ./PLAN.md: No such file or directory (os error 2)`, including innocuous commands like `ls`.
+**Symptom**: `TaskCreate` / `TaskUpdate` report success, but `PLAN.md` never moves.
 
-**Cause** (pre-v0.1.20): hook commands resolved `./PLAN.md` against the subprocess CWD. If Claude `cd`'d into a subdirectory mid-session, the hook inherited that cwd and couldn't find the plan, and the bridge converted the I/O error into `decision: "block"`.
+**Cause**: a hook's `--cwd` points somewhere the bridge can't find `PLAN.md` — most often a machine-specific absolute path baked by an older bridge that's now stale because the repo was renamed, cloned to a different path, or checked out on another machine. (`.claude/settings.json` is committed, so a baked absolute path travels to every checkout and breaks everywhere but the original.) The `PostToolUse` hook resolves nothing and no-ops.
 
-**Fix**: upgrade to v0.1.20+ (`cargo install --force claude-plan-bridge`) and run `claude-plan-bridge upgrade-hooks` in the affected project. Hooks are rewritten with absolute `--cwd`, and v0.1.20 also drops the `decision: "block"` path entirely — missing `PLAN.md` is now a silent no-op no matter how the bridge gets misrouted.
+**Diagnose**: `claude-plan-bridge status` flags any hook whose absolute `--cwd` points at a directory that no longer exists or has no `PLAN.md`. And because the bridge is configured here, `reconcile` / `writeback` now surface a loud, **non-blocking** notice on your next prompt instead of failing silently.
+
+**Fix**: `claude-plan-bridge upgrade-hooks` rewrites every hook to the portable `--cwd "$CLAUDE_PROJECT_DIR"` form; then restart Claude Code so it reloads `settings.json`.
+
+**Historical symptom** (pre-v0.1.20): every prompt blocked with `read ./PLAN.md: No such file or directory`, including innocuous commands like `ls`, because a relative `--cwd` plus a mid-session `cd` made `./PLAN.md` unreadable and the bridge converted the error into `decision: "block"`. The block path is gone, and `--cwd "$CLAUDE_PROJECT_DIR"` makes relative-cwd resolution moot.
 
 ## State file
 
@@ -307,6 +311,8 @@ Re-merge the latest hook set into an existing `.claude/settings.json` without to
 ```
 
 Atomic tmp+rename writes; cross-process advisory lock on the read-modify-write critical section. Gitignored by `init`. A sidecar `.lock` file (also gitignored) hosts the lock.
+
+**Across checkouts:** the state file is intentionally **not** committed — it's machine- and session-local (it references in-session `task_id`s and the originating session id, neither of which survives a clone). What *is* portable is the hook wiring: because each hook uses `--cwd "$CLAUDE_PROJECT_DIR"`, a committed `.claude/settings.json` works unchanged on every checkout. So the fresh-clone flow is: clone (hooks are already wired via the committed `settings.json`), then run `claude-plan-bridge baseline` to seed local state from the existing `PLAN.md` so your first `reconcile` isn't a wall of `LeafAdded`.
 
 `pending_rehydration` and `rehydration_announced` are seeded by the `SessionStart` hook when it wipes stale mappings on `source=startup|clear`. While paths sit in `pending_rehydration`, reconcile suppresses duplicate "Added [ ] … (consider TaskCreate)" drift for them — the rehydration prompt already asked Claude to create them. As each matching `TaskCreate` lands, writeback evicts the path. When the set drains to empty, writeback's `PostToolUse` message gains a `rehydration complete: N/N mapped` line so end-to-end success is visible.
 

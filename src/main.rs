@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -30,10 +30,38 @@ struct ProjectArgs {
 }
 
 impl ProjectArgs {
+    /// Resolve the effective project root. Precedence:
+    /// 1. An explicit, non-default `--cwd` (anything other than `.`/empty) —
+    ///    honours operators who point the bridge at a specific directory.
+    /// 2. `$CLAUDE_PROJECT_DIR`, the absolute project root Claude Code injects
+    ///    into every hook, when set and non-empty. The installed hooks pass
+    ///    `--cwd "$CLAUDE_PROJECT_DIR"`; this branch also rescues the rare
+    ///    headless case where the shell expands that variable to empty.
+    /// 3. The literal `--cwd` (`.`) as a last resort, resolved against the
+    ///    subprocess cwd.
+    fn root(&self) -> PathBuf {
+        self.root_with_env(std::env::var_os("CLAUDE_PROJECT_DIR"))
+    }
+
+    /// Testable core of [`Self::root`] — `project_dir` is the value of
+    /// `$CLAUDE_PROJECT_DIR` (passed in so tests don't mutate process env).
+    fn root_with_env(&self, project_dir: Option<std::ffi::OsString>) -> PathBuf {
+        let is_default = self.cwd.as_os_str().is_empty() || self.cwd == Path::new(".");
+        if !is_default {
+            return self.cwd.clone();
+        }
+        if let Some(dir) = project_dir
+            && !dir.is_empty()
+        {
+            return PathBuf::from(dir);
+        }
+        self.cwd.clone()
+    }
+
     fn plan_path(&self) -> PathBuf {
         self.plan
             .clone()
-            .unwrap_or_else(|| self.cwd.join("PLAN.md"))
+            .unwrap_or_else(|| self.root().join("PLAN.md"))
     }
 }
 
@@ -328,7 +356,8 @@ fn main() -> Result<()> {
                 let output = plan_bridge::hook::guard_missing_plan(&plan, "PostToolUse", || {
                     run_writeback(&plan, event)
                 });
-                let output = maybe_warn_missing_session_start(&project.cwd, output, "PostToolUse");
+                let output =
+                    maybe_warn_missing_session_start(&project.root(), output, "PostToolUse");
                 println!("{}", output.to_json());
             }
         }
@@ -337,7 +366,8 @@ fn main() -> Result<()> {
             let output = plan_bridge::hook::guard_missing_plan(&plan, "UserPromptSubmit", || {
                 run_reconcile(&plan)
             });
-            let output = maybe_warn_missing_session_start(&project.cwd, output, "UserPromptSubmit");
+            let output =
+                maybe_warn_missing_session_start(&project.root(), output, "UserPromptSubmit");
             println!("{}", output.to_json());
         }
         Command::Serve { project } => {
@@ -958,7 +988,8 @@ fn line_diff(before: &str, after: &str) -> String {
 
 fn run_status(project: &ProjectArgs) -> Result<()> {
     let plan_path = project.plan_path();
-    let cwd = &project.cwd;
+    let root = project.root();
+    let cwd = &root;
     let state_path = plan_bridge::state::default_state_path_for(&plan_path);
     let settings_path = cwd.join(".claude/settings.json");
 
@@ -1043,14 +1074,29 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                         println!("  {mark} {label} → claude-plan-bridge ... {subcmd}");
                     }
                     if let Some(s) = parsed.as_ref()
-                        && !plan_bridge::init::hooks_have_absolute_cwd(s)
+                        && !plan_bridge::init::hooks_have_drift_proof_cwd(s)
                     {
                         println!(
                             "  ⚠ hook entries are using a relative --cwd (or none) — \
-                             run `claude-plan-bridge upgrade-hooks` to bake the absolute \
-                             project root so a mid-session `cd` can't break PLAN.md lookup."
+                             run `claude-plan-bridge upgrade-hooks` to rewrite them to \
+                             `--cwd \"$CLAUDE_PROJECT_DIR\"`, drift-proof and portable \
+                             across checkouts."
                         );
                         all_good = false;
+                    }
+                    if let Some(s) = parsed.as_ref() {
+                        let stale = plan_bridge::init::stale_baked_cwd_warnings(s);
+                        if !stale.is_empty() {
+                            for w in &stale {
+                                println!("  ✗ {w}");
+                            }
+                            println!(
+                                "    → this is the stale-path / renamed-checkout bug; run \
+                                 `claude-plan-bridge upgrade-hooks` to switch to the portable \
+                                 `--cwd \"$CLAUDE_PROJECT_DIR\"` form."
+                            );
+                            all_good = false;
+                        }
                     }
                 } else {
                     all_good = false;
@@ -1190,5 +1236,67 @@ fn run_resume(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput> {
     match plan_bridge::resume::build_resume_message(plan, &source)? {
         Some(msg) => Ok(plan_bridge::hook::HookOutput::context("SessionStart", msg)),
         None => Ok(plan_bridge::hook::HookOutput::silent()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn args(cwd: &str, plan: Option<&str>) -> ProjectArgs {
+        ProjectArgs {
+            cwd: PathBuf::from(cwd),
+            plan: plan.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn root_prefers_explicit_non_default_cwd_over_env() {
+        // An operator who passes `--cwd /explicit` means it — even inside a
+        // Claude session where $CLAUDE_PROJECT_DIR points elsewhere.
+        let a = args("/explicit/project", None);
+        let root = a.root_with_env(Some(OsString::from("/some/claude/project")));
+        assert_eq!(root, PathBuf::from("/explicit/project"));
+    }
+
+    #[test]
+    fn root_falls_back_to_claude_project_dir_when_cwd_is_default() {
+        // The installed hooks pass `--cwd "$CLAUDE_PROJECT_DIR"`. If the shell
+        // ever fails to expand it (so clap sees the default `.`), the env var
+        // still rescues resolution to the real project root.
+        let a = args(".", None);
+        let root = a.root_with_env(Some(OsString::from("/claude/project/root")));
+        assert_eq!(root, PathBuf::from("/claude/project/root"));
+    }
+
+    #[test]
+    fn root_stays_literal_when_default_cwd_and_no_env() {
+        // No env (e.g. a manual CLI run from the project root) → behave exactly
+        // as before: resolve against the literal cwd.
+        let a = args(".", None);
+        assert_eq!(a.root_with_env(None), PathBuf::from("."));
+    }
+
+    #[test]
+    fn root_ignores_empty_env() {
+        // `$CLAUDE_PROJECT_DIR` set but empty (rare headless edge) must not
+        // resolve to an empty path; fall through to the literal cwd.
+        let a = args(".", None);
+        assert_eq!(a.root_with_env(Some(OsString::new())), PathBuf::from("."));
+    }
+
+    #[test]
+    fn plan_path_resolves_under_resolved_root() {
+        // plan_path() builds on root(), so the env fallback flows through to
+        // where the bridge looks for PLAN.md.
+        let a = args(".", None);
+        let resolved = a
+            .root_with_env(Some(OsString::from("/claude/project")))
+            .join("PLAN.md");
+        assert_eq!(resolved, PathBuf::from("/claude/project/PLAN.md"));
+        // An explicit --plan override is independent of root resolution.
+        let b = args(".", Some("/custom/OTHER.md"));
+        assert_eq!(b.plan_path(), PathBuf::from("/custom/OTHER.md"));
     }
 }
