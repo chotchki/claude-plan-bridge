@@ -90,6 +90,7 @@ impl McpServer {
             "plan_backlog" => self.tool_plan_backlog(&args),
             "plan_add" => self.tool_plan_add(&args),
             "plan_add_phase" => self.tool_plan_add_phase(&args),
+            "plan_next_phase" => self.tool_plan_next_phase(),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
             "plan_rename" => self.tool_plan_rename(&args),
@@ -198,8 +199,16 @@ impl McpServer {
     /// pre-create a phase with no tasks yet. For the common "just start typing
     /// tasks" path, TaskCreate's auto-anchor still works — this verb is the
     /// surgical option for richer setup.
+    /// Phase BZ: read-only — report the next uppercase-letter phase id without
+    /// mutating PLAN.md. The companion to `plan_add_phase`'s auto-assign, for
+    /// the TaskCreate-`plan_path` flow where the agent needs to know the new
+    /// phase id (e.g. `CB`) before creating tasks under it.
+    fn tool_plan_next_phase(&self) -> Result<Value> {
+        let id = crate::phase_seq::next_phase_id_for_plan(&self.plan_path);
+        Ok(tool_text_result(&id))
+    }
+
     fn tool_plan_add_phase(&self, args: &Value) -> Result<Value> {
-        let id = require_string(args, "id")?;
         let title = args
             .get("title")
             .and_then(Value::as_str)
@@ -226,6 +235,25 @@ impl McpServer {
             })
             .unwrap_or_default();
         let after = args.get("after").and_then(Value::as_str).map(String::from);
+
+        // Phase BZ: `id` is optional. Provided → require it to be an
+        // uppercase-letter id (BZ.6 guardrail: phase ids are letters going
+        // forward; legacy numeric ids are not created here). Omitted →
+        // auto-assign the next id by scanning PLAN.md + PLAN_ARCHIVE.md, so
+        // callers don't hand-pick (or collide on) a letter.
+        let id = match args.get("id").and_then(Value::as_str) {
+            Some(explicit) => {
+                if !crate::phase_seq::is_alpha_phase_id(explicit) {
+                    return Err(anyhow!(
+                        "phase id `{explicit}` must be uppercase letters \
+                         (A, B, ..., Z, AA, AB, ...). Omit `id` to auto-assign the next \
+                         one, or call `plan_next_phase` to see it."
+                    ));
+                }
+                explicit.to_string()
+            }
+            None => crate::phase_seq::next_phase_id_for_plan(&self.plan_path),
+        };
 
         let text = std::fs::read_to_string(&self.plan_path)?;
         let mut plan = parse(&text)?;
@@ -609,17 +637,26 @@ fn tools_list() -> Value {
             },
             {
                 "name": "plan_add_phase",
-                "description": "Create a new FORMATv2 phase header (`## Phase <id> - <title>`) with optional `depends_on` and `prefer_after` markers. Use when you want explicit phase metadata at creation time, or to pre-create a phase with no tasks. TaskCreate's auto-anchor still handles the common 'just start typing tasks' path.",
+                "description": "Create a new FORMATv2 phase header (`## Phase <id> - <title>`) with optional `depends_on` and `prefer_after` markers. Omit `id` to auto-assign the next uppercase-letter phase id (`A`..`Z` -> `AA`.. -> ...) — the assigned id is echoed in the result. Use when you want explicit phase metadata at creation time, or to pre-create a phase with no tasks. TaskCreate's auto-anchor still handles the common 'just start typing tasks' path.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Phase id (typically alphabetic, e.g. `AI`, `AS`)."},
+                        "id": {"type": "string", "description": "Phase id (uppercase letters, e.g. `AI`, `AS`). Omit to auto-assign the next id in the sequence."},
                         "title": {"type": "string"},
                         "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Hard sequencing — surfaced in reconcile as 'depends on X — X not archived'."},
                         "prefer_after": {"type": "array", "items": {"type": "string"}, "description": "Soft sequencing hint."},
                         "after": {"type": "string", "description": "Insert immediately after this existing phase id (positional). Defaults to id-sort order."}
                     },
-                    "required": ["id"],
+                    "required": [],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_next_phase",
+                "description": "Read-only: report the next uppercase-letter phase id (`A`..`Z` -> `AA`.. -> ...), reconstructed by scanning PLAN.md + PLAN_ARCHIVE.md for the highest existing uppercase-letter phase id. Returns `A` for a fresh project; legacy numeric phase ids are ignored. Use before TaskCreate-ing a new phase so you don't hand-pick or collide on the next letter.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
                     "additionalProperties": false
                 }
             },
@@ -801,6 +838,7 @@ mod tests {
             "plan_backlog",
             "plan_add",
             "plan_add_phase",
+            "plan_next_phase",
             "plan_archive",
             "plan_phase_exit",
             "plan_rename",
@@ -833,6 +871,100 @@ mod tests {
         assert!(
             after.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
             "v2 header with markers landed:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_add_phase_auto_assigns_next_id_when_omitted() {
+        // BY is the high-water mark; omitting `id` must auto-assign BZ, echo it
+        // in the result, and land the header in PLAN.md.
+        let (_, s) = scratch_plan("## Phase BY - Prior\n\n- [ ] BY.1 task\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_add_phase",
+                "arguments": {"title": "Auto"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("BZ"),
+            "result should echo assigned id BZ: {text}"
+        );
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase BZ - Auto"),
+            "auto-assigned phase landed:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_add_phase_auto_assign_clears_archived_ids() {
+        // CA already lives in the sibling PLAN_ARCHIVE.md. Auto-assign must
+        // clear it (CB), never re-hand-out the swept id.
+        let (_, s) = scratch_plan("## Phase BZ - Live\n\n- [ ] BZ.1 task\n");
+        std::fs::write(
+            s.plan_path.with_file_name("PLAN_ARCHIVE.md"),
+            "## Phase BY - swept\n## Phase CA - swept\n",
+        )
+        .unwrap();
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_add_phase",
+                "arguments": {"title": "Next"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase CB - Next"),
+            "expected CB:\n{after}"
+        );
+        assert!(!after.contains("## Phase CA"), "must not reuse archived CA");
+    }
+
+    #[test]
+    fn plan_next_phase_reports_next_id_without_mutating() {
+        let (_, s) = scratch_plan("## Phase BY - Prior\n\n- [ ] BY.1 task\n");
+        let before = std::fs::read_to_string(&s.plan_path).unwrap();
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_next_phase",
+                "arguments": {}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        assert_eq!(resp["result"]["content"][0]["text"].as_str().unwrap(), "BZ");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert_eq!(before, after, "plan_next_phase must be read-only");
+    }
+
+    #[test]
+    fn plan_add_phase_rejects_non_letter_explicit_id() {
+        // BZ.6 guardrail: an explicit id must be uppercase letters. Numeric,
+        // lowercase, dotted, and mixed ids are refused with guidance.
+        let (_, s) = scratch_plan("## Phase BY - Prior\n\n- [ ] BY.1 task\n");
+        for bad in ["42", "bz", "BZ.1", "A1"] {
+            let resp = rpc(
+                &s,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                    "name": "plan_add_phase",
+                    "arguments": {"id": bad, "title": "Nope"}
+                }}),
+            );
+            let err = resp["error"]["message"].as_str().unwrap_or("");
+            assert!(
+                err.contains("uppercase letters"),
+                "id {bad:?} should be rejected with guidance: {resp}"
+            );
+        }
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            !after.contains("Nope"),
+            "rejected phases must not land:\n{after}"
         );
     }
 

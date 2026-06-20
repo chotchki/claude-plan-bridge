@@ -72,6 +72,18 @@ enum Command {
         #[command(flatten)]
         project: ProjectArgs,
     },
+    /// Print the next phase id in the uppercase-letter sequence
+    /// (`A`..`Z` -> `AA`..`AZ` -> `BA`..`BZ` -> ...), reconstructed by scanning
+    /// PLAN.md and the sibling PLAN_ARCHIVE.md for the highest existing
+    /// uppercase-letter phase id and incrementing it. Outputs `A` for a fresh
+    /// project (legacy numeric phase ids are ignored). Scanning the archive too
+    /// means a swept phase id is never re-handed-out. Call this before
+    /// `TaskCreate`-ing a new phase so you don't have to hand-pick — or collide
+    /// on — the next letter.
+    NextPhase {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Apply a Claude Code PostToolUse hook event to PLAN.md.
     ///
     /// Reads the hook payload as JSON on stdin, writes any updates back to
@@ -343,6 +355,10 @@ fn main() -> Result<()> {
             let parsed = plan_bridge::parser::parse(&input)
                 .with_context(|| format!("failed to parse {}", plan.display()))?;
             println!("{}", serde_json::to_string_pretty(&parsed)?);
+        }
+        Command::NextPhase { project } => {
+            let plan = project.plan_path();
+            println!("{}", plan_bridge::phase_seq::next_phase_id_for_plan(&plan));
         }
         Command::Writeback {
             project,

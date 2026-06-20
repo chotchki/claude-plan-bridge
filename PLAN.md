@@ -3,15 +3,6 @@
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
-## Phase BZ - Auto-incrementing uppercase-letter phase ids
-- [ ] BZ.1 - Bijective base-26 codec for phase ids
-- [ ] BZ.2 - next_phase_id successor function
-- [ ] BZ.3 - High-water-mark scan across plan + archive
-- [ ] BZ.4 - next-phase CLI subcommand
-- [ ] BZ.5 - MCP: optional-id plan_add_phase + plan_next_phase
-- [ ] BZ.6 - Guardrail: require uppercase-letter phase ids
-- [ ] BZ.7 - Docs: README, --help, FORMATv2
-- [ ] BZ.8 - e2e + phase exit sweep
 
 ## Backlog (not yet phased)
 

@@ -2,6 +2,8 @@
 
 any amount of markdown prose this is outside a phase
 
+Phase ids increment in the uppercase-letter sequence: A..Z → AA..AZ → BA..BZ → ... (bijective base-26, like spreadsheet columns). `claude-plan-bridge next-phase` hands out the next id, scanning this file + PLAN_ARCHIVE.md so swept ids aren't reused. Numeric ids are legacy.
+
 ## Phase AI - Phase Title *(depends on: AB)*
 Random prose or phase details. not a task unless it starts with - [ ] x.x.x.x - on a line
 

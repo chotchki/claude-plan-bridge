@@ -530,3 +530,17 @@ Source: session feedback (2026-05-30) on the dogfood bridge. Items keyed to the 
 - [x] CA.4 - Cross-checkout state story + fresh-clone flow
 - [x] CA.5 - Migrate this repo + e2e + phase exit
 
+---
+
+## 2026-06-20
+
+## Phase BZ - Auto-incrementing uppercase-letter phase ids
+- [x] BZ.1 - Bijective base-26 codec for phase ids
+- [x] BZ.2 - next_phase_id successor function
+- [x] BZ.3 - High-water-mark scan across plan + archive
+- [x] BZ.4 - next-phase CLI subcommand
+- [x] BZ.5 - MCP: optional-id plan_add_phase + plan_next_phase
+- [x] BZ.6 - Guardrail: require uppercase-letter phase ids
+- [x] BZ.7 - Docs: README, --help, FORMATv2
+- [x] BZ.8 - e2e + phase exit sweep
+

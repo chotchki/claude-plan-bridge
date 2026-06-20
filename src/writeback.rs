@@ -340,6 +340,17 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                         " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
                     ));
                 }
+                // Phase BZ.6: nudge toward the uppercase-letter sequence when a
+                // legacy numeric anchor id slips in via a numeric plan_path.
+                // Soft only — writeback never blocks, and the phase still lands.
+                if !crate::phase_seq::is_alpha_phase_id(&anchor_id) {
+                    message.push_str(&format!(
+                        "\n  NOTE: phase ids now use the uppercase-letter sequence \
+                         (A, B, ..., Z, AA, ...). `{anchor_id}` is a legacy numeric id; \
+                         run `claude-plan-bridge next-phase` (or the `plan_next_phase` MCP \
+                         tool) for the next letter id before starting a new phase."
+                    ));
+                }
             }
             // Phase BY.2: a create that landed in `## Backlog` did so because
             // no usable plan_path was found. Say so loudly and point at the
@@ -2148,6 +2159,35 @@ mod tests {
         assert!(
             json.contains("auto-created"),
             "hook output should announce the anchor: {json}"
+        );
+    }
+
+    #[test]
+    fn auto_anchor_numeric_id_emits_letter_advisory() {
+        // BZ.6: a numeric plan_path auto-creates a legacy numeric anchor. The
+        // hook output should nudge toward the uppercase-letter sequence —
+        // softly, the phase still lands.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let payload = payload_for_create("t-1", "Numeric phase task", Some("10.1"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            json.contains("legacy numeric") && json.contains("next-phase"),
+            "numeric anchor should nudge to letters: {json}"
+        );
+    }
+
+    #[test]
+    fn auto_anchor_letter_id_no_advisory() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let payload = payload_for_create("t-1", "Letter phase task", Some("CB.1"));
+        let out = writeback_create(&payload, &plan).unwrap();
+        let json = out.to_json();
+        assert!(
+            !json.contains("legacy numeric"),
+            "letter anchor must not nag: {json}"
         );
     }
 

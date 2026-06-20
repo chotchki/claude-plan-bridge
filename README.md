@@ -100,6 +100,15 @@ If neither is given, the plan resolves to `./PLAN.md`. Both are interchangeable 
 
 Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-level *phases*; for a leaf-recursive count, run `baseline`.)
 
+### `next-phase`
+
+Print the next phase id in the uppercase-letter sequence (`A`..`Z` → `AA`..`AZ` → `BA`..`BZ` → ...; bijective base-26, like spreadsheet columns), reconstructed by scanning `PLAN.md` and the sibling `PLAN_ARCHIVE.md` for the highest existing uppercase-letter phase id and incrementing it. Outputs `A` for a fresh project; legacy numeric phase ids (`1`, `42`) are ignored. Scanning the archive too means a swept id is never re-handed-out. Call it before creating a new phase so you don't hand-pick — or collide on — the next letter:
+
+```
+$ claude-plan-bridge next-phase
+CB
+```
+
 ### `writeback --event {create|update}`
 
 
@@ -254,7 +263,9 @@ Tools:
 
 - **Tasks**: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`,
   `plan_backlog`, `plan_add`, `plan_rename`
-- **Phases**: `plan_add_phase`, `plan_rename_phase`, `plan_set_phase_deps`
+- **Phases**: `plan_add_phase` (omit `id` to auto-assign the next letter id;
+  an explicit `id` must be uppercase letters), `plan_next_phase` (read-only —
+  report the next id), `plan_rename_phase`, `plan_set_phase_deps`
 - **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
   optional `descope_pending: bool` matching the CLI's `--descope-pending`)
 - **Activation focus** (Phase 40): `plan_activate(id)`, `plan_deactivate()`
@@ -342,9 +353,13 @@ Intro paragraph at the phase level — sweeps with the phase to archive.
 - AI.2 - descoped from phase `AI` on 2026-05-22
 ```
 
-- **Phases**: `## Phase <ID> - <Title>` (h2 header). The id is a bare
-  alphabetic prefix (`AI`, `AS`) or numeric (`1`); a legacy `.0` anchor
-  suffix is stripped on read (`## Phase 1.0` → phase id `1`). Title optional.
+- **Phases**: `## Phase <ID> - <Title>` (h2 header). New ids use the
+  uppercase-letter sequence — `A`..`Z` → `AA`..`AZ` → `BA`..`BZ` → ... (bijective
+  base-26, like spreadsheet columns); `claude-plan-bridge next-phase` /
+  `plan_next_phase` hand out the next one, scanning PLAN.md + PLAN_ARCHIVE.md so
+  swept ids aren't reused. Numeric ids (`1`, `42`) are **legacy** — still parsed,
+  but not generated. A legacy `.0` anchor suffix is stripped on read
+  (`## Phase 1.0` → phase id `1`). Title optional.
 - **Phase dependency markers**: `*(depends on: X, Y)*` (hard sequencing
   hint) and/or `*(prefer after: A, B)*` (soft hint). Informational only —
   reconcile surfaces them; the bridge never blocks an operation.
