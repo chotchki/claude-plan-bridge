@@ -139,12 +139,13 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
             .as_ref()
             .and_then(|m| m.plan_phase.as_deref());
 
-        let (plan, assigned_path, action, anchor_created) = match requested_path {
+        let (plan, assigned_path, action, anchor_created, backfilled_title) = match requested_path {
             Some(p) => {
                 let InsertResult {
                     plan,
                     anchor_created,
                     attached_existing,
+                    backfilled_title,
                 } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
                 // Phase BY.3: "added" is misleading when the leaf already
                 // existed and the bridge only re-linked the mapping. Say so.
@@ -153,7 +154,13 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 } else {
                     "added"
                 };
-                (plan, p, action.to_string(), anchor_created)
+                (
+                    plan,
+                    p,
+                    action.to_string(),
+                    anchor_created,
+                    backfilled_title,
+                )
             }
             None => {
                 // Phase BY.11: metadata.plan_path is absent — but the
@@ -171,6 +178,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                         let InsertResult {
                             plan,
                             anchor_created,
+                            backfilled_title,
                             ..
                         } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
                         // The description fallback only ever adopts a
@@ -180,6 +188,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                             p,
                             "attached to existing (via description)".to_string(),
                             anchor_created,
+                            backfilled_title,
                         )
                     }
                     None => {
@@ -195,7 +204,7 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                         plan.consolidate_backlog();
                         plan.append_backlog_note(&input.subject, &crate::today::today_utc());
                         let p = format!("{}{task_id}", crate::reconcile::BACKLOG_PREFIX);
-                        (plan, p, "added to Backlog".to_string(), None)
+                        (plan, p, "added to Backlog".to_string(), None, None)
                     }
                 }
             }
@@ -336,8 +345,11 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                         " (auto-created top-level phase anchor `{anchor_id}`, titled from `metadata.plan_phase`)"
                     ));
                 } else {
+                    // Phase CB: passing plan_phase on a LATER create now works —
+                    // the bridge backfills the placeholder title (first real
+                    // title wins). So the nudge is honest, not aspirational.
                     message.push_str(&format!(
-                        " (auto-created top-level phase anchor `{anchor_id}` — pass `metadata.plan_phase` on the next TaskCreate, or hand-edit PLAN.md, to give the phase a real title)"
+                        " (auto-created top-level phase anchor `{anchor_id}` with a placeholder title — pass `metadata.plan_phase` on any later TaskCreate for this phase and the bridge backfills the real title, or run `phase-rename {anchor_id} \"...\"`)"
                     ));
                 }
                 // Phase BZ.6: nudge toward the uppercase-letter sequence when a
@@ -351,6 +363,12 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                          tool) for the next letter id before starting a new phase."
                     ));
                 }
+            }
+            // Phase CB: a later create rescued a placeholder-titled phase.
+            if let Some((phase_id, title)) = &backfilled_title {
+                message.push_str(&format!(
+                    " (backfilled phase `{phase_id}` title → \"{title}\")"
+                ));
             }
             // Phase BY.2: a create that landed in `## Backlog` did so because
             // no usable plan_path was found. Say so loudly and point at the
@@ -636,6 +654,10 @@ struct InsertResult {
     plan: Plan,
     anchor_created: Option<String>,
     attached_existing: bool,
+    /// Phase CB: `Some((phase_id, new_title))` when this create backfilled a
+    /// real title onto a placeholder-titled phase (a later-arriving create in a
+    /// burst rescuing a phase the first create left blandly titled).
+    backfilled_title: Option<(String, String)>,
 }
 
 fn insert_at_path(
@@ -645,12 +667,23 @@ fn insert_at_path(
     plan_phase: Option<&str>,
 ) -> Result<InsertResult> {
     let mut plan = plan;
+    // Phase CB: reliable phase titling across TaskCreate bursts. Each create in
+    // a burst is a separate writeback invocation; only the FIRST one (which
+    // synthesizes the phase anchor) gets to set the title from its plan_phase.
+    // If that first create lacked plan_phase, the phase is stuck on the bland
+    // `Phase {id}` placeholder. So before inserting, let any create carrying a
+    // plan_phase backfill the title — order-independent, first-real-wins.
+    let backfilled_title = match plan_phase {
+        Some(title) => backfill_phase_title(&mut plan, plan_path, title),
+        None => None,
+    };
     if plan.contains_id(plan_path) {
         // Already in the plan — leave it alone, just record the mapping.
         return Ok(InsertResult {
             plan,
             anchor_created: None,
             attached_existing: true,
+            backfilled_title,
         });
     }
     let new_node = Node {
@@ -715,15 +748,49 @@ fn insert_at_path(
         plan,
         anchor_created,
         attached_existing: false,
+        backfilled_title,
     })
 }
 
 /// Title for an auto-synthesized phase anchor when the TaskCreate didn't
-/// carry `metadata.plan_phase`. The output is deliberately bland — Claude can
-/// `TaskUpdate(plan_path=N, subject=...)` later to give the phase a real
-/// title without renaming the children. `parent_id` is a bare phase id.
+/// carry `metadata.plan_phase`. The output is deliberately bland and is treated
+/// as a placeholder: a later create in the same burst that DOES carry
+/// `plan_phase` backfills the real title (see `backfill_phase_title`), or the
+/// operator can `phase-rename` / `plan_rename_phase` it explicitly. `parent_id`
+/// is a bare phase id.
 fn synthesize_anchor_title(parent_id: &str) -> String {
     format!("Phase {parent_id}")
+}
+
+/// True when `title` is exactly the bland placeholder produced by
+/// [`synthesize_anchor_title`] for `phase_id` — i.e. the phase was auto-created
+/// without a `metadata.plan_phase` and still has no real title.
+fn is_placeholder_phase_title(phase_id: &str, title: &str) -> bool {
+    title == synthesize_anchor_title(phase_id)
+}
+
+/// Phase CB: backfill a real title onto the top-level phase that owns
+/// `plan_path`, but ONLY while that phase still carries the bland
+/// `Phase {id}` placeholder. First real title wins and locks — a later create
+/// with a different `plan_phase` won't clobber an already-titled phase (use
+/// `phase-rename` for a deliberate retitle). No-ops if the phase doesn't exist
+/// yet (the auto-anchor path sets the title directly in that case).
+///
+/// Returns the `(phase_id, new_title)` when a backfill fired, for hook output.
+fn backfill_phase_title(
+    plan: &mut Plan,
+    plan_path: &str,
+    plan_phase: &str,
+) -> Option<(String, String)> {
+    // The owning top-level phase is the first dotted component (`CG.2.1` → `CG`,
+    // `CG` → `CG`).
+    let phase_id = plan_path.split('.').next().unwrap_or(plan_path);
+    let phase = plan.find_phase_mut(phase_id)?;
+    if is_placeholder_phase_title(&phase.id, &phase.title) && phase.title != plan_phase {
+        phase.title = plan_phase.to_string();
+        return Some((phase.id.clone(), plan_phase.to_string()));
+    }
+    None
 }
 
 /// Phase BY.11: recover a plan_path from a TaskCreate's `description` when
@@ -858,6 +925,111 @@ mod tests {
         assert!(
             j.contains("pass `metadata.plan_phase`"),
             "should still nag when no plan_phase: {j}"
+        );
+    }
+
+    #[test]
+    fn cb_later_create_backfills_placeholder_phase_title() {
+        // Phase CB: the title-bearing create isn't first in the burst. Create 1
+        // (no plan_phase) auto-anchors `CG` with the bland placeholder; create 2
+        // carries plan_phase and must backfill the real title.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase A - Existing\n- [ ] A.1 - x\n");
+        // Create 1: no plan_phase → placeholder title "Phase CG".
+        writeback_create(&payload_for_create("t1", "First", Some("CG.1")), &plan).unwrap();
+        let mid = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            mid.contains("## Phase CG - Phase CG"),
+            "placeholder:\n{mid}"
+        );
+        // Create 2: carries plan_phase → backfills.
+        let out = writeback_create(
+            &payload_create_with_phase("t2", "Second", "CG.2", "Burst Titling"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.contains("## Phase CG - Burst Titling"),
+            "title backfilled:\n{after}"
+        );
+        assert!(
+            out.to_json().contains("backfilled phase `CG`"),
+            "message announces backfill: {}",
+            out.to_json()
+        );
+    }
+
+    #[test]
+    fn cb_backfill_is_first_real_title_wins_and_locks() {
+        // Once a real title lands, a later create with a different plan_phase
+        // must NOT clobber it — explicit phase-rename is the retitle path.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase CG - Phase CG\n- [ ] CG.1 - x\n");
+        writeback_create(
+            &payload_create_with_phase("t1", "a", "CG.2", "Real One"),
+            &plan,
+        )
+        .unwrap();
+        writeback_create(
+            &payload_create_with_phase("t2", "b", "CG.3", "Real Two"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(after.contains("## Phase CG - Real One"), "locked:\n{after}");
+        assert!(!after.contains("Real Two"), "later title ignored:\n{after}");
+    }
+
+    #[test]
+    fn cb_backfill_targets_top_level_phase_from_deep_path() {
+        // A deep plan_path (`CG.2.1`) still backfills the OWNING top-level phase.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase CG - Phase CG\n- [ ] CG.2 - parent\n");
+        writeback_create(
+            &payload_create_with_phase("t1", "sub", "CG.2.1", "Deep Title"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.contains("## Phase CG - Deep Title"),
+            "deep path backfills top-level:\n{after}"
+        );
+    }
+
+    #[test]
+    fn cb_no_backfill_when_phase_title_already_real() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase CG - Genuine Title\n- [ ] CG.1 - x\n");
+        writeback_create(
+            &payload_create_with_phase("t1", "a", "CG.2", "Should Not Win"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.contains("## Phase CG - Genuine Title"),
+            "real title preserved:\n{after}"
+        );
+        assert!(!after.contains("Should Not Win"), "no clobber:\n{after}");
+    }
+
+    #[test]
+    fn cb_backfill_fires_on_reattach_to_existing_leaf() {
+        // The backfill runs before the contains_id early-return, so even a
+        // re-create of an EXISTING leaf (attach path) rescues the title.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase CG - Phase CG\n- [ ] CG.1 - First\n");
+        writeback_create(
+            &payload_create_with_phase("t1", "First", "CG.1", "Reattach Title"),
+            &plan,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.contains("## Phase CG - Reattach Title"),
+            "reattach backfills:\n{after}"
         );
     }
 
