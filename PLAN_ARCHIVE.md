@@ -544,3 +544,19 @@ Source: session feedback (2026-05-30) on the dogfood bridge. Items keyed to the 
 - [x] BZ.7 - Docs: README, --help, FORMATv2
 - [x] BZ.8 - e2e + phase exit sweep
 
+---
+
+## 2026-06-21
+
+## Phase CD - Self-sustaining long-term planning loop
+
+Design constraint: phases commonly run out of order, and the loop must not block or gate that. **Encourage** in-order work with soft nudges; never enforce it. Working-set focus, heartbeat, and auto-advance are all hints, not rails.
+
+- [x] CD.1 - Design spike: the self-sustaining planning loop
+- [x] CD.2 - Plan the planning-loop implementation fully
+- [x] CD.3 - Implement the planning loop
+  - [x] CD.3.1 - Phase-exit auto-advance nudge
+  - [x] CD.3.2 - Working-set focus hint
+  - [x] CD.3.3 - Status-on-change heartbeat
+- [x] CD.4 - Tests + docs + phase exit (planning loop)
+

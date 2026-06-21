@@ -1199,13 +1199,44 @@ fn run_reconcile(plan: &std::path::Path) -> Result<plan_bridge::hook::HookOutput
     let active_phase = plan_bridge::state::State::load(&state_path)
         .ok()
         .and_then(|s| s.active_phase.clone());
-    let rendered = plan_bridge::reconcile::render_deltas_focused(&deltas, active_phase.as_deref());
-    if rendered.is_empty() {
+    let mut out = plan_bridge::reconcile::render_deltas_focused(&deltas, active_phase.as_deref());
+
+    // Phase CD: append soft planning-loop nudges (auto-advance, working-set
+    // hint, status-on-change heartbeat). Computed under the state lock because
+    // they persist dedupe markers. Best-effort: any lock/state hiccup just
+    // skips the nudges and keeps the drift report. Re-parsing the plan is cheap
+    // for a per-prompt hook.
+    if let Ok(text) = std::fs::read_to_string(plan)
+        && let Ok(plan_ast) = plan_bridge::parser::parse(&text)
+    {
+        let nudges = plan_bridge::lock::with_state_lock(
+            &state_path,
+            plan_bridge::lock::DEFAULT_TIMEOUT,
+            || {
+                let mut state = plan_bridge::state::State::load(&state_path)?;
+                let before = state.clone();
+                let lines = plan_bridge::reconcile::planning_loop_context(&plan_ast, &mut state);
+                if state != before {
+                    state.save(&state_path)?;
+                }
+                Ok(lines)
+            },
+        )
+        .unwrap_or_default();
+        for n in nudges {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&n);
+        }
+    }
+
+    if out.is_empty() {
         Ok(plan_bridge::hook::HookOutput::silent())
     } else {
         Ok(plan_bridge::hook::HookOutput::context(
             "UserPromptSubmit",
-            rendered,
+            out,
         ))
     }
 }

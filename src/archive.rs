@@ -308,7 +308,9 @@ fn node_fully_done(node: &Node) -> bool {
 /// the phase's own (legacy) state checkbox is irrelevant — phases auto-tick
 /// semantically. For an *empty* phase (no children) we fall back to the
 /// legacy state: `[ ]` blocks archive, `[x]`/`[-]`/`[>]` clears it.
-fn phase_fully_done(phase: &Phase) -> bool {
+/// Reused by reconcile's planning-loop nudges (Phase CD) so "phase complete"
+/// fires exactly when `archive` would succeed.
+pub fn phase_fully_done(phase: &Phase) -> bool {
     if phase.children.is_empty() {
         return phase.is_resolved();
     }

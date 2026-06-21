@@ -239,6 +239,16 @@ claude-plan-bridge: activated phase `AS`
 `deactivate` clears the focus. Idempotent — silent no-op when nothing
 was active.
 
+### Long-term planning loop
+
+Phase CD. `reconcile` (the `UserPromptSubmit` hook) keeps long-term planning self-sustaining by appending **soft, low-noise nudges** to its output. Each is a hint — the bridge never blocks, and out-of-order work is always fine:
+
+- **Phase-exit auto-advance.** When the focused phase becomes fully resolved, a one-time line suggests the next step: `` Phase CD is complete — `claude-plan-bridge archive CD`, then `plan_activate CE`… ``. It names the next pending phase, but you can activate any phase (or none). Fires once per completion, not every prompt.
+- **Working-set focus hint.** When no phase is focused and 2+ phases still have pending work, one gentle line suggests `plan_activate <X>` to scope the TaskList to a single phase. Shows once per unfocused stretch.
+- **Status-on-change heartbeat.** A compact `active: CD (5/6 done); next: CB` line, emitted **only when the focused phase's progress changed** since the last turn (deduped via a fingerprint in state). Heads-down, no-change turns stay silent — the heartbeat re-orients you after a tick without becoming noise itself.
+
+Together with focus mode (above), this makes the harness TaskList behave as a small, current *working set* of the active phase while `PLAN.md` holds the durable backlog — so the harness's own "use task tools" / "clean up stale tasks" reminders either land next to real plan state or never have cause to fire.
+
 ### `baseline`
 
 Seed the state file with synthetic `baseline:<plan_path>` mappings for every leaf currently in `PLAN.md`. Run once when installing into a project with an existing plan. Idempotent. When Claude later `TaskCreate`s against a baselined path, the baseline mapping is silently replaced.

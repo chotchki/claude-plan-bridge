@@ -610,6 +610,117 @@ fn render_delta_block(deltas: &[&Delta], out: &mut String) {
     }
 }
 
+/// Phase CD: soft "planning-loop" nudges appended to the reconcile output to
+/// keep long-term planning self-sustaining. Every line is a hint, never a gate
+/// — out-of-order work stays allowed. Mechanisms are added across CD.3.x; this
+/// aggregates their lines and lets each persist its own dedupe marker in
+/// `state` (the caller saves state iff it changed).
+pub fn planning_loop_context(plan: &Plan, state: &mut State) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(line) = phase_complete_nudge(plan, state) {
+        lines.push(line);
+    }
+    if let Some(line) = working_set_hint(plan, state) {
+        lines.push(line);
+    }
+    if let Some(line) = heartbeat(plan, state) {
+        lines.push(line);
+    }
+    lines
+}
+
+/// CD.3.3: a compact "active: <id> (X/Y done); next: <id>" status line for the
+/// focused phase, emitted ONLY when progress changed since the last emit
+/// (deduped via `state.last_heartbeat`) — so heads-down, no-change turns stay
+/// silent and this never becomes its own noise. Complete phases are owned by
+/// [`phase_complete_nudge`], so the heartbeat suppresses itself at 100%.
+fn heartbeat(plan: &Plan, state: &mut State) -> Option<String> {
+    let active = state.active_phase.clone()?;
+    let phase = plan.phases.iter().find(|p| p.id == active)?;
+    let leaves = phase.leaves();
+    let total = leaves.len();
+    let done = leaves.iter().filter(|n| n.is_resolved()).count();
+    // 0 leaves = nothing to report; done == total = complete (auto-advance owns it).
+    if total == 0 || done == total {
+        return None;
+    }
+    let fingerprint = format!("{active}:{done}/{total}");
+    if state.last_heartbeat.as_deref() == Some(fingerprint.as_str()) {
+        return None; // unchanged since the last heartbeat
+    }
+    state.last_heartbeat = Some(fingerprint);
+    let next = plan
+        .phases
+        .iter()
+        .find(|p| p.id != active && !crate::archive::phase_fully_done(p))
+        .map(|p| p.id.as_str());
+    Some(match next {
+        Some(n) => format!("active: {active} ({done}/{total} done); next: {n}"),
+        None => format!("active: {active} ({done}/{total} done)"),
+    })
+}
+
+/// CD.3.2: when no phase is focused and 2+ phases still have pending work,
+/// gently suggest activating one to scope the task list. A hint, never a
+/// requirement — working across phases stays fine. Deduped via
+/// `state.focus_hint_announced` so it shows once per unfocused stretch.
+fn working_set_hint(plan: &Plan, state: &mut State) -> Option<String> {
+    let pending: Vec<&str> = plan
+        .phases
+        .iter()
+        .filter(|p| !crate::archive::phase_fully_done(p))
+        .map(|p| p.id.as_str())
+        .collect();
+    let condition = state.active_phase.is_none() && pending.len() >= 2;
+    if !condition {
+        state.focus_hint_announced = false; // re-arm for the next unfocused stretch
+        return None;
+    }
+    if state.focus_hint_announced {
+        return None;
+    }
+    state.focus_hint_announced = true;
+    Some(format!(
+        "{} phases have pending work and none is focused — `plan_activate {}` to scope \
+         the task list to one phase (optional; you can work across phases too).",
+        pending.len(),
+        pending[0],
+    ))
+}
+
+/// CD.3.1: when the active phase has just become fully resolved, return a
+/// one-time nudge to archive it and pick up the next pending phase. Suggests a
+/// next phase but never requires it. Edge-triggered + deduped via
+/// `state.announced_complete` so it fires once per completion, not every prompt.
+fn phase_complete_nudge(plan: &Plan, state: &mut State) -> Option<String> {
+    let active = state.active_phase.clone()?;
+    let phase = plan.phases.iter().find(|p| p.id == active)?;
+    if !crate::archive::phase_fully_done(phase) {
+        // Not (or no longer) complete — reset so a later re-completion nudges.
+        state.announced_complete.remove(&active);
+        return None;
+    }
+    if !state.announced_complete.insert(active.clone()) {
+        // Already nudged for this completion.
+        return None;
+    }
+    let next = plan
+        .phases
+        .iter()
+        .find(|p| p.id != active && !crate::archive::phase_fully_done(p))
+        .map(|p| p.id.as_str());
+    Some(match next {
+        Some(n) => format!(
+            "Phase {active} is complete — `claude-plan-bridge archive {active}`, then \
+             `plan_activate {n}` to pick up the next phase (or activate any other — order is yours)."
+        ),
+        None => format!(
+            "Phase {active} is complete — `claude-plan-bridge archive {active}`. \
+             No other phases have pending work."
+        ),
+    })
+}
+
 fn collect_leaves<'a>(plan: &'a Plan, out: &mut Vec<&'a Node>) {
     for phase in &plan.phases {
         // Phases themselves are not leaves in the task sense — recurse into
@@ -1599,5 +1710,197 @@ mod tests {
             "BaselineOnly is cross-cutting, no active header: {r}"
         );
         assert!(r.contains("Other phases"));
+    }
+
+    // ---- Phase CD.3.1: phase-exit auto-advance nudge ----
+
+    fn active_state(phase: &str) -> State {
+        State {
+            active_phase: Some(phase.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_advance_nudges_when_active_phase_complete() {
+        let plan = parse(
+            "## Phase CB - One\n- [x] CB.1 - a\n- [x] CB.2 - b\n## Phase CC - Two\n- [ ] CC.1 - c\n",
+        )
+        .unwrap();
+        let mut state = active_state("CB");
+        let lines = planning_loop_context(&plan, &mut state);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("Phase CB is complete"), "{}", lines[0]);
+        assert!(lines[0].contains("archive CB"), "{}", lines[0]);
+        assert!(lines[0].contains("plan_activate CC"), "{}", lines[0]);
+        assert!(state.announced_complete.contains("CB"));
+        // Dedupe: a second pass is silent (the completion was already announced).
+        assert!(planning_loop_context(&plan, &mut state).is_empty());
+    }
+
+    #[test]
+    fn auto_advance_silent_when_active_phase_incomplete() {
+        // Test the mechanism in isolation — the aggregate also carries the
+        // heartbeat for an in-progress phase, a separate concern.
+        let plan = parse("## Phase CB - One\n- [x] CB.1 - a\n- [ ] CB.2 - b\n").unwrap();
+        let mut state = active_state("CB");
+        assert!(phase_complete_nudge(&plan, &mut state).is_none());
+        assert!(!state.announced_complete.contains("CB"));
+    }
+
+    #[test]
+    fn auto_advance_silent_when_no_active_phase() {
+        let plan = parse("## Phase CB - One\n- [x] CB.1 - a\n").unwrap();
+        let mut state = State::default();
+        assert!(planning_loop_context(&plan, &mut state).is_empty());
+    }
+
+    #[test]
+    fn auto_advance_reports_no_pending_when_everything_done() {
+        let plan = parse("## Phase CB - One\n- [x] CB.1 - a\n## Phase CC - Two\n- [x] CC.1 - c\n")
+            .unwrap();
+        let mut state = active_state("CB");
+        let lines = planning_loop_context(&plan, &mut state);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("No other phases"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn auto_advance_is_edge_triggered() {
+        let done = parse("## Phase CB - One\n- [x] CB.1 - a\n## Phase CC - Two\n- [ ] CC.1 - c\n")
+            .unwrap();
+        let undone =
+            parse("## Phase CB - One\n- [ ] CB.1 - a\n## Phase CC - Two\n- [ ] CC.1 - c\n")
+                .unwrap();
+        let mut state = active_state("CB");
+        assert!(
+            phase_complete_nudge(&done, &mut state).is_some(),
+            "first completion nudges"
+        );
+        assert!(phase_complete_nudge(&done, &mut state).is_none(), "deduped");
+        assert!(
+            phase_complete_nudge(&undone, &mut state).is_none(),
+            "uncompleting is silent and resets the marker"
+        );
+        assert!(!state.announced_complete.contains("CB"));
+        assert!(
+            phase_complete_nudge(&done, &mut state).is_some(),
+            "re-completion nudges again"
+        );
+    }
+
+    // ---- Phase CD.3.2: working-set focus hint ----
+
+    #[test]
+    fn focus_hint_fires_when_unfocused_with_multiple_pending() {
+        let plan = parse("## Phase CB - One\n- [ ] CB.1 - a\n## Phase CC - Two\n- [ ] CC.1 - c\n")
+            .unwrap();
+        let mut state = State::default();
+        let lines = planning_loop_context(&plan, &mut state);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("plan_activate CB"), "{}", lines[0]);
+        assert!(state.focus_hint_announced);
+        assert!(
+            planning_loop_context(&plan, &mut state).is_empty(),
+            "deduped on the next pass"
+        );
+    }
+
+    #[test]
+    fn focus_hint_silent_with_single_pending_phase() {
+        let plan = parse("## Phase CB - One\n- [ ] CB.1 - a\n").unwrap();
+        let mut state = State::default();
+        assert!(planning_loop_context(&plan, &mut state).is_empty());
+        assert!(!state.focus_hint_announced);
+    }
+
+    #[test]
+    fn focus_hint_silent_when_a_phase_is_active() {
+        let plan = parse("## Phase CB - One\n- [ ] CB.1 - a\n## Phase CC - Two\n- [ ] CC.1 - c\n")
+            .unwrap();
+        let mut state = active_state("CB");
+        assert!(working_set_hint(&plan, &mut state).is_none());
+        assert!(!state.focus_hint_announced);
+    }
+
+    #[test]
+    fn focus_hint_rearms_after_focusing() {
+        let plan = parse("## Phase CB - One\n- [ ] CB.1 - a\n## Phase CC - Two\n- [ ] CC.1 - c\n")
+            .unwrap();
+        let mut state = State::default();
+        assert!(working_set_hint(&plan, &mut state).is_some(), "first hint");
+        assert!(working_set_hint(&plan, &mut state).is_none(), "deduped");
+        // Focus a phase: the hint condition breaks, re-arming the flag.
+        state.active_phase = Some("CB".to_string());
+        assert!(working_set_hint(&plan, &mut state).is_none());
+        assert!(!state.focus_hint_announced, "re-armed while focused");
+        // Deactivate: the hint fires again.
+        state.active_phase = None;
+        assert!(
+            working_set_hint(&plan, &mut state).is_some(),
+            "re-hints once unfocused"
+        );
+    }
+
+    // ---- Phase CD.3.3: status-on-change heartbeat ----
+
+    #[test]
+    fn heartbeat_fires_on_progress_then_dedupes() {
+        let plan = parse(
+            "## Phase CB - One\n- [x] CB.1 - a\n- [ ] CB.2 - b\n- [ ] CB.3 - c\n\
+             ## Phase CC - Two\n- [ ] CC.1 - d\n",
+        )
+        .unwrap();
+        let mut state = active_state("CB");
+        let lines = planning_loop_context(&plan, &mut state);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0], "active: CB (1/3 done); next: CC");
+        assert_eq!(state.last_heartbeat.as_deref(), Some("CB:1/3"));
+        assert!(
+            planning_loop_context(&plan, &mut state).is_empty(),
+            "unchanged progress stays silent"
+        );
+    }
+
+    #[test]
+    fn heartbeat_refires_when_progress_changes() {
+        let p1 =
+            parse("## Phase CB - One\n- [x] CB.1 - a\n- [ ] CB.2 - b\n- [ ] CB.3 - c\n").unwrap();
+        let p2 =
+            parse("## Phase CB - One\n- [x] CB.1 - a\n- [x] CB.2 - b\n- [ ] CB.3 - c\n").unwrap();
+        let mut state = active_state("CB");
+        assert_eq!(
+            planning_loop_context(&p1, &mut state)[0],
+            "active: CB (1/3 done)"
+        );
+        assert!(planning_loop_context(&p1, &mut state).is_empty());
+        assert_eq!(
+            planning_loop_context(&p2, &mut state)[0],
+            "active: CB (2/3 done)",
+            "a tick re-fires the heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeat_silent_when_phase_complete() {
+        // A complete active phase belongs to the auto-advance nudge; the
+        // heartbeat stays quiet and does not fingerprint a 100% phase.
+        let plan = parse(
+            "## Phase CB - One\n- [x] CB.1 - a\n- [x] CB.2 - b\n## Phase CC - Two\n- [ ] CC.1 - d\n",
+        )
+        .unwrap();
+        let mut state = active_state("CB");
+        let lines = planning_loop_context(&plan, &mut state);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("Phase CB is complete"), "{}", lines[0]);
+        assert!(state.last_heartbeat.is_none());
+    }
+
+    #[test]
+    fn heartbeat_silent_when_no_active_phase() {
+        let plan = parse("## Phase CB - One\n- [ ] CB.1 - a\n").unwrap();
+        let mut state = State::default();
+        assert!(planning_loop_context(&plan, &mut state).is_empty());
+        assert!(state.last_heartbeat.is_none());
     }
 }

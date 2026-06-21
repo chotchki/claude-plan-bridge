@@ -33,6 +33,24 @@ pub struct State {
     /// behavior — all open leaves load, no scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_phase: Option<String>,
+    /// Phase CD.3.1: phase ids the reconcile hook has already nudged about as
+    /// "complete — archive + activate next". Dedupes the auto-advance nudge so
+    /// it fires once per completion, not every prompt while the finished phase
+    /// sits unarchived. Edge-triggered: a phase is removed from the set if it
+    /// stops being fully resolved (so a later re-completion nudges again).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub announced_complete: BTreeSet<String>,
+    /// Phase CD.3.2: dedupe flag for the working-set focus hint. Set when the
+    /// hint fires (no active phase + multiple pending phases), re-armed (false)
+    /// whenever that condition no longer holds — so the gentle "focus a phase"
+    /// nudge shows once per stretch of unfocused work, not every prompt.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub focus_hint_announced: bool,
+    /// Phase CD.3.3: fingerprint ("<phase>:<done>/<total>") of the last
+    /// heartbeat status line emitted, so it only re-fires when active-phase
+    /// progress actually changed — heads-down, no-change turns stay silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<String>,
     /// Phase BY.11: opt-in raw hook-payload capture. When `true`, the
     /// writeback hook appends each verbatim stdin payload to a sibling
     /// `plan-bridge-debug.jsonl` so an operator can confirm exactly what the
@@ -60,6 +78,9 @@ impl Default for State {
             pending_rehydration: BTreeSet::new(),
             rehydration_announced: 0,
             active_phase: None,
+            announced_complete: BTreeSet::new(),
+            focus_hint_announced: false,
+            last_heartbeat: None,
             debug: false,
         }
     }
