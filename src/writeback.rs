@@ -169,24 +169,30 @@ pub fn writeback_create(payload: &HookPayload, plan_path: &Path) -> Result<HookO
                 // hook payload, or a TaskCreate whose deferred schema wasn't
                 // loaded (so `metadata` degraded to a string and was dropped
                 // client-side), still carries the id there. Recover it before
-                // falling to Backlog. Conservative: only adopts a dotted,
-                // well-formed id that ALREADY exists in PLAN.md, so prose
-                // descriptions (spaces fail the grammar) and brand-new ids
-                // never auto-create a leaf — those still land in Backlog.
+                // falling to Backlog. Guarded: a dotted, well-formed id that
+                // already exists (re-link) OR whose parent exists (Phase CC:
+                // insert the new leaf under a real parent). Prose descriptions
+                // (spaces fail the grammar) and ids with no real parent still
+                // land in Backlog.
                 match plan_path_from_description(&input.description, &parsed) {
                     Some(p) => {
                         let InsertResult {
                             plan,
                             anchor_created,
+                            attached_existing,
                             backfilled_title,
-                            ..
                         } = insert_at_path(parsed, &p, &input.subject, plan_phase_hint)?;
-                        // The description fallback only ever adopts a
-                        // pre-existing id, so this is always an attach.
+                        // Phase CC: distinguish re-linking an existing leaf from
+                        // inserting a brand-new one recovered from description.
+                        let action = if attached_existing {
+                            "attached to existing (via description)"
+                        } else {
+                            "added (plan_path recovered from description)"
+                        };
                         (
                             plan,
                             p,
-                            "attached to existing (via description)".to_string(),
+                            action.to_string(),
                             anchor_created,
                             backfilled_title,
                         )
@@ -793,27 +799,33 @@ fn backfill_phase_title(
     None
 }
 
-/// Phase BY.11: recover a plan_path from a TaskCreate's `description` when
+/// Phase BY.11 / CC: recover a plan_path from a TaskCreate's `description` when
 /// `metadata.plan_path` is absent. The SessionStart resume prompt writes the
-/// plan_path into `description` as well as `metadata`, so this rescues
-/// rehydration-burst creates against the two ways metadata goes missing:
-/// a harness that strips `metadata` from the hook payload, or a TaskCreate
-/// whose deferred schema wasn't loaded (metadata serializes as a string and is
-/// dropped client-side — the dominant cause of "my creates keep landing in
-/// Backlog").
+/// plan_path into `description` as well as `metadata`, and the global
+/// convention mirrors the id there, so this rescues creates whose metadata went
+/// missing (a harness that strips `metadata`, or a deferred-schema TaskCreate
+/// whose `metadata` was dropped client-side — the dominant cause of "my creates
+/// keep landing in Backlog").
 ///
-/// Deliberately strict to avoid false matches: the trimmed description must be
-/// a well-formed dotted id (so prose with spaces, and bare phase ids like
-/// `BY`, never qualify) AND must already name a node in PLAN.md. Adopting only
-/// pre-existing ids means a genuinely-new leaf whose metadata was lost still
-/// falls through to Backlog rather than fabricating a phantom leaf from an
-/// arbitrary description.
+/// Guard against false matches: the trimmed description must be a well-formed
+/// dotted id (so prose with spaces, and bare phase ids like `BY`, never
+/// qualify). Beyond that, two cases qualify:
+///   - the id ALREADY names a node in PLAN.md (re-link an existing leaf), or
+///   - the id is new but its PARENT already exists (Phase CC: insert the new
+///     leaf under a real parent). The parent-exists guard is what keeps a
+///     coincidental dotted-id description from fabricating a phantom leaf, and
+///     it deliberately stops short of synthesizing a whole phase — that
+///     aggressive move stays reserved for a real `metadata.plan_path`.
 fn plan_path_from_description(description: &str, plan: &Plan) -> Option<String> {
     let candidate = description.trim();
-    if crate::ast::is_valid_plan_id(candidate)
-        && candidate.contains('.')
-        && plan.contains_id(candidate)
-    {
+    if !crate::ast::is_valid_plan_id(candidate) || !candidate.contains('.') {
+        return None;
+    }
+    let exists = plan.contains_id(candidate);
+    let parent_exists = parent_id_for(candidate)
+        .map(|p| plan.contains_id(&p))
+        .unwrap_or(false);
+    if exists || parent_exists {
         Some(candidate.to_string())
     } else {
         None
@@ -1285,9 +1297,9 @@ mod tests {
 
     #[test]
     fn no_metadata_nonexistent_id_description_lands_in_backlog_not_phantom_leaf() {
-        // BY.11 guard: a well-formed dotted id that ISN'T in PLAN.md must not
-        // fabricate a leaf — it falls through to Backlog. Only pre-existing
-        // ids are adopted, which is exactly the rehydration case.
+        // CC guard: a well-formed dotted id whose PARENT also isn't in PLAN.md
+        // must not fabricate a leaf — it falls through to Backlog. Here `9.9`'s
+        // parent `9` doesn't exist, so the parent-exists guard refuses.
         let dir = scratch_dir();
         let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_create_desc("t-x", "New thing", "9.9", None);
@@ -1301,6 +1313,114 @@ mod tests {
         assert!(
             !contents.contains("9.9"),
             "phantom leaf created:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn cc_recovers_new_leaf_from_description_when_parent_exists() {
+        // Phase CC: metadata dropped, but `description` is a NEW dotted id whose
+        // parent phase exists. The bridge inserts the new leaf under that parent
+        // instead of dropping it into Backlog (the dominant new-task failure).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 - Task\n");
+        let payload = payload_create_desc("t-new", "Second task", "1.2", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("recovered from description"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.2 - Second task"),
+            "got:\n{contents}"
+        );
+        assert!(!contents.contains("## Backlog"), "got:\n{contents}");
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-new"), Some("1.2"));
+    }
+
+    #[test]
+    fn cc_description_recovery_never_synthesizes_a_phase() {
+        // The parent-exists guard stops short of phase synthesis: a bare phase
+        // id (`CG`) from description has no parent to anchor under, so it stays
+        // in Backlog rather than fabricating `## Phase CG`.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 - Task\n");
+        // `CG` is a bare phase id (no dot) — fails the dotted-id guard outright,
+        // and even a dotted `CG.1` would refuse since parent `CG` is absent.
+        let payload = payload_create_desc("t-cg", "loose", "CG.1", None);
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added to Backlog"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            !contents.contains("## Phase CG"),
+            "synthesized a phase:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn cc_string_metadata_is_recovered_not_hard_failed() {
+        // Phase CC: a deferred-schema TaskCreate can ship `metadata` as a JSON
+        // STRING. The tolerant deserializer recovers plan_path (and plan_phase)
+        // from it instead of hard-failing the whole create.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 - Task\n");
+        let payload = HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskCreate".to_string(),
+            tool_input: serde_json::json!({
+                "subject": "strmeta task",
+                "description": "x",
+                "metadata": "{\"plan_path\":\"1.2\",\"plan_phase\":\"Phase One\"}",
+            }),
+            tool_response: serde_json::json!({"id": "t-str"}),
+            source: String::new(),
+        };
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added `strmeta task` at 1.2"),
+            "{}",
+            out.to_json()
+        );
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.2 - strmeta task"),
+            "got:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn cc_garbage_string_metadata_degrades_to_backlog_no_error() {
+        // A non-JSON garbage `metadata` string must NOT error the create — it
+        // degrades to None and falls through (here: Backlog, since description
+        // is prose).
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 - Task\n");
+        let payload = HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskCreate".to_string(),
+            tool_input: serde_json::json!({
+                "subject": "garbage meta",
+                "description": "loose prose",
+                "metadata": "not json at all",
+            }),
+            tool_response: serde_json::json!({"id": "t-g"}),
+            source: String::new(),
+        };
+        let out = writeback_create(&payload, &plan).unwrap();
+        assert!(
+            out.to_json().contains("added to Backlog"),
+            "{}",
+            out.to_json()
         );
     }
 

@@ -30,8 +30,39 @@ pub struct TaskCreateInput {
     pub subject: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
+    // Phase CC: `metadata` is deserialized tolerantly. A deferred-schema
+    // TaskCreate can ship `metadata` as a JSON *string* instead of an object
+    // (`"{\"plan_path\":\"X.1\"}"`); a strict `Option<TaskMetadata>` would
+    // hard-fail the whole `from_value`, losing the create entirely. The
+    // tolerant path recovers the object from the string form and degrades any
+    // other shape to `None` rather than erroring.
+    #[serde(default, deserialize_with = "de_tolerant_metadata")]
     pub metadata: Option<TaskMetadata>,
+}
+
+/// Accept `metadata` as an object, a JSON string encoding that object, or
+/// anything else (null / wrong type) → `None`. Never errors — a malformed
+/// `metadata` must not torpedo the create; the caller falls through to the
+/// description-recovery / Backlog path instead.
+fn de_tolerant_metadata<'de, D>(deserializer: D) -> Result<Option<TaskMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(metadata_from_value(&value))
+}
+
+fn metadata_from_value(value: &serde_json::Value) -> Option<TaskMetadata> {
+    match value {
+        serde_json::Value::Object(_) => serde_json::from_value(value.clone()).ok(),
+        // Degraded form: a JSON string encoding the metadata object. Parse it,
+        // then accept only if it decodes to an object.
+        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .and_then(|v| serde_json::from_value(v).ok()),
+        _ => None,
+    }
 }
 
 /// Typed view of `TaskUpdate`'s `tool_input`. Status strings match the
@@ -247,6 +278,43 @@ mod tests {
         let meta = input.metadata.unwrap();
         assert_eq!(meta.plan_path.as_deref(), Some("1.1.1"));
         assert_eq!(meta.plan_phase.as_deref(), Some("Phase 1"));
+    }
+
+    #[test]
+    fn cc_metadata_tolerates_string_object_garbage_and_absent() {
+        // Phase CC: the metadata field must survive every degraded shape a
+        // deferred-schema client might send, without ever erroring the parse.
+        let de = |ti: serde_json::Value| -> TaskCreateInput {
+            serde_json::from_value(ti).expect("tool_input parse must not fail")
+        };
+
+        // Object — the happy path.
+        let obj = de(serde_json::json!({
+            "subject": "s", "metadata": {"plan_path": "X.1", "plan_phase": "P"}
+        }));
+        assert_eq!(obj.metadata.unwrap().plan_path.as_deref(), Some("X.1"));
+
+        // JSON string encoding the object — recovered, not hard-failed.
+        let s = de(serde_json::json!({
+            "subject": "s", "metadata": "{\"plan_path\":\"X.2\",\"plan_phase\":\"P\"}"
+        }));
+        let m = s.metadata.expect("string metadata recovered");
+        assert_eq!(m.plan_path.as_deref(), Some("X.2"));
+        assert_eq!(m.plan_phase.as_deref(), Some("P"));
+
+        // Garbage string → None (degrade, don't error).
+        assert!(
+            de(serde_json::json!({"subject": "s", "metadata": "not json"}))
+                .metadata
+                .is_none()
+        );
+        // Null and absent → None.
+        assert!(
+            de(serde_json::json!({"subject": "s", "metadata": null}))
+                .metadata
+                .is_none()
+        );
+        assert!(de(serde_json::json!({"subject": "s"})).metadata.is_none());
     }
 
     #[test]
