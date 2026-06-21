@@ -3,11 +3,6 @@
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
-## Phase CB - Reliable phase titling on TaskCreate bursts
-- [x] CB.1 - Design spike: reliable phase titling under TaskCreate bursts
-- [x] CB.2 - Plan the titling fix fully
-- [x] CB.3 - Implement reliable phase titling
-- [x] CB.4 - Tests + docs + phase exit (titling)
 ## Phase CC - Harden the metadata.plan_path deferred-schema path
 - [ ] CC.1 - Design spike: harden the metadata.plan_path / deferred-schema path
 - [ ] CC.2 - Plan the deferred-schema hardening fully

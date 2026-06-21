@@ -594,3 +594,13 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CF.4 - Review
 - [x] CF.5 - Release (bump + tag + push)
 
+---
+
+## 2026-06-21
+
+## Phase CB - Reliable phase titling on TaskCreate bursts
+- [x] CB.1 - Design spike: reliable phase titling under TaskCreate bursts
+- [x] CB.2 - Plan the titling fix fully
+- [x] CB.3 - Implement reliable phase titling
+- [x] CB.4 - Tests + docs + phase exit (titling)
+
