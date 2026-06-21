@@ -13,6 +13,14 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 - [ ] CC.2 - Plan the deferred-schema hardening fully
 - [ ] CC.3 - Implement deferred-schema hardening
 - [ ] CC.4 - Tests + docs + phase exit (deferred-schema)
+## Phase CE - Phase templates: standard phase creation
+
+Direction (agreed 2026-06-20): a **built-in default** phase template (standard beats: spike → breakdown → implement → tests → docs → review → release → exit), with an **optional** `PHASE_TEMPLATE.md` per-project file to customize/override it. Templates scaffold, never gate — prune/extend per phase. The non-code **review** and **release** gates are the real memory-load win; include them as reminder tasks. Composes with `next-phase` (auto-id) + the loop (auto-activate on create; auto-advance → "ready for review/release" on exit).
+
+- [ ] CE.1 - Design spike: phase template shape
+- [ ] CE.2 - Plan the template implementation fully
+- [ ] CE.3 - Implement phase templates
+- [ ] CE.4 - Tests + docs + phase exit (templates)
 
 ## Backlog (not yet phased)
 
