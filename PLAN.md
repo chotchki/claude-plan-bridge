@@ -13,6 +13,16 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 - [ ] CC.2 - Plan the deferred-schema hardening fully
 - [ ] CC.3 - Implement deferred-schema hardening
 - [ ] CC.4 - Tests + docs + phase exit (deferred-schema)
+## Phase CF - Drop legacy v1 format support (v2-only)
+- [x] CF.1 - Plan & breakdown
+- [ ] CF.2 - Implement
+  - [ ] CF.2.1 - Remove canonicalize + standardize_to_canonical
+  - [ ] CF.2.2 - Parser: v2-only structure (drop v1 anchors and headers)
+  - [ ] CF.2.3 - Drop v1 cosmetics (bold + em-dash + .0)
+  - [ ] CF.2.4 - Prune dead v1 tests and fixtures
+- [ ] CF.3 - Tests + docs
+- [ ] CF.4 - Review
+- [ ] CF.5 - Release (bump + tag + push)
 
 ## Backlog (not yet phased)
 
