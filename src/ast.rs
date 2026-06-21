@@ -411,6 +411,79 @@ pub fn is_backlog_heading(line: &str) -> bool {
     trimmed.starts_with("# Backlog") || trimmed.starts_with("## Backlog")
 }
 
+/// Phase CG: one grouped backlog item — a top-level bullet plus everything
+/// beneath it up to the next top-level bullet. `start`/`len` index into
+/// `Plan::backlog` so a promote can drain the exact source lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogEntry {
+    /// The promotion-ready title: the top bullet's text, cleaned of `**`/`~~`
+    /// and (if present) split off from a ` — ` detail tail or a `**bold**` lead.
+    pub headline: String,
+    /// The remaining stanza: any text after the headline on the top line, plus
+    /// every sub-bullet / prose / blank line beneath it (verbatim).
+    pub detail: Vec<String>,
+    /// Index of the top bullet line in `Plan::backlog`.
+    pub start: usize,
+    /// Number of raw lines this entry spans.
+    pub len: usize,
+}
+
+/// A backlog entry boundary: a `- ` bullet at column 0 (no leading whitespace).
+fn is_top_level_bullet(line: &str) -> bool {
+    line.starts_with("- ")
+}
+
+/// Split a top-level backlog bullet into (headline, first-line detail). Handles
+/// the two shapes the bridge writes (`- **Title** — meta` and `- Title — meta`)
+/// plus a plain `- Title`. `**`/`~~` wrappers are stripped from the headline.
+fn split_headline(top_line: &str) -> (String, String) {
+    let body = top_line.strip_prefix("- ").unwrap_or(top_line).trim();
+    // `**Headline** rest` — the bold span is the headline, the remainder detail.
+    if let Some(after_open) = body.strip_prefix("**")
+        && let Some(close) = after_open.find("**")
+    {
+        let headline = clean_headline(&after_open[..close]);
+        let rest = after_open[close + 2..]
+            .trim()
+            .trim_start_matches('—')
+            .trim_start_matches('-')
+            .trim()
+            .to_string();
+        return (headline, rest);
+    }
+    // `Headline — detail` (em-dash separator the bridge uses for notes).
+    if let Some((h, rest)) = body.split_once(" — ") {
+        return (clean_headline(h), rest.trim().to_string());
+    }
+    (clean_headline(body), String::new())
+}
+
+/// Strip `**`/`~~` markdown decoration (anywhere in the string) and surrounding
+/// whitespace from a headline so it reads as a clean phase title.
+fn clean_headline(s: &str) -> String {
+    s.replace("**", "").replace("~~", "").trim().to_string()
+}
+
+/// Convert a raw backlog detail line into a phase-level annotation, preserving
+/// indent. Bullets stay bullets, blanks stay blanks, everything else is text.
+fn line_to_annotation(line: &str) -> Annotation {
+    let indent = line.len() - line.trim_start().len();
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        Annotation::Blank { count: 1 }
+    } else if let Some(rest) = trimmed.strip_prefix("- ") {
+        Annotation::Bullet {
+            text: rest.to_string(),
+            indent,
+        }
+    } else {
+        Annotation::Text {
+            text: trimmed.to_string(),
+            indent,
+        }
+    }
+}
+
 impl Plan {
     /// Every leaf across all phases, returned as a uniform Phase-or-Node view.
     /// A *phase* qualifies as a leaf only in the degenerate case where it has
@@ -691,6 +764,83 @@ impl Plan {
         } else {
             false
         }
+    }
+
+    /// Phase CG: group the raw `backlog` lines into entries. The unit is a
+    /// **top-level bullet** (`- ` at column 0); an entry is that bullet plus
+    /// every following line (sub-bullets, indented prose, blanks) up to — but
+    /// not including — the next top-level bullet. Lines before the first
+    /// top-level bullet (stray preamble prose) are skipped. Tolerant by design:
+    /// no on-disk format is enforced, so a hand-edited backlog still groups.
+    pub fn backlog_entries(&self) -> Vec<BacklogEntry> {
+        let mut entries = Vec::new();
+        let mut i = 0;
+        while i < self.backlog.len() {
+            if !is_top_level_bullet(&self.backlog[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let (headline, first_detail) = split_headline(&self.backlog[i]);
+            let mut detail: Vec<String> = Vec::new();
+            if !first_detail.is_empty() {
+                detail.push(first_detail);
+            }
+            let mut j = i + 1;
+            while j < self.backlog.len() && !is_top_level_bullet(&self.backlog[j]) {
+                detail.push(self.backlog[j].clone());
+                j += 1;
+            }
+            entries.push(BacklogEntry {
+                headline,
+                detail,
+                start,
+                len: j - start,
+            });
+            i = j;
+        }
+        entries
+    }
+
+    /// Phase CG: promote the `index`-th (1-based) backlog entry into a new
+    /// top-level phase. The entry's headline becomes the phase title (overridable
+    /// via `title`); the rest of the stanza becomes phase-level prose (NOT
+    /// tasks — break it down separately). The promoted lines are removed from
+    /// `backlog` and the new phase is inserted in id-sort order. Returns the
+    /// phase title used. Errors when `index` is out of range.
+    pub fn promote_backlog_entry(
+        &mut self,
+        index: usize,
+        title: Option<&str>,
+        new_id: &str,
+    ) -> Result<String, String> {
+        let entries = self.backlog_entries();
+        let n = entries.len();
+        let entry = index
+            .checked_sub(1)
+            .and_then(|zero| entries.get(zero))
+            .ok_or_else(|| {
+                if n == 0 {
+                    "no backlog entries to promote".to_string()
+                } else {
+                    format!("backlog entry {index} out of range (1..={n})")
+                }
+            })?;
+
+        let phase_title = title
+            .map(str::to_string)
+            .unwrap_or_else(|| entry.headline.clone());
+        let (start, len) = (entry.start, entry.len);
+        let annotations: Vec<Annotation> =
+            entry.detail.iter().map(|l| line_to_annotation(l)).collect();
+
+        let mut phase = Phase::header_v2(new_id, phase_title.clone());
+        phase.annotations = annotations;
+
+        // Remove the promoted stanza from the backlog, then insert the phase.
+        self.backlog.drain(start..start + len);
+        self.insert_phase(phase);
+        Ok(phase_title)
     }
 
     /// Sweep every `## Backlog (not yet phased)` block out of the preamble AND
@@ -1543,5 +1693,66 @@ mod tests {
             plan.breakdown("CE.1", &["".to_string(), "  ".to_string()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cg_backlog_entries_group_by_top_level_bullet() {
+        let plan = parse_for_test(
+            "## Phase A - x\n- [ ] A.1 - t\n\n# Backlog (not yet phased)\n\n- **Auth** — rotate keys\n  - login flow\n  - admin panel\n- **Drop fs4** — std lock\n",
+        );
+        let entries = plan.backlog_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].headline, "Auth");
+        assert_eq!(
+            entries[0].detail,
+            vec!["rotate keys", "  - login flow", "  - admin panel"]
+        );
+        assert_eq!(entries[1].headline, "Drop fs4");
+        assert_eq!(entries[1].detail, vec!["std lock"]);
+    }
+
+    #[test]
+    fn cg_split_headline_variants() {
+        let plan = parse_for_test(
+            "## Phase A - x\n\n# Backlog (not yet phased)\n\n- **Bold lead** — detail tail\n- Plain headline — em dash detail\n- Just a plain bullet\n",
+        );
+        let e = plan.backlog_entries();
+        assert_eq!(e[0].headline, "Bold lead");
+        assert_eq!(e[0].detail, vec!["detail tail"]);
+        assert_eq!(e[1].headline, "Plain headline");
+        assert_eq!(e[1].detail, vec!["em dash detail"]);
+        assert_eq!(e[2].headline, "Just a plain bullet");
+        assert!(e[2].detail.is_empty());
+    }
+
+    #[test]
+    fn cg_promote_builds_phase_with_prose_and_removes_entry() {
+        let mut plan = parse_for_test(
+            "## Phase A - x\n- [ ] A.1 - t\n\n# Backlog (not yet phased)\n\n- **Auth** — rotate keys\n  - login flow\n- **Drop fs4** — std lock\n",
+        );
+        let title = plan.promote_backlog_entry(1, None, "B").unwrap();
+        assert_eq!(title, "Auth");
+        let b = plan.find_phase("B").expect("phase B exists");
+        assert_eq!(b.title, "Auth");
+        // Detail became phase-level prose, NOT tasks.
+        assert!(b.children.is_empty(), "should have no tasks");
+        assert!(!b.annotations.is_empty(), "detail became annotations");
+        // The promoted entry is gone; only the fs4 entry remains.
+        let left = plan.backlog_entries();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].headline, "Drop fs4");
+    }
+
+    #[test]
+    fn cg_promote_title_override_and_out_of_range() {
+        let mut plan =
+            parse_for_test("## Phase A - x\n\n# Backlog (not yet phased)\n\n- **Auth** — keys\n");
+        assert!(plan.clone().promote_backlog_entry(2, None, "B").is_err());
+        assert!(plan.clone().promote_backlog_entry(0, None, "B").is_err());
+        let title = plan
+            .promote_backlog_entry(1, Some("Custom Title"), "B")
+            .unwrap();
+        assert_eq!(title, "Custom Title");
+        assert_eq!(plan.find_phase("B").unwrap().title, "Custom Title");
     }
 }

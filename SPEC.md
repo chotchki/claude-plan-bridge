@@ -273,6 +273,7 @@ plan-bridge status                                        # health check
 plan-bridge phase-add <ID> [TITLE] [--depends-on X,Y] [--prefer-after A,B] [--after <ID>]
 plan-bridge phase-rename <ID> <new-title>
 plan-bridge phase-deps <ID> [--depends-on X,Y] [--prefer-after A,B]
+plan-bridge promote [<index>] [--title T] [--activate]    # backlog entry → new phase (CG)
 plan-bridge activate <PHASE>                              # focus mode (40.2)
 plan-bridge deactivate                                    # clear focus
 ```
@@ -300,6 +301,19 @@ All project-scoped commands accept `--cwd <PATH>` (project root) and
 - `phase-rename` rewrites a phase title. Refuses task ids loudly.
 - `phase-deps` replaces `depends_on` / `prefer_after` lists on a phase.
   Either field is independently settable; empty array clears.
+
+### Backlog → phase promotion (Phase CG)
+
+- `promote` (no index) lists backlog **entries** so the operator can pick
+  one. An entry is a top-level `- ` bullet plus everything beneath it up to
+  the next top-level bullet (read-time grouping — `Plan::backlog` stays raw
+  `Vec<String>`, no on-disk format is enforced).
+- `promote <index>` lifts the chosen entry into a new top-level phase: the
+  headline becomes the phase title (override via `--title`), the rest of the
+  stanza becomes phase-level prose (NOT tasks — `phase-breakdown` adds those),
+  the phase gets the next uppercase-letter id, and the entry is removed from
+  the backlog. This is the explicit "planning move" — the bridge never
+  auto-phases backlog items. `plan_promote` is the MCP mirror.
 
 ## MCP surface
 

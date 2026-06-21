@@ -354,6 +354,24 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         tasks: Vec<String>,
     },
+    /// Phase CG: promote a backlog entry into a new top-level phase. With no
+    /// `<index>`, lists the backlog entries (1-based) so you can pick one. With
+    /// an index, the entry's headline becomes the phase title (override with
+    /// `--title`) and the rest of the stanza becomes phase prose — break it into
+    /// tasks afterward with `phase-breakdown`. The new phase gets the next
+    /// `next-phase` id and the entry is removed from the backlog.
+    Promote {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// 1-based index of the backlog entry to promote. Omit to list entries.
+        index: Option<usize>,
+        /// Override the phase title (defaults to the entry headline).
+        #[arg(long)]
+        title: Option<String>,
+        /// Activate the new phase (scope the working set to it) after promoting.
+        #[arg(long)]
+        activate: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -857,6 +875,70 @@ fn main() -> Result<()> {
                 "  next: reconcile will surface the new leaves on the agent's next \
                  prompt for TaskCreate mirroring"
             );
+        }
+        Command::Promote {
+            project,
+            index,
+            title,
+            activate,
+        } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            match index {
+                None => {
+                    // List mode — show the entries with 1-based indices.
+                    let entries = plan.backlog_entries();
+                    if entries.is_empty() {
+                        println!("claude-plan-bridge: no backlog entries to promote");
+                    } else {
+                        println!(
+                            "claude-plan-bridge: {} backlog entr(y/ies) — `promote <N>` to phase one:",
+                            entries.len()
+                        );
+                        for (i, e) in entries.iter().enumerate() {
+                            println!("  {}. {}", i + 1, e.headline);
+                        }
+                    }
+                }
+                Some(n) => {
+                    let id = plan_bridge::phase_seq::next_phase_id_for_plan(&plan_path);
+                    if plan.find_phase(&id).is_some() {
+                        anyhow::bail!(
+                            "phase `{id}` already exists — next-phase id collided unexpectedly"
+                        );
+                    }
+                    let phase_title = plan
+                        .promote_backlog_entry(n, title.as_deref(), &id)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                        .with_context(|| format!("write {}", plan_path.display()))?;
+                    if activate {
+                        let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+                        plan_bridge::lock::with_state_lock(
+                            &state_path,
+                            plan_bridge::lock::DEFAULT_TIMEOUT,
+                            || {
+                                let mut state = plan_bridge::state::State::load(&state_path)?;
+                                state.set_active_phase(Some(id.clone()));
+                                state.save(&state_path)?;
+                                Ok(())
+                            },
+                        )?;
+                    }
+                    println!(
+                        "claude-plan-bridge: promoted backlog entry {n} to phase `{id}` - `{phase_title}` in {}",
+                        plan_path.display()
+                    );
+                    if activate {
+                        println!("  activated `{id}` — working set scoped to this phase");
+                    }
+                    println!(
+                        "  next: the entry's prose is now phase-level; `phase-breakdown {id} --tasks \"...\"` to add tasks"
+                    );
+                }
+            }
         }
         Command::Archive {
             project,

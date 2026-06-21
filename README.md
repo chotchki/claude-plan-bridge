@@ -232,6 +232,19 @@ Replace a phase's `*(depends on)*` / `*(prefer after)*` lists. At least
 one of the two flags must be passed; pass an empty list (`--depends-on
 ""`) to clear.
 
+### `promote [<index>] [--title T] [--activate]`
+
+Promote a **backlog entry** into a new top-level phase — the planning move
+that turns a parked idea into scheduled work. A backlog entry is a
+top-level `- ` bullet plus everything beneath it up to the next top-level
+bullet. Run with no `<index>` to **list** the entries (1-based) so you can
+pick one; run with an index to promote it: the entry's headline becomes the
+phase title (override with `--title`), the rest of the stanza becomes
+phase-level prose (**not** tasks — break it down afterward with
+`phase-breakdown`), the new phase takes the next `next-phase` id, and the
+entry is removed from the backlog. `--activate` focuses the working set on
+the new phase.
+
 ### `activate <PHASE>` / `deactivate`
 
 Aliases `plan_activate` / `plan_deactivate` are also accepted, matching the
@@ -307,9 +320,10 @@ Tools:
   `plan_backlog`, `plan_add`, `plan_rename`
 - **Phases**: `plan_new_phase` (templated, auto-id, optional activate),
   `plan_breakdown` (auto-numbered children under any phase/task, recursive),
-  `plan_add_phase` (omit `id` to auto-assign the next letter id; an explicit
-  `id` must be uppercase letters), `plan_next_phase` (read-only — report the
-  next id), `plan_rename_phase`, `plan_set_phase_deps`
+  `plan_promote` (omit `index` to list backlog entries; promote one into a new
+  phase), `plan_add_phase` (omit `id` to auto-assign the next letter id; an
+  explicit `id` must be uppercase letters), `plan_next_phase` (read-only —
+  report the next id), `plan_rename_phase`, `plan_set_phase_deps`
 - **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
   optional `descope_pending: bool` matching the CLI's `--descope-pending`)
 - **Activation focus** (Phase 40): `plan_activate(id)`, `plan_deactivate()`
@@ -475,7 +489,7 @@ Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == pa
 
 `[>]` marks a leaf as **deferred from its current phase** — work you've consciously decided not to ship as part of this phase, but want to remember for later. Distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active).
 
-All deferred and unphased work collects in a single **`## Backlog (not yet phased)` section pinned to the bottom of PLAN.md** — a visible, named holding pen, not an auto-discovered `Inbox` sub-list. You promote a coherent batch into a named phase when the time comes (the planning move); the bridge never auto-phases backlog items.
+All deferred and unphased work collects in a single **`## Backlog (not yet phased)` section pinned to the bottom of PLAN.md** — a visible, named holding pen, not an auto-discovered `Inbox` sub-list. When the time comes you make the planning move explicitly with **`promote <index>`** (or the `plan_promote` MCP tool), which lifts a backlog entry into a new phase; the bridge never auto-phases backlog items.
 
 Four ways work lands in Backlog:
 

@@ -92,6 +92,7 @@ impl McpServer {
             "plan_add_phase" => self.tool_plan_add_phase(&args),
             "plan_new_phase" => self.tool_plan_new_phase(&args),
             "plan_breakdown" => self.tool_plan_breakdown(&args),
+            "plan_promote" => self.tool_plan_promote(&args),
             "plan_next_phase" => self.tool_plan_next_phase(),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
@@ -265,6 +266,57 @@ impl McpServer {
             added.len(),
             added.join(", ")
         )))
+    }
+
+    /// Phase CG: promote a backlog entry into a new phase. With no `index`,
+    /// returns the numbered backlog entries so the caller can pick one. With an
+    /// `index` (1-based), the entry's headline becomes the phase title (override
+    /// via `title`), its remaining stanza becomes phase prose, and the entry is
+    /// removed from the backlog. MCP mirror of the `promote` CLI.
+    fn tool_plan_promote(&self, args: &Value) -> Result<Value> {
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        let index = args.get("index").and_then(Value::as_u64);
+        match index {
+            None => {
+                let entries = plan.backlog_entries();
+                if entries.is_empty() {
+                    return Ok(tool_text_result("no backlog entries to promote"));
+                }
+                let mut out = format!("{} backlog entr(y/ies):", entries.len());
+                for (i, e) in entries.iter().enumerate() {
+                    out.push_str(&format!("\n  {}. {}", i + 1, e.headline));
+                }
+                Ok(tool_text_result(&out))
+            }
+            Some(n) => {
+                let title = args.get("title").and_then(Value::as_str);
+                let activate = args
+                    .get("activate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let id = crate::phase_seq::next_phase_id_for_plan(&self.plan_path);
+                if plan.find_phase(&id).is_some() {
+                    return Err(anyhow!("phase `{id}` already exists"));
+                }
+                let phase_title = plan
+                    .promote_backlog_entry(n as usize, title, &id)
+                    .map_err(|e| anyhow!(e))?;
+                std::fs::write(&self.plan_path, serialize(&plan))?;
+                let activated = if activate {
+                    let state_path = crate::state::default_state_path_for(&self.plan_path);
+                    let mut state = crate::state::State::load(&state_path)?;
+                    state.set_active_phase(Some(id.clone()));
+                    state.save(&state_path)?;
+                    " (activated)"
+                } else {
+                    ""
+                };
+                Ok(tool_text_result(&format!(
+                    "promoted backlog entry {n} to phase `{id}` - `{phase_title}`{activated}"
+                )))
+            }
+        }
     }
 
     /// Phase BZ: read-only — report the next uppercase-letter phase id without
@@ -751,6 +803,19 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_promote",
+                "description": "Promote a backlog entry into a new top-level phase. Omit `index` to list the numbered backlog entries (a backlog entry is a top-level `- ` bullet plus everything beneath it up to the next top-level bullet). With a 1-based `index`, the entry's headline becomes the phase title (override with `title`) and the rest of the stanza becomes phase-level prose — NOT tasks; break it down afterward with `plan_breakdown`. The new phase gets the next uppercase-letter id and the entry is removed from the backlog.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "description": "1-based index of the backlog entry to promote. Omit to list entries."},
+                        "title": {"type": "string", "description": "Override the phase title (defaults to the entry headline)."},
+                        "activate": {"type": "boolean", "description": "Activate (focus the working set on) the new phase after promoting."}
+                    },
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_rename_phase",
                 "description": "Rename a phase's title. Phase-specific variant of `plan_rename` — refuses task ids to keep operations explicit. Use `plan_rename` for tasks.",
                 "inputSchema": {
@@ -931,6 +996,7 @@ mod tests {
             "plan_next_phase",
             "plan_new_phase",
             "plan_breakdown",
+            "plan_promote",
             "plan_archive",
             "plan_phase_exit",
             "plan_rename",
@@ -963,6 +1029,48 @@ mod tests {
         assert!(
             after.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
             "v2 header with markers landed:\n{after}"
+        );
+    }
+
+    #[test]
+    fn plan_promote_lists_then_promotes_backlog_entry() {
+        let (_, s) = scratch_plan(
+            "## Phase A - Existing\n- [ ] A.1 - t\n\n# Backlog (not yet phased)\n\n- **Auth hardening** — rotate keys\n  - login flow\n- **Drop fs4** — std lock\n",
+        );
+        // List mode (no index) enumerates the entries.
+        let list = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_promote", "arguments": {}
+            }}),
+        );
+        assert!(
+            list.to_string().contains("1. Auth hardening"),
+            "got: {list}"
+        );
+        assert!(list.to_string().contains("2. Drop fs4"), "got: {list}");
+
+        // Promote entry 1 → Phase B, prose carried, entry removed from backlog.
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "plan_promote", "arguments": {"index": 1}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(
+            after.contains("## Phase B - Auth hardening"),
+            "phase:\n{after}"
+        );
+        assert!(after.contains("rotate keys"), "prose carried:\n{after}");
+        assert!(
+            !after.contains("**Auth hardening**"),
+            "promoted entry removed from backlog:\n{after}"
+        );
+        assert!(
+            after.contains("- **Drop fs4**"),
+            "other entry remains:\n{after}"
         );
     }
 
