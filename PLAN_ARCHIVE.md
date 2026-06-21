@@ -614,3 +614,13 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CC.3 - Implement deferred-schema hardening
 - [x] CC.4 - Tests + docs + phase exit (deferred-schema)
 
+---
+
+## 2026-06-21
+
+## Phase CG - Promote a backlog item to a new phase
+- [x] CG.1 - Design spike: promote a backlog item to a new phase
+- [x] CG.2 - Plan the promote verb fully
+- [x] CG.3 - Implement the promote verb (CLI + MCP)
+- [x] CG.4 - Tests + docs + phase exit (promote)
+

@@ -3,11 +3,6 @@
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
-## Phase CG - Promote a backlog item to a new phase
-- [x] CG.1 - Design spike: promote a backlog item to a new phase
-- [x] CG.2 - Plan the promote verb fully
-- [x] CG.3 - Implement the promote verb (CLI + MCP)
-- [x] CG.4 - Tests + docs + phase exit (promote)
 
 ## Backlog (not yet phased)
 
