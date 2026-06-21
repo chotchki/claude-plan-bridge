@@ -604,3 +604,13 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CB.3 - Implement reliable phase titling
 - [x] CB.4 - Tests + docs + phase exit (titling)
 
+---
+
+## 2026-06-21
+
+## Phase CC - Harden the metadata.plan_path deferred-schema path
+- [x] CC.1 - Design spike: harden the metadata.plan_path / deferred-schema path
+- [x] CC.2 - Plan the deferred-schema hardening fully
+- [x] CC.3 - Implement deferred-schema hardening
+- [x] CC.4 - Tests + docs + phase exit (deferred-schema)
+

@@ -3,11 +3,6 @@
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
-## Phase CC - Harden the metadata.plan_path deferred-schema path
-- [x] CC.1 - Design spike: harden the metadata.plan_path / deferred-schema path
-- [x] CC.2 - Plan the deferred-schema hardening fully
-- [x] CC.3 - Implement deferred-schema hardening
-- [x] CC.4 - Tests + docs + phase exit (deferred-schema)
 
 ## Backlog (not yet phased)
 
