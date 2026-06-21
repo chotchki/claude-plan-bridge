@@ -776,6 +776,51 @@ impl Plan {
         Err(format!("no node with id {parent_id} in PLAN.md"))
     }
 
+    /// Phase CE: append auto-numbered child tasks under an existing phase or
+    /// task. `parent` may be a phase id (`CE`) or a task id at any depth
+    /// (`CE.3`, `CE.3.2`); new children continue after the highest existing
+    /// numeric suffix, so repeated calls keep appending. Returns the new child
+    /// ids. Errs if the parent isn't found, or no non-empty subject is given.
+    pub fn breakdown(&mut self, parent: &str, subjects: &[String]) -> Result<Vec<String>, String> {
+        let existing: Vec<String> = if let Some(ph) = self.find_phase(parent) {
+            ph.children.iter().map(|c| c.id.clone()).collect()
+        } else if let Some(n) = self.find(parent) {
+            n.children.iter().map(|c| c.id.clone()).collect()
+        } else {
+            return Err(format!("no phase or task with id `{parent}` in PLAN.md"));
+        };
+        let mut next = existing
+            .iter()
+            .filter_map(|id| id.rsplit('.').next().and_then(|s| s.parse::<u64>().ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut added = Vec::new();
+        for subject in subjects {
+            let subject = subject.trim();
+            if subject.is_empty() {
+                continue;
+            }
+            let id = format!("{parent}.{next}");
+            let child = Node {
+                id: id.clone(),
+                title: subject.to_string(),
+                state: NodeState::Pending,
+                id_style: IdStyle::Plain,
+                separator: Separator::Hyphen,
+                children: vec![],
+                annotations: vec![],
+            };
+            self.add_child_of(parent, child)?;
+            added.push(id);
+            next += 1;
+        }
+        if added.is_empty() {
+            return Err("no non-empty task subjects given".to_string());
+        }
+        Ok(added)
+    }
+
     /// Insert a top-level phase in id-sort order against existing phases.
     pub fn insert_phase(&mut self, phase: Phase) {
         insert_phase_in_order(&mut self.phases, phase);
@@ -2034,5 +2079,55 @@ mod tests {
         };
         let json = serde_json::to_string(&ann).unwrap();
         assert!(json.contains("\"kind\":\"bullet\""), "got: {json}");
+    }
+
+    // ---- Phase CE.3.3: Plan::breakdown ----
+
+    #[test]
+    fn breakdown_appends_numbered_children_under_a_task() {
+        let mut plan = parse_for_test("## Phase CE - x\n- [ ] CE.3 - Implement\n");
+        let added = plan
+            .breakdown("CE.3", &["codec".to_string(), "scan".to_string()])
+            .unwrap();
+        assert_eq!(added, vec!["CE.3.1", "CE.3.2"]);
+        let node = plan.find("CE.3").unwrap();
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].title, "codec");
+    }
+
+    #[test]
+    fn breakdown_is_recursive_and_appends_repeatedly() {
+        let mut plan = parse_for_test("## Phase CE - x\n- [ ] CE.3 - Implement\n");
+        plan.breakdown("CE.3", &["a".to_string(), "b".to_string()])
+            .unwrap();
+        // Recursive: break down a child at the next depth.
+        assert_eq!(
+            plan.breakdown("CE.3.2", &["deep".to_string()]).unwrap(),
+            vec!["CE.3.2.1"]
+        );
+        // Repeatable: appends after the highest existing suffix.
+        assert_eq!(
+            plan.breakdown("CE.3", &["c".to_string()]).unwrap(),
+            vec!["CE.3.3"]
+        );
+    }
+
+    #[test]
+    fn breakdown_works_on_a_phase_id() {
+        let mut plan = parse_for_test("## Phase CE - x\n- [ ] CE.1 - First\n");
+        assert_eq!(
+            plan.breakdown("CE", &["second".to_string()]).unwrap(),
+            vec!["CE.2"]
+        );
+    }
+
+    #[test]
+    fn breakdown_errors_on_unknown_parent_and_empty_subjects() {
+        let mut plan = parse_for_test("## Phase CE - x\n- [ ] CE.1 - First\n");
+        assert!(plan.breakdown("ZZ.9", &["x".to_string()]).is_err());
+        assert!(
+            plan.breakdown("CE.1", &["".to_string(), "  ".to_string()])
+                .is_err()
+        );
     }
 }

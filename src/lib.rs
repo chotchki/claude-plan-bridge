@@ -12,6 +12,7 @@ pub mod lock;
 pub mod mcp;
 pub mod parser;
 pub mod phase_seq;
+pub mod phase_template;
 pub mod reconcile;
 pub mod resume;
 pub mod serializer;

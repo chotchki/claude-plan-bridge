@@ -337,6 +337,35 @@ enum Command {
         #[arg(long)]
         after: Option<String>,
     },
+    /// Phase CE: create a new phase from the phase template in one shot.
+    /// Auto-assigns the next uppercase-letter id (see `next-phase`), fills it
+    /// with the template's beats (the built-in default, or a project
+    /// `PHASE_TEMPLATE.md` if present), and optionally activates it. The
+    /// templated counterpart to the lower-level `phase-scaffold` (explicit id
+    /// + tasks).
+    PhaseNew {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// Phase title (optional).
+        title: Option<String>,
+        /// Activate the new phase (scope the working set to it) after creating.
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Phase CE: break an existing phase or task into auto-numbered child
+    /// tasks in one atomic write. Generic + recursive — `<parent>` can be a
+    /// phase id (`CE`) or a task id at any depth (`CE.3`, `CE.3.2`), and the
+    /// new children append after any that already exist, so it can be run
+    /// repeatedly. The breakdown half of the plan-&-breakdown beat.
+    PhaseBreakdown {
+        #[command(flatten)]
+        project: ProjectArgs,
+        /// Parent id to break down (phase or task), e.g. `CE.3`.
+        parent: String,
+        /// Comma-separated child subjects, e.g. `--tasks "codec,scan,CLI"`.
+        #[arg(long, value_delimiter = ',')]
+        tasks: Vec<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -775,6 +804,85 @@ fn main() -> Result<()> {
             println!(
                 "claude-plan-bridge: scaffolded phase `{id}` - `{title_str}` with {task_count} task(s) in {}",
                 plan_path.display()
+            );
+            println!(
+                "  next: reconcile will surface the new leaves on the agent's next \
+                 prompt for TaskCreate mirroring"
+            );
+        }
+        Command::PhaseNew {
+            project,
+            title,
+            activate,
+        } => {
+            let plan_path = project.plan_path();
+            let root = project.root();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            let id = plan_bridge::phase_seq::next_phase_id_for_plan(&plan_path);
+            if plan.find_phase(&id).is_some() {
+                anyhow::bail!("phase `{id}` already exists — next-phase id collided unexpectedly");
+            }
+            let beats = plan_bridge::phase_template::load_template(&root);
+            let children: Vec<plan_bridge::ast::Node> = beats
+                .iter()
+                .enumerate()
+                .filter_map(|(i, subject)| parse_task_spec(&format!("{}:{subject}", i + 1), &id))
+                .collect();
+            let title_str = title.unwrap_or_default();
+            let count = children.len();
+            let new_phase = plan_bridge::ast::Phase {
+                children,
+                ..plan_bridge::ast::Phase::header_v2_with_deps(
+                    id.clone(),
+                    title_str.clone(),
+                    vec![],
+                    vec![],
+                )
+            };
+            plan.insert_phase(new_phase);
+            std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                .with_context(|| format!("write {}", plan_path.display()))?;
+            if activate {
+                let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+                plan_bridge::lock::with_state_lock(
+                    &state_path,
+                    plan_bridge::lock::DEFAULT_TIMEOUT,
+                    || {
+                        let mut state = plan_bridge::state::State::load(&state_path)?;
+                        state.set_active_phase(Some(id.clone()));
+                        state.save(&state_path)?;
+                        Ok(())
+                    },
+                )?;
+            }
+            println!(
+                "claude-plan-bridge: created phase `{id}` - `{title_str}` with {count} template task(s) in {}",
+                plan_path.display()
+            );
+            if activate {
+                println!("  activated `{id}` — working set scoped to this phase");
+            }
+        }
+        Command::PhaseBreakdown {
+            project,
+            parent,
+            tasks,
+        } => {
+            let plan_path = project.plan_path();
+            let text = std::fs::read_to_string(&plan_path)
+                .with_context(|| format!("read {}", plan_path.display()))?;
+            let mut plan = plan_bridge::parser::parse(&text)?;
+            let added = plan
+                .breakdown(&parent, &tasks)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                .with_context(|| format!("write {}", plan_path.display()))?;
+            println!(
+                "claude-plan-bridge: broke `{parent}` into {} task(s): {}",
+                added.len(),
+                added.join(", ")
             );
             println!(
                 "  next: reconcile will surface the new leaves on the agent's next \

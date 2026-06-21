@@ -177,6 +177,38 @@ Two modes (Phase 38.4 / 38.5):
 downstream commit messages and code comments may reference the original
 ids.
 
+### `phase-new [TITLE] [--activate]`
+
+Phase CE. Create a new phase from the **phase template** in one shot — the high-level "start a standard phase" affordance. Auto-assigns the next uppercase-letter id (see `next-phase`), fills it with the template's beats, and optionally activates it (scoping the working set to it):
+
+```sh
+$ claude-plan-bridge phase-new "Payments rework" --activate
+claude-plan-bridge: created phase `CF` - `Payments rework` with 5 template task(s) in PLAN.md
+  activated `CF` — working set scoped to this phase
+```
+
+The built-in default template is **Plan & breakdown → Implement → Tests + docs → Review → Release (bump + tag + push)**. The first beat is where you `phase-breakdown` the Implement / Tests beats; Review and Release are the human gates that ride along as explicit reminders. Templates are a scaffold, not a gate — prune/extend per phase.
+
+**Customize per project** by dropping a `PHASE_TEMPLATE.md` at the repo root: each `- ` bullet line is one beat, in order (a leading `[ ] ` checkbox is tolerated). When present it replaces the default entirely:
+
+```
+- Spike
+- Build
+- Verify
+- Ship
+```
+
+`phase-new` is the templated counterpart to the lower-level `phase-scaffold` (explicit id + task list) and `phase-add` (empty phase + dependency metadata).
+
+### `phase-breakdown <PARENT-ID> --tasks "A,B,C"`
+
+Phase CE. Break an existing phase or task into auto-numbered child tasks in one atomic write — the "breakdown" half of the plan-&-breakdown beat. Generic and recursive: `<PARENT-ID>` can be a phase id (`CF`) or a task id at any depth (`CF.2`, `CF.2.1`), and new children append after any that already exist, so you can run it repeatedly:
+
+```sh
+$ claude-plan-bridge phase-breakdown CF.2 --tasks "codec,scan,CLI"
+claude-plan-bridge: broke `CF.2` into 3 task(s): CF.2.1, CF.2.2, CF.2.3
+```
+
 ### `phase-add <ID> [TITLE] [--depends-on X,Y] [--prefer-after A,B] [--after <ID>]`
 
 Create a new FORMATv2 phase header explicitly. Surgical alternative to
@@ -273,9 +305,11 @@ Tools:
 
 - **Tasks**: `plan_list`, `plan_check`, `plan_uncheck`, `plan_skip`,
   `plan_backlog`, `plan_add`, `plan_rename`
-- **Phases**: `plan_add_phase` (omit `id` to auto-assign the next letter id;
-  an explicit `id` must be uppercase letters), `plan_next_phase` (read-only —
-  report the next id), `plan_rename_phase`, `plan_set_phase_deps`
+- **Phases**: `plan_new_phase` (templated, auto-id, optional activate),
+  `plan_breakdown` (auto-numbered children under any phase/task, recursive),
+  `plan_add_phase` (omit `id` to auto-assign the next letter id; an explicit
+  `id` must be uppercase letters), `plan_next_phase` (read-only — report the
+  next id), `plan_rename_phase`, `plan_set_phase_deps`
 - **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
   optional `descope_pending: bool` matching the CLI's `--descope-pending`)
 - **Activation focus** (Phase 40): `plan_activate(id)`, `plan_deactivate()`

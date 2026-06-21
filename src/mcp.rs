@@ -90,6 +90,8 @@ impl McpServer {
             "plan_backlog" => self.tool_plan_backlog(&args),
             "plan_add" => self.tool_plan_add(&args),
             "plan_add_phase" => self.tool_plan_add_phase(&args),
+            "plan_new_phase" => self.tool_plan_new_phase(&args),
+            "plan_breakdown" => self.tool_plan_breakdown(&args),
             "plan_next_phase" => self.tool_plan_next_phase(),
             "plan_archive" => self.tool_plan_archive(&args),
             "plan_phase_exit" => self.tool_plan_phase_exit(&args),
@@ -199,6 +201,89 @@ impl McpServer {
     /// pre-create a phase with no tasks yet. For the common "just start typing
     /// tasks" path, TaskCreate's auto-anchor still works — this verb is the
     /// surgical option for richer setup.
+    /// Phase CE: create a new phase from the phase template (the built-in
+    /// default, or a project `PHASE_TEMPLATE.md`), auto-assigning the next
+    /// uppercase-letter id. Optionally activates it. MCP mirror of `phase-new`.
+    fn tool_plan_new_phase(&self, args: &Value) -> Result<Value> {
+        let title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let activate = args
+            .get("activate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let root = self
+            .plan_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        let id = crate::phase_seq::next_phase_id_for_plan(&self.plan_path);
+        if plan.find_phase(&id).is_some() {
+            return Err(anyhow!("phase `{id}` already exists"));
+        }
+        let beats = crate::phase_template::load_template(root);
+        let children: Vec<Node> = beats
+            .iter()
+            .enumerate()
+            .map(|(i, subject)| Node {
+                id: format!("{id}.{}", i + 1),
+                title: subject.clone(),
+                state: NodeState::Pending,
+                id_style: crate::ast::IdStyle::Plain,
+                separator: crate::ast::Separator::Hyphen,
+                children: vec![],
+                annotations: vec![],
+            })
+            .collect();
+        let count = children.len();
+        let new_phase = crate::ast::Phase {
+            children,
+            ..crate::ast::Phase::header_v2_with_deps(id.clone(), title.clone(), vec![], vec![])
+        };
+        plan.insert_phase(new_phase);
+        std::fs::write(&self.plan_path, serialize(&plan))?;
+        let activated = if activate {
+            let state_path = crate::state::default_state_path_for(&self.plan_path);
+            let mut state = crate::state::State::load(&state_path)?;
+            state.set_active_phase(Some(id.clone()));
+            state.save(&state_path)?;
+            " (activated)"
+        } else {
+            ""
+        };
+        Ok(tool_text_result(&format!(
+            "created phase `{id}` - `{title}` with {count} template task(s){activated}"
+        )))
+    }
+
+    /// Phase CE: break an existing phase or task into auto-numbered child
+    /// tasks. Generic + recursive (any depth) and repeatable (appends after
+    /// existing children). MCP mirror of the `phase-breakdown` CLI.
+    fn tool_plan_breakdown(&self, args: &Value) -> Result<Value> {
+        let parent = require_string(args, "parent")?;
+        let tasks: Vec<String> = args
+            .get("tasks")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let text = std::fs::read_to_string(&self.plan_path)?;
+        let mut plan = parse(&text)?;
+        let added = plan.breakdown(&parent, &tasks).map_err(|e| anyhow!(e))?;
+        std::fs::write(&self.plan_path, serialize(&plan))?;
+        Ok(tool_text_result(&format!(
+            "broke `{parent}` into {} task(s): {}",
+            added.len(),
+            added.join(", ")
+        )))
+    }
+
     /// Phase BZ: read-only — report the next uppercase-letter phase id without
     /// mutating PLAN.md. The companion to `plan_add_phase`'s auto-assign, for
     /// the TaskCreate-`plan_path` flow where the agent needs to know the new
@@ -661,6 +746,31 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "plan_new_phase",
+                "description": "Create a new phase from the phase template in one shot: auto-assigns the next uppercase-letter id, fills it with the template's beats (the built-in default — Plan & breakdown, Implement, Tests + docs, Review, Release — or a project `PHASE_TEMPLATE.md` if present), and optionally activates it. The templated counterpart to `plan_add_phase`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Phase title."},
+                        "activate": {"type": "boolean", "description": "Activate (focus the working set on) the new phase after creating it."}
+                    },
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "plan_breakdown",
+                "description": "Break an existing phase or task into auto-numbered child tasks in one write. Generic + recursive: `parent` may be a phase id (`CE`) or a task id at any depth (`CE.3`, `CE.3.2`), and new children append after any that already exist, so it can be run repeatedly. This is the breakdown half of the plan-&-breakdown beat.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "parent": {"type": "string", "description": "Phase or task id to break down, e.g. `CE.3`."},
+                        "tasks": {"type": "array", "items": {"type": "string"}, "description": "Child task subjects, in order."}
+                    },
+                    "required": ["parent", "tasks"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "plan_rename_phase",
                 "description": "Rename a phase's title. Phase-specific variant of `plan_rename` — refuses task ids to keep operations explicit. Use `plan_rename` for tasks.",
                 "inputSchema": {
@@ -839,6 +949,8 @@ mod tests {
             "plan_add",
             "plan_add_phase",
             "plan_next_phase",
+            "plan_new_phase",
+            "plan_breakdown",
             "plan_archive",
             "plan_phase_exit",
             "plan_rename",
@@ -940,6 +1052,66 @@ mod tests {
         assert_eq!(resp["result"]["content"][0]["text"].as_str().unwrap(), "BZ");
         let after = std::fs::read_to_string(&s.plan_path).unwrap();
         assert_eq!(before, after, "plan_next_phase must be read-only");
+    }
+
+    #[test]
+    fn plan_new_phase_applies_default_template() {
+        let (_, s) = scratch_plan("## Phase BY - prior\n- [x] BY.1 - x\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_new_phase",
+                "arguments": {"title": "Templated"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("BZ"), "should report the assigned id: {text}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(after.contains("## Phase BZ - Templated"), "{after}");
+        assert!(after.contains("- [ ] BZ.1 - Plan & breakdown"), "{after}");
+        assert!(after.contains("- [ ] BZ.5 - Release"), "{after}");
+    }
+
+    #[test]
+    fn plan_new_phase_uses_project_template_and_activates() {
+        let (_, s) = scratch_plan("## Phase BY - prior\n- [x] BY.1 - x\n");
+        let root = s.plan_path.parent().unwrap();
+        std::fs::write(root.join("PHASE_TEMPLATE.md"), "- Spike\n- Build\n").unwrap();
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_new_phase",
+                "arguments": {"title": "Custom", "activate": true}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(after.contains("- [ ] BZ.1 - Spike"), "{after}");
+        assert!(after.contains("- [ ] BZ.2 - Build"), "{after}");
+        assert!(
+            !after.contains("BZ.3"),
+            "template had only 2 beats: {after}"
+        );
+        let state_path = crate::state::default_state_path_for(&s.plan_path);
+        let state = crate::state::State::load(&state_path).unwrap();
+        assert_eq!(state.active_phase(), Some("BZ"));
+    }
+
+    #[test]
+    fn plan_breakdown_adds_recursive_children() {
+        let (_, s) = scratch_plan("## Phase CE - x\n- [ ] CE.3 - Implement\n");
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_breakdown",
+                "arguments": {"parent": "CE.3", "tasks": ["codec", "scan"]}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(after.contains("- [ ] CE.3.1 - codec"), "{after}");
+        assert!(after.contains("- [ ] CE.3.2 - scan"), "{after}");
     }
 
     #[test]

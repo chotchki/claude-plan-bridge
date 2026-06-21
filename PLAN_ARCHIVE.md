@@ -560,3 +560,19 @@ Design constraint: phases commonly run out of order, and the loop must not block
   - [x] CD.3.3 - Status-on-change heartbeat
 - [x] CD.4 - Tests + docs + phase exit (planning loop)
 
+---
+
+## 2026-06-21
+
+## Phase CE - Phase templates: standard phase creation
+
+Direction (agreed 2026-06-20): a **built-in default** phase template (standard beats: spike → breakdown → implement → tests → docs → review → release → exit), with an **optional** `PHASE_TEMPLATE.md` per-project file to customize/override it. Templates scaffold, never gate — prune/extend per phase. The non-code **review** and **release** gates are the real memory-load win; include them as reminder tasks. Composes with `next-phase` (auto-id) + the loop (auto-activate on create; auto-advance → "ready for review/release" on exit).
+
+- [x] CE.1 - Design spike: phase template shape
+- [x] CE.2 - Plan the template implementation fully
+- [x] CE.3 - Implement phase templates
+  - [x] CE.3.1 - Default template + PHASE_TEMPLATE.md override
+  - [x] CE.3.2 - phase-new verb (CLI + MCP)
+  - [x] CE.3.3 - phase-breakdown verb (CLI + MCP)
+- [x] CE.4 - Tests + docs + phase exit (templates)
+
