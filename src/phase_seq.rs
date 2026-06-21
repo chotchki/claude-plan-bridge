@@ -209,7 +209,7 @@ prose mentioning Phase ZZ inline should be ignored
     fn next_from_texts_empty_is_a() {
         assert_eq!(next_phase_id_from_texts("", ""), "A");
         assert_eq!(
-            next_phase_id_from_texts("# PLAN\n- [ ] 1.0 nothing\n", ""),
+            next_phase_id_from_texts("# PLAN\n## Phase 1 - nothing\n", ""),
             "A"
         );
     }

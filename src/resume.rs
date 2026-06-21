@@ -314,14 +314,14 @@ mod tests {
     #[test]
     fn returns_none_when_state_file_missing() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
 
     #[test]
     fn returns_none_when_no_mappings() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         write_state(&plan, &State::default());
         assert!(build_resume_message(&plan, "").unwrap().is_none());
     }
@@ -329,12 +329,18 @@ mod tests {
     #[test]
     fn returns_none_when_all_mappings_resolved() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [x] 1.0 Done phase\n- [-] 2.0 Skipped\n");
+        // v2: childless state-carrying phases become a phase + one leaf task
+        // that carries the resolved mark.
+        let plan = write_plan(
+            &dir,
+            "## Phase 1 - Done phase\n- [x] 1.1 - Done phase\n\
+             ## Phase 2 - Skipped\n- [-] 2.1 - Skipped\n",
+        );
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1.1".to_string(),
                 last_synced_title: "Done phase".to_string(),
                 ..Default::default()
             },
@@ -342,7 +348,7 @@ mod tests {
         state.record(
             "6",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "2.1".to_string(),
                 last_synced_title: "Skipped".to_string(),
                 ..Default::default()
             },
@@ -354,7 +360,7 @@ mod tests {
     #[test]
     fn returns_none_when_mapping_points_at_missing_node() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let mut state = State::default();
         state.record(
             "5",
@@ -370,20 +376,20 @@ mod tests {
 
     #[test]
     fn emits_bullet_per_open_leaf_mapping_sorted_by_id() {
-        // Phase 27.1: parent phase nodes are filtered (1.0 has children); only
-        // leaves (1.1, 1.2, 2.0) are emitted. A phase with no children
-        // (e.g., 2.0) is itself a leaf and survives.
+        // Phase 27.1: parent phase nodes are filtered (phase 1 has children);
+        // only leaves (1.1, 1.2, phase 2) are emitted. A phase with no children
+        // (e.g., phase 2) is itself a leaf and survives.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First phase\n  - [ ] 1.1 First task\n  - [ ] 1.2 Second task\n- [ ] 2.0 Second phase\n",
+            "## Phase 1 - First phase\n  - [ ] 1.1 First task\n  - [ ] 1.2 Second task\n## Phase 2 - Second phase\n",
         );
         let mut state = State::default();
         // Insert in non-sorted order to verify cmp_ids sort.
         state.record(
             "10",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "2".to_string(),
                 last_synced_title: "Second phase".to_string(),
                 ..Default::default()
             },
@@ -407,7 +413,7 @@ mod tests {
         state.record(
             "3",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "First phase".to_string(),
                 ..Default::default()
             },
@@ -423,10 +429,10 @@ mod tests {
         );
         assert!(bullets[0].contains("1.1 First task"), "got: {bullets:?}");
         assert!(bullets[1].contains("1.2 Second task"), "got: {bullets:?}");
-        assert!(bullets[2].contains("2.0 Second phase"), "got: {bullets:?}");
+        assert!(bullets[2].contains("2 Second phase"), "got: {bullets:?}");
         assert!(
             !bullets.iter().any(|b| b.contains("First phase")),
-            "parent phase 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+            "parent phase 1 leaked into a TaskCreate bullet: {bullets:?}"
         );
     }
 
@@ -441,13 +447,13 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Parent phase\n  - [ ] 1.1 Leaf one\n  - [ ] 1.2 Leaf two\n",
+            "## Phase 1 - Parent phase\n  - [ ] 1.1 Leaf one\n  - [ ] 1.2 Leaf two\n",
         );
         let mut state = State::default();
         state.record(
             "1",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Parent phase".to_string(),
                 ..Default::default()
             },
@@ -478,7 +484,7 @@ mod tests {
         assert!(msg.contains("1.2 Leaf two"), "leaf 1.2 missing: {msg}");
         assert!(
             !bullets.iter().any(|b| b.contains("Parent phase")),
-            "parent 1.0 should not be a TaskCreate bullet: {bullets:?}"
+            "parent phase 1 should not be a TaskCreate bullet: {bullets:?}"
         );
 
         // pending_rehydration should hold leaves only (matters for the
@@ -563,7 +569,7 @@ mod tests {
         );
         assert!(
             pos_12 < pos_h30 && pos_h30 < pos_31,
-            "3.0 header should appear after 1.x leaves and before 3.1"
+            "phase 3 header should appear after 1.x leaves and before 3.1"
         );
 
         // Instruction makes clear that `## ` lines are not TaskCreate asks.
@@ -602,12 +608,12 @@ mod tests {
     #[test]
     fn prefers_live_plan_title_over_stale_state_title() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Updated title\n");
+        let plan = write_plan(&dir, "## Phase 1 - Updated title\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Stale title".to_string(),
                 ..Default::default()
             },
@@ -623,11 +629,11 @@ mod tests {
     fn full_restart_cycle_rehydrates_cleanly() {
         // Phase 25.5 e2e (updated for 27.1 leaves-only): simulate the full
         // restart flow end-to-end.
-        //   1. Prior session: state file has 3 mappings — parent 1.0 (task_id
-        //      5) plus leaves 1.1/1.2 (task_ids 6/7).
+        //   1. Prior session: state file has 3 mappings — parent phase 1
+        //      (task_id 5) plus leaves 1.1/1.2 (task_ids 6/7).
         //   2. Session restart: in-session task_ids are gone. `build_resume_
-        //      message` produces the rehydration prompt with LEAVES ONLY (1.0
-        //      filtered as parent); state file's parent mapping is also
+        //      message` produces the rehydration prompt with LEAVES ONLY (phase
+        //      1 filtered as parent); state file's parent mapping is also
         //      dropped on `startup` source.
         //   3. Claude TaskCreates only the announced leaves with FRESH task_ids
         //      (102/103). The parent never comes back into the harness.
@@ -637,14 +643,17 @@ mod tests {
         use crate::writeback;
 
         let dir = scratch_dir();
-        let plan_text = "- [ ] 1.0 Phase one\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n";
+        // Canonical v2 shape (column-0 tasks, ` - ` separators) so the
+        // post-rehydration byte-identical assertion holds — writeback
+        // re-serializes through the v2 serializer.
+        let plan_text = "## Phase 1 - Phase one\n- [ ] 1.1 - First\n- [ ] 1.2 - Second\n";
         let plan = write_plan(&dir, plan_text);
 
         // (1) Seed prior-session state with parent + 2 leaves.
         let state_path = default_state_path_for(&plan);
         let mut prior = State::default();
         for (id, path, title) in [
-            ("5", "1.0", "Phase one"),
+            ("5", "1", "Phase one"),
             ("6", "1.1", "First"),
             ("7", "1.2", "Second"),
         ] {
@@ -670,7 +679,7 @@ mod tests {
         }
         assert!(
             !bullets.iter().any(|b| b.contains("Phase one")),
-            "parent 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+            "parent phase 1 leaked into a TaskCreate bullet: {bullets:?}"
         );
 
         // (3) Apply rehydration with fresh task_ids for the leaves only.
@@ -728,13 +737,13 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Open\n  - [ ] 1.1 Open child\n- [x] 2.0 Closed\n",
+            "## Phase 1 - Open\n- [ ] 1.1 - Open child\n- [x] 1.2 - Closed\n",
         );
         let mut state = State::default();
         state.record(
             "1",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -750,7 +759,7 @@ mod tests {
         state.record(
             "3",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "1.2".to_string(),
                 last_synced_title: "Closed".to_string(),
                 last_synced_state: NodeState::Done,
                 ..Default::default()
@@ -764,9 +773,12 @@ mod tests {
         // TaskCreate bullets; Phase 27.1a: parent may still appear as a `## `
         // context header).
         assert!(msg.contains("1.1 Open child"), "got: {msg}");
+        // The parent phase (title "Open", id 1) must not appear as a
+        // TaskCreate bullet. The only open leaf is "Open child", so no
+        // bullet should end in the bare parent title.
         assert!(
-            !bullets.iter().any(|b| b.contains("1.0 Open")),
-            "parent 1.0 leaked into a TaskCreate bullet: {bullets:?}"
+            !bullets.iter().any(|b| b.trim_end().ends_with("1 Open")),
+            "parent phase 1 leaked into a TaskCreate bullet: {bullets:?}"
         );
         // Prompt notes the drop so the reader knows what to expect — drop
         // still iterates all mappings (parent + child + closed = 3).
@@ -786,12 +798,15 @@ mod tests {
     fn clear_source_also_drops_all_mappings() {
         // /clear empties the harness task list the same way startup does.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n- [x] 2.0 Closed\n");
+        let plan = write_plan(
+            &dir,
+            "## Phase 1 - Open\n- [ ] 1.1 - Open\n## Phase 2 - Closed\n- [x] 2.1 - Closed\n",
+        );
         let mut state = State::default();
         state.record(
             "7",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1.1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -799,7 +814,7 @@ mod tests {
         state.record(
             "8",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "2.1".to_string(),
                 last_synced_title: "Closed".to_string(),
                 last_synced_state: NodeState::Done,
                 ..Default::default()
@@ -822,12 +837,12 @@ mod tests {
         // live TaskList) but the state file is not mutated.
         for source in ["resume", "compact", "" /* unknown */] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -842,7 +857,7 @@ mod tests {
             let after = State::load(&default_state_path_for(&plan)).unwrap();
             assert_eq!(
                 after.plan_path("42"),
-                Some("1.0"),
+                Some("1"),
                 "source={source} mutated state file"
             );
         }
@@ -856,12 +871,12 @@ mod tests {
         // precondition. Lock in the tightened wording so future edits don't
         // regress it.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -887,12 +902,12 @@ mod tests {
         //   - that calls are independent and should batch (26.4)
         // Lock in the wording so future edits don't silently drop a hint.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -930,12 +945,12 @@ mod tests {
         // Locks in the change so future edits don't revert to the duplicated
         // subject=description=<title> shape.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -963,12 +978,12 @@ mod tests {
         // the prompt should state that flatly, not as a conditional. Locks in
         // the assertive wording so future edits don't soften it back.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -989,12 +1004,12 @@ mod tests {
     #[test]
     fn clear_source_uses_assertive_toolsearch_wording() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "5",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -1016,12 +1031,12 @@ mod tests {
         // misleading 99% of the time.
         for source in ["resume", "compact"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "5",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -1048,12 +1063,15 @@ mod tests {
         // and resolved mappings alike are recorded — the criterion is
         // "we dropped this from state", not "it was pending".
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n- [x] 2.0 Closed\n");
+        let plan = write_plan(
+            &dir,
+            "## Phase 1 - Open\n- [ ] 1.1 - Open\n## Phase 2 - Closed\n- [x] 2.1 - Closed\n",
+        );
         let mut state = State::default();
         state.record(
             "alpha",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1.1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -1061,7 +1079,7 @@ mod tests {
         state.record(
             "beta",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "2.1".to_string(),
                 last_synced_title: "Closed".to_string(),
                 last_synced_state: NodeState::Done,
                 ..Default::default()
@@ -1094,12 +1112,12 @@ mod tests {
         // no audit rows should land. Avoids polluting the log with
         // non-events.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "t-1",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -1126,13 +1144,13 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Open\n  - [ ] 1.1 Open child\n- [x] 2.0 Closed\n",
+            "## Phase 1 - Open\n- [ ] 1.1 - Open child\n- [x] 1.2 - Closed\n",
         );
         let mut state = State::default();
         state.record(
             "1",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -1148,7 +1166,7 @@ mod tests {
         state.record(
             "3",
             Mapping {
-                plan_path: "2.0".to_string(),
+                plan_path: "1.2".to_string(),
                 last_synced_title: "Closed".to_string(),
                 last_synced_state: NodeState::Done,
                 ..Default::default()
@@ -1159,7 +1177,7 @@ mod tests {
         let _msg = build_resume_message(&plan, "startup").unwrap().unwrap();
         let after = State::load(&default_state_path_for(&plan)).unwrap();
         // Phase 27.1: pending_rehydration mirrors what was *announced* in the
-        // prompt — leaves only. Parent 1.0 is filtered upstream so it never
+        // prompt — leaves only. Parent phase 1 is filtered upstream so it never
         // lands here.
         assert_eq!(
             after
@@ -1179,12 +1197,12 @@ mod tests {
         // there's no rehydration ask — pending_rehydration must stay empty
         // (and stay empty in the state file).
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+        let plan = write_plan(&dir, "## Phase 1 - Open\n");
         let mut state = State::default();
         state.record(
             "42",
             Mapping {
-                plan_path: "1.0".to_string(),
+                plan_path: "1".to_string(),
                 last_synced_title: "Open".to_string(),
                 ..Default::default()
             },
@@ -1203,15 +1221,19 @@ mod tests {
     #[test]
     fn filters_resolved_mappings_keeps_pending() {
         let dir = scratch_dir();
+        // v2: one open leaf, one done, one skipped — each under its own phase
+        // so every mapped node is itself a leaf carrying its own state.
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Open\n- [x] 2.0 Closed\n- [-] 3.0 Skipped\n",
+            "## Phase 1 - Open\n- [ ] 1.1 - Open\n\
+             ## Phase 2 - Closed\n- [x] 2.1 - Closed\n\
+             ## Phase 3 - Skipped\n- [-] 3.1 - Skipped\n",
         );
         let mut state = State::default();
         for (id, path, title) in [
-            ("5", "1.0", "Open"),
-            ("6", "2.0", "Closed"),
-            ("7", "3.0", "Skipped"),
+            ("5", "1.1", "Open"),
+            ("6", "2.1", "Closed"),
+            ("7", "3.1", "Skipped"),
         ] {
             state.record(
                 id,
@@ -1225,7 +1247,7 @@ mod tests {
         write_state(&plan, &state);
 
         let msg = build_resume_message(&plan, "").unwrap().unwrap();
-        assert!(msg.contains("1.0 Open"), "got: {msg}");
+        assert!(msg.contains("1.1 Open"), "got: {msg}");
         assert!(!msg.contains("Closed"), "got: {msg}");
         assert!(!msg.contains("Skipped"), "got: {msg}");
     }
@@ -1241,12 +1263,12 @@ mod tests {
         // creation in the wild.
         for source in ["resume", "compact"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -1279,12 +1301,12 @@ mod tests {
         // accidentally lose this when the resume/compact branch evolves.
         for source in ["startup", "clear"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -1307,12 +1329,12 @@ mod tests {
         // mid-session).
         for source in ["resume", "compact"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -1334,7 +1356,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Alpha\n  - [ ] 1.2 Beta\n  - [ ] 1.3 Gamma\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Alpha\n  - [ ] 1.2 Beta\n  - [ ] 1.3 Gamma\n",
         );
         let mut state = State::default();
         for (id, path, title) in [
@@ -1367,12 +1389,12 @@ mod tests {
         // TaskCreate.
         for source in ["startup", "clear"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },
@@ -1398,12 +1420,12 @@ mod tests {
         // PLAN.md lines. Lock in the new framing.
         for source in ["resume", "compact"] {
             let dir = scratch_dir();
-            let plan = write_plan(&dir, "- [ ] 1.0 Open\n");
+            let plan = write_plan(&dir, "## Phase 1 - Open\n");
             let mut state = State::default();
             state.record(
                 "42",
                 Mapping {
-                    plan_path: "1.0".to_string(),
+                    plan_path: "1".to_string(),
                     last_synced_title: "Open".to_string(),
                     ..Default::default()
                 },

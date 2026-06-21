@@ -103,7 +103,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 A\n  - [x] 1.2 B\n- [-] 2.0 Skipped\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 A\n  - [x] 1.2 B\n- [-] 2.0 Skipped\n",
         );
         let report = baseline(&plan).unwrap();
         // Leaves: 1.1, 1.2, 2.0 (2.0 has no children → is a leaf).
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn skips_already_mapped_leaves() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 A\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 A\n");
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
         state.insert("real-task", "1.1");
@@ -138,10 +138,10 @@ mod tests {
     #[test]
     fn captures_current_state_in_mapping() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [x] 1.0 Already done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Already done\n");
         baseline(&plan).unwrap();
         let state = State::load(&default_state_path_for(&plan)).unwrap();
-        let m = state.mappings.get("baseline:1.0").unwrap();
+        let m = state.mappings.get("baseline:1.1").unwrap();
         assert_eq!(m.last_synced_title, "Already done");
         assert_eq!(m.last_synced_state, crate::ast::NodeState::Done);
     }
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn idempotent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 A\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 A\n");
         baseline(&plan).unwrap();
         let report = baseline(&plan).unwrap();
         assert!(report.baselined.is_empty());
@@ -165,7 +165,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Real id\n  - [ ] No id here\n  - [ ] Another no id\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Real id\n  - [ ] No id here\n  - [ ] Another no id\n",
         );
         let report = baseline(&plan).unwrap();
         assert_eq!(report.baselined, vec!["1.1".to_string()]);

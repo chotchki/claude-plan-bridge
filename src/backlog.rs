@@ -102,12 +102,16 @@ mod tests {
     #[test]
     fn backlog_flips_pending_leaf_and_promotes_in_v2_form() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let msg = backlog(&plan, "1.1", "2026-05-17").unwrap();
         assert!(msg.contains("backlogged 1.1"));
         let after = std::fs::read_to_string(&plan).unwrap();
-        // Subtree stays in phase with state flipped.
-        assert!(after.contains("- [>] 1.1 Task"));
+        // Subtree stays in phase with state flipped. Serializer writes the
+        // task at column 0 with the ` - ` (hyphen-space) separator.
+        assert!(
+            after.contains("- [>] 1.1 - Task"),
+            "v2 flipped leaf:\n{after}"
+        );
         // Backlog entry uses FORMATv2 ` - id - title *(deferred from …)*`.
         assert!(
             after.contains("- 1.1 - Task *(deferred from phase `1` on 2026-05-17)*"),
@@ -120,7 +124,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Parent task\n    - [ ] 1.1.0 first child\n    - [ ] 1.1.1 second child\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Parent task\n    - [ ] 1.1.0 first child\n    - [ ] 1.1.1 second child\n",
         );
         let msg = backlog(&plan, "1.1", "2026-05-22").unwrap();
         assert!(msg.contains("backlogged 1.1"));
@@ -147,7 +151,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n    - [ ] 1.1.0 child\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Task\n    - [ ] 1.1.0 child\n",
         );
         backlog(&plan, "1.1", "2026-05-22").unwrap();
         let after_first = std::fs::read_to_string(&plan).unwrap();
@@ -161,7 +165,7 @@ mod tests {
     #[test]
     fn backlog_idempotent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [>] 1.1 Already deferred\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [>] 1.1 Already deferred\n");
         let msg = backlog(&plan, "1.1", "2026-05-17").unwrap();
         assert!(msg.contains("already deferred"));
     }
@@ -169,7 +173,7 @@ mod tests {
     #[test]
     fn backlog_refuses_done_leaf() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         let err = backlog(&plan, "1.1", "2026-05-17").unwrap_err();
         assert!(err.to_string().contains("refusing"), "got: {err}");
     }
@@ -177,7 +181,7 @@ mod tests {
     #[test]
     fn backlog_refuses_wont_do_leaf() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [-] 1.1 Skipped\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [-] 1.1 Skipped\n");
         let err = backlog(&plan, "1.1", "2026-05-17").unwrap_err();
         assert!(err.to_string().contains("refusing"), "got: {err}");
     }
@@ -185,7 +189,7 @@ mod tests {
     #[test]
     fn backlog_errors_on_unknown_id() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let err = backlog(&plan, "9.9", "2026-05-17").unwrap_err();
         assert!(err.to_string().contains("no node with id"));
     }

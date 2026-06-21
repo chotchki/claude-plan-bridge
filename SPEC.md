@@ -59,16 +59,15 @@ Trailing prose — also phase-level, sweeps with the phase to PLAN_ARCHIVE.md.
   is optional; the separator is hyphen-space.
 - **Tasks** under a phase sit at column 0: `- [<state>] <PHASE>.<N> -
   <title>`. Subtasks indent two spaces per level: `<PHASE>.<N>.<K>`.
-- **Two checkbox separators tolerated on read** (` - `, ` — `, plain space);
-  canonical write is ` - ` hyphen-space, applied by the `canonicalize` verb.
+- **Separator tolerated on read** (` - ` hyphen-space or a bare space);
+  canonical write is always ` - `. Em-dash (` — `) and bold-wrapped ids
+  (`**X.5**`) are no longer parsed — they're dropped v1 cosmetics.
 - **Four checkbox states**: `[ ]` pending, `[x]` done, `[-]` won't-do,
   `[>]` backlog. Parser also accepts `[~]` as an alias for won't-do.
 - **Archive treats `[x]`, `[-]`, `[>]` equivalently** — all three count as
   "resolved" for the phase-exit completeness check.
-- **Phases don't have state** under FORMATv2 (header form has no checkbox).
-  v1 plans that had `- [x] N.0 Title` anchors preserve the validation
-  marker as a prose breadcrumb on canonicalize: `*(was marked [x] in v1 —
-  archive to make it official)*`.
+- **Phases don't have state** under FORMATv2 (header form has no checkbox);
+  completion is derived from the phase's leaves.
 
 ### Phase dependency markers (informational)
 
@@ -89,8 +88,8 @@ with that task as today.
 
 ### Backlog section (`# Backlog (not yet phased)`)
 
-- Canonical heading is h1 `# Backlog (not yet phased)` (FORMATv2). Legacy
-  h2 `## Backlog` is accepted on read; `canonicalize` flips it to h1.
+- Canonical heading is h1 `# Backlog (not yet phased)` (FORMATv2). A legacy
+  h2 `## Backlog` is still accepted on read.
 - Lives as a first-class trailing region pinned to the bottom of PLAN.md.
 - Two entry shapes:
   - Flat notes: `- **Subject** — added <date>.` (unphased work captured by
@@ -103,13 +102,14 @@ with that task as today.
     ```
 - Survives phase archive sweeps — the durable record of deferred work.
 
-### Conservative format dispatch
+### FORMATv2-only (since v1.0.0)
 
-Routine writes (TaskCreate, TaskUpdate, archive sweep) preserve the
-on-disk format per phase. A v1 anchor stays a v1 anchor; a v2 header
-stays a v2 header. The single operation that flips everything to
-FORMATv2 canonical is `plan-bridge canonicalize` — explicit, idempotent,
-itemizes every change in its report.
+The bridge reads and writes FORMATv2 exclusively. The legacy v1 anchor
+form (`- [ ] N.0 Title` promoted to a phase), bold-wrapped ids, and
+em-dash separators are gone — a column-0 checkbox with no `## Phase`
+header above it is a parse error (`OrphanCheckbox`). Plans still on v1
+must run `claude-plan-bridge canonicalize` on the **0.9.x** release to
+migrate, then upgrade; the `canonicalize` verb does not exist in 1.0.0.
 
 ## Activation focus (Phase 40)
 
@@ -185,15 +185,14 @@ Rationale: hard-deletes via TaskUpdate were error-prone — an accidental "remov
 
 ### Tolerated input variants (read-only liberality)
 
-The parser accepts and normalizes-away the following common informal formats on read. The serializer **always** writes canonical (no bold, plain space separator, ID-first, no section headers within the tree):
+FORMATv2-only narrows what's tolerated. The parser still accepts these informal variants on read; the serializer **always** writes canonical ( ` - ` separator, ID-first, no section headers within the tree):
 
-- **Bold-wrapped IDs**: `- [x] **X.4.a.1** — title` parses to the same AST as `- [x] X.4.a.1 title`.
-- **Em-dash / hyphen separator** between ID and title: ` — `, ` - `, or plain whitespace are all accepted.
+- **Separator**: ` - ` hyphen-space OR a bare space between ID and title (`X.4.a.1 - title` and `X.4.a.1 title` both parse). Normalized to ` - ` on write.
 - **Alphanumeric IDs** with dots (`X.4.a.1`, `Y.2.gate`) in addition to pure numeric. IDs must contain at least one dot OR be all-digits, to disambiguate from title text.
 - **Bare checkboxes without an ID** (`- [ ] do the thing`); the AST records `id: ""` and re-emits in that form.
-- **Markdown section headers** (`## Phase X`, `### X.1`) appearing inside the tree; attached as text annotations on the most recent open node. Structural fidelity is **not** preserved for inputs that use sections-as-implicit-parents — the canonical model is checkboxes all the way down. Migration is the user's responsibility.
+- **Markdown section headers** (`### X.1`, `## Notes`) appearing inside the tree; attached as text annotations on the most recent open node. They are NOT promoted to phases — only a column-0 `## Phase X - Title` opens a phase.
 
-This is intentionally lossy on format (bold/em-dash → plain) so the canonical output stays unambiguous. AST is round-trip stable; source-format preservation is not a v1 concern.
+**No longer tolerated** (dropped v1 cosmetics, removed in 1.0.0): bold-wrapped ids (`**X.4**`), em-dash separators (` — `), and the v1 anchor form (`- [ ] N.0 Title` promoted to a phase). A column-0 checkbox with no `## Phase` header above it is a parse error. AST is round-trip stable; there is now exactly one on-disk format.
 
 ## PLAN.md → TaskCreate mapping
 
@@ -218,9 +217,8 @@ When `TaskCreate(plan_path=N.X)` arrives for a phase `N` that doesn't yet exist:
 | Missing entirely | Synthesizes `## Phase N - <plan_phase or "Phase N">` at top level, then inserts `N.X` under it (hyphen-separated). Hook output announces the auto-creation. |
 | Exists at top level | Inserts `N.X` as a child of the existing phase (the canonical path). |
 | Only a nested node shares the id shape | Phase 42.4: with bare phase ids a stray nested `N.0` no longer captures the bare parent `N` — `find_phase` matches only a real top-level phase — so the bridge synthesizes a clean `## Phase N` instead of the pre-42.4 refusal. The misplaced node is left untouched. |
-| Lives only as a `### Phase N — Title` markdown header | Falls back to `standardize_to_canonical()` to promote the header into a phase, then inserts. (Pre-Phase-31 fallback, preserved.) |
 
-Missing **intermediate** parents (e.g. `1.2` blocking a `1.2.3` insert) still error with the canonicalize hint — auto-creating non-anchor structure would invent nesting the user didn't ask for.
+Missing **intermediate** parents (e.g. `1.2` blocking a `1.2.3` insert) still error, asking you to create the parent first — auto-creating intermediate nesting would invent structure the user didn't ask for.
 
 ## Bridge components
 
@@ -267,7 +265,6 @@ plan-bridge writeback --event <create|update>            # PostToolUse hook hand
 plan-bridge reconcile                                     # UserPromptSubmit hook handler
 plan-bridge resume                                        # SessionStart hook handler
 plan-bridge archive [<PHASE>] [--descope-pending]         # bulk sweep / per-phase
-plan-bridge canonicalize [--dry-run]                      # explicit v1 → v2 flip
 plan-bridge backlog <plan_path>                           # defer (subtree-preserving)
 plan-bridge baseline                                      # seed state on install
 plan-bridge init [--force]                                # scaffold project
@@ -299,11 +296,10 @@ All project-scoped commands accept `--cwd <PATH>` (project root) and
 - `phase-add` creates a `## Phase X - Title` header with optional dep
   markers and positional `--after` insertion (defaults to id-sort order).
   TaskCreate's auto-anchor still handles the common "just start typing
-  tasks" path (and now synthesizes a v2 header, not a v1 anchor).
+  tasks" path, synthesizing a `## Phase X` header.
 - `phase-rename` rewrites a phase title. Refuses task ids loudly.
 - `phase-deps` replaces `depends_on` / `prefer_after` lists on a phase.
-  Either field is independently settable; empty array clears. Flips a v1
-  anchor to HeaderV2 form so the markers can render.
+  Either field is independently settable; empty array clears.
 
 ## MCP surface
 

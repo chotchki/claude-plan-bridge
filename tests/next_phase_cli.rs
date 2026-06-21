@@ -32,7 +32,7 @@ fn next_phase_cli_reconstructs_from_plan_and_archive() {
     std::fs::create_dir_all(&dir).unwrap();
 
     // Fresh project with no alpha phases yet → start the sequence at A.
-    std::fs::write(dir.join("PLAN.md"), "# PLAN\n- [ ] 1.0 nothing alpha\n").unwrap();
+    std::fs::write(dir.join("PLAN.md"), "# PLAN\n## Phase 1 - nothing alpha\n").unwrap();
     assert_eq!(next_phase(&dir), "A");
 
     // Live BZ, with CA already swept to the archive: the next id must clear

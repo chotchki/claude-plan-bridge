@@ -70,7 +70,7 @@ fn portable_wiring_install_stale_diagnose_fix_lifecycle() {
     let ghost_s = ghost.to_string_lossy().to_string();
     assert!(!ghost.exists(), "ghost dir must not exist");
     std::fs::write(&settings, stale_settings(&ghost_s)).unwrap();
-    std::fs::write(dir.join("PLAN.md"), "# PLAN\n- [ ] 1.0 Phase\n").unwrap();
+    std::fs::write(dir.join("PLAN.md"), "# PLAN\n## Phase 1 - Phase\n").unwrap();
 
     // 3. `status` flags the stale path loudly and points at the fix.
     let out = Command::new(binary())

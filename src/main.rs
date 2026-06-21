@@ -220,18 +220,6 @@ enum Command {
         #[arg(long)]
         date: Option<String>,
     },
-    /// Rewrite PLAN.md in canonical form: promote `### Phase N — Title`
-    /// markdown headers to `- [ ] N.0` checkboxes, strip bold-wrapped IDs,
-    /// normalize em-dash/hyphen separators. Routine writebacks no longer do
-    /// this implicitly (Phase 29) — adopters with bespoke conventions keep
-    /// their format until they explicitly invoke this subcommand. `--dry-run`
-    /// reports what would change without writing.
-    Canonicalize {
-        #[command(flatten)]
-        project: ProjectArgs,
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Create a new FORMATv2 phase header (`## Phase <ID> - <title>`) with
     /// optional `*(depends on: ...)*` and `*(prefer after: ...)*` markers.
     /// For the common "just start typing tasks" path, TaskCreate's auto-anchor
@@ -586,24 +574,6 @@ fn main() -> Result<()> {
             let msg = plan_bridge::backlog::backlog(&plan, &plan_path, &date)?;
             println!("claude-plan-bridge: {msg}");
         }
-        Command::Canonicalize { project, dry_run } => {
-            let plan = project.plan_path();
-            let report = plan_bridge::canonicalize::canonicalize(&plan, dry_run)?;
-            let verb = match (report.dry_run, report.changed) {
-                (true, true) => "would rewrite",
-                (true, false) => "already canonical (dry-run)",
-                (false, true) => "rewrote",
-                (false, false) => "already canonical",
-            };
-            println!(
-                "claude-plan-bridge: {verb} {} ({} header promotion(s))",
-                plan.display(),
-                report.notes.len()
-            );
-            for note in &report.notes {
-                println!("  - {note}");
-            }
-        }
         Command::PhaseAdd {
             project,
             id,
@@ -684,7 +654,6 @@ fn main() -> Result<()> {
             let phase = plan
                 .find_phase_mut(&id)
                 .ok_or_else(|| anyhow::anyhow!("no phase with id `{id}` at top level"))?;
-            phase.ensure_header_v2();
             if let Some(deps) = depends_on {
                 phase.depends_on = deps.into_iter().filter(|s| !s.is_empty()).collect();
             }
@@ -1293,8 +1262,6 @@ fn parse_task_spec(spec: &str, phase_id: &str) -> Option<plan_bridge::ast::Node>
         id: format!("{phase_id}.{suffix}"),
         title: subject.to_string(),
         state: plan_bridge::ast::NodeState::Pending,
-        id_style: plan_bridge::ast::IdStyle::Plain,
-        separator: plan_bridge::ast::Separator::Hyphen,
         children: vec![],
         annotations: vec![],
     })

@@ -788,7 +788,7 @@ mod tests {
         // A `backlog:<task_id>` mapping tracks a Backlog note, which has no
         // leaf in PLAN.md. It must NOT register as LeafRemoved drift.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         write_state(
             &plan,
             &[
@@ -823,7 +823,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Real id\n  - [ ] First bare\n  - [ ] Second bare\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Real id\n  - [ ] First bare\n  - [ ] Second bare\n",
         );
         write_state(&plan, &[("t-1", mapping("1.1", "Real id", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn no_drift_yields_no_deltas() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Task", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.is_empty(), "got: {deltas:?}");
@@ -853,7 +853,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         write_state(
             &plan,
@@ -876,7 +876,7 @@ mod tests {
     #[test]
     fn baseline_only_silent_when_no_baseline_mappings() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         write_state(
             &plan,
             &[("real-task-id", mapping("1.1", "Task", false, &[]))],
@@ -900,7 +900,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Open\n  - [x] 1.2 Done\n  - [-] 1.3 Skipped\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Open\n  - [x] 1.2 Done\n  - [-] 1.3 Skipped\n",
         );
         // Empty state simulates post-SessionStart-wipe.
         write_state(&plan, &[]);
@@ -931,7 +931,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Already announced\n  - [ ] 1.2 Brand new\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Already announced\n  - [ ] 1.2 Brand new\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
@@ -959,7 +959,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         write_state(&plan, &[("t-1", mapping("1.1", "First", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
@@ -972,26 +972,26 @@ mod tests {
 
     #[test]
     fn tracked_node_that_became_a_parent_is_not_removed() {
-        // Regression for Phase 9 bug: TaskCreate at 7.0 records a mapping; later
-        // TaskCreates add 7.1, 7.2 as children. 7.0 stops being a leaf but is
+        // Regression for Phase 9 bug: TaskCreate at 7.1 records a mapping; later
+        // TaskCreates add 7.1.1, 7.1.2 as children. 7.1 stops being a leaf but is
         // still present in PLAN.md — reconcile must NOT fire LeafRemoved.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 7.0 Parent that grew children\n  - [ ] 7.1 Child one\n  - [ ] 7.2 Child two\n",
+            "## Phase 7 - Phase\n  - [ ] 7.1 Parent that grew children\n    - [ ] 7.1.1 Child one\n    - [ ] 7.1.2 Child two\n",
         );
         write_state(
             &plan,
             &[(
                 "t-parent",
-                mapping("7.0", "Parent that grew children", false, &[]),
+                mapping("7.1", "Parent that grew children", false, &[]),
             )],
         );
         let deltas = reconcile(&plan).unwrap();
         assert!(
             !deltas.iter().any(|d| matches!(
                 d,
-                Delta::LeafRemoved { plan_path, .. } if plan_path == "7.0"
+                Delta::LeafRemoved { plan_path, .. } if plan_path == "7.1"
             )),
             "expected no LeafRemoved for parent-transitioned node, got: {deltas:?}"
         );
@@ -1001,7 +1001,7 @@ mod tests {
     fn detects_leaf_removed() {
         let dir = scratch_dir();
         // 1.0 has a child so it isn't itself a leaf; only 1.1's absence drives the test.
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.2 Still here\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.2 Still here\n");
         write_state(
             &plan,
             &[
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn detects_leaf_checked() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Done", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.iter().any(|d| matches!(
@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn detects_leaf_unchecked() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Task", true, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.iter().any(|d| matches!(
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn detects_leaf_backlogged() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [>] 1.1 Deferred\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [>] 1.1 Deferred\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Deferred", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(deltas.iter().any(|d| matches!(
@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn detects_leaf_un_backlogged() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Revived\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Revived\n");
         let mut m = mapping("1.1", "Revived", false, &[]);
         m.last_synced_state = NodeState::Backlog;
         write_state(&plan, &[("t-1", m)]);
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn detects_title_change() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Renamed task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Renamed task\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Old name", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         let found = deltas
@@ -1112,7 +1112,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n    This is a new note.\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Task\n    This is a new note.\n",
         );
         write_state(&plan, &[("t-1", mapping("1.1", "Task", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
@@ -1135,7 +1135,7 @@ mod tests {
         let plan = write_plan(
             &dir,
             "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
   - [x] 1.1 Done
   - [ ] 1.2 Renamed
   - [ ] 1.3 Brand new
@@ -1185,17 +1185,18 @@ mod tests {
         let plan = write_plan(
             &dir,
             "\
-- [x] 1.0 Parent prematurely checked
-  - [x] 1.1 Done
-  - [ ] 1.2 Still pending
+## Phase 1 - Phase
+  - [x] 1.1 Parent prematurely checked
+    - [x] 1.1.1 Done
+    - [ ] 1.1.2 Still pending
 ",
         );
         // State has both leaves mapped and consistent.
         write_state(
             &plan,
             &[
-                ("t-1", mapping("1.1", "Done", true, &[])),
-                ("t-2", mapping("1.2", "Still pending", false, &[])),
+                ("t-1", mapping("1.1.1", "Done", true, &[])),
+                ("t-2", mapping("1.1.2", "Still pending", false, &[])),
             ],
         );
         let deltas = reconcile(&plan).unwrap();
@@ -1210,8 +1211,8 @@ mod tests {
             })
             .collect();
         assert_eq!(inconsistencies.len(), 1, "got: {deltas:?}");
-        assert_eq!(inconsistencies[0].0, "1.0");
-        assert_eq!(inconsistencies[0].1, &vec!["1.2".to_string()]);
+        assert_eq!(inconsistencies[0].0, "1.1");
+        assert_eq!(inconsistencies[0].1, &vec!["1.1.2".to_string()]);
     }
 
     #[test]
@@ -1219,13 +1220,13 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [x] 1.0 Parent\n  - [x] 1.1 Done\n  - [x] 1.2 Also done\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 Parent\n    - [x] 1.1.1 Done\n    - [x] 1.1.2 Also done\n",
         );
         write_state(
             &plan,
             &[
-                ("t-1", mapping("1.1", "Done", true, &[])),
-                ("t-2", mapping("1.2", "Also done", true, &[])),
+                ("t-1", mapping("1.1.1", "Done", true, &[])),
+                ("t-2", mapping("1.1.2", "Also done", true, &[])),
             ],
         );
         let deltas = reconcile(&plan).unwrap();
@@ -1239,7 +1240,7 @@ mod tests {
     #[test]
     fn unchecked_parent_with_unchecked_child_emits_no_inconsistency() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Parent\n  - [ ] 1.1 Pending\n");
+        let plan = write_plan(&dir, "## Phase 1 - Parent\n  - [ ] 1.1 Pending\n");
         write_state(&plan, &[("t-1", mapping("1.1", "Pending", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();
         assert!(
@@ -1255,12 +1256,16 @@ mod tests {
         let plan = write_plan(
             &dir,
             "\
-- [x] 1.0 Phase
+## Phase 1 - Phase
   - [x] 1.1 Task
-    - [ ] 1.1.1 Sub
+    - [x] 1.1.1 Sub
+      - [ ] 1.1.1.1 Deep sub
 ",
         );
-        write_state(&plan, &[("t-1", mapping("1.1.1", "Sub", false, &[]))]);
+        write_state(
+            &plan,
+            &[("t-1", mapping("1.1.1.1", "Deep sub", false, &[]))],
+        );
         let deltas = reconcile(&plan).unwrap();
         let inconsistencies: Vec<_> = deltas
             .iter()
@@ -1272,7 +1277,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // Both 1.0 and 1.1 are inconsistent (each has 1.1.1 as unchecked descendant).
+        // Both 1.1 and 1.1.1 are inconsistent (each has 1.1.1.1 as unchecked descendant).
         assert_eq!(inconsistencies.len(), 2);
     }
 
@@ -1364,7 +1369,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
         );
         // Legacy state: header captured into last_synced_annotations.
         let m = Mapping {
@@ -1394,7 +1399,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Task\n## Phase 10 — Next\n",
         );
         let m = Mapping {
             plan_path: "1.1".to_string(),
@@ -1422,7 +1427,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n    ## Indented heading\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Task\n    ## Indented heading\n",
         );
         let m = Mapping {
             plan_path: "1.1".to_string(),
@@ -1449,7 +1454,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First phase\n  - [ ] 1.1 Real task\n- [ ] 10.0 Phase 10 anchor\n",
+            "## Phase 1 - First phase\n  - [ ] 1.1 Real task\n## Phase 10 - Phase 10 anchor\n",
         );
         // Only 1.1 is in state; both 1.0 and 10.0 are mapping-less leaves.
         write_state(&plan, &[("t-1", mapping("1.1", "Real task", false, &[]))]);
@@ -1479,7 +1484,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Tracked\n  - [ ] 1.2 Untracked\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Tracked\n  - [ ] 1.2 Untracked\n",
         );
         write_state(&plan, &[("t-1", mapping("1.1", "Tracked", false, &[]))]);
         let deltas = reconcile(&plan).unwrap();

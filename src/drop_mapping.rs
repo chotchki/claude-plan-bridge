@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn drops_by_plan_path() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         seed(&plan, &[("68", "BS.5"), ("70", "1.1")]);
 
         let report = drop_mapping(&plan, "BS.5").unwrap();
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn drops_by_task_id() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         seed(&plan, &[("baseline:BS.5", "BS.5")]);
 
         let report = drop_mapping(&plan, "baseline:BS.5").unwrap();
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn no_match_is_clean_noop() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         seed(&plan, &[("70", "1.1")]);
 
         let report = drop_mapping(&plan, "ZZ.9").unwrap();

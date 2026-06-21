@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, IdStyle, Node, NodeState, Phase, Plan, Separator};
+use crate::ast::{Annotation, Node, NodeState, Phase, Plan};
 
 /// Render a `Plan` back to markdown.
 ///
@@ -46,25 +46,10 @@ pub fn serialize(plan: &Plan) -> String {
     out
 }
 
-/// Per-phase serializer dispatch (Phase 37, user call 2026-05-22): routine
-/// writes preserve the on-disk format — v1 anchors stay as `- [ ] N.0 Title`
-/// checkboxes; v2 header phases (parsed from `## Phase X - Title`) emit as
-/// FORMATv2 headers. The format flip is explicit via `plan-bridge canonicalize`
-/// (Phase 37.5) rather than implicit on every write — preserves user data,
-/// avoids unbounded test cascade, and matches how most Markdown formatters
-/// behave on round-trip.
-fn write_phase(out: &mut String, phase: &Phase) {
-    if phase.is_v2_header_form() {
-        write_phase_v2(out, phase);
-    } else {
-        write_phase_v1_anchor(out, phase);
-    }
-}
-
-/// Phase 37.1–37.4: FORMATv2 header form. `## Phase <id> - <title>` with
+/// FORMATv2 header form (the only form): `## Phase <id> - <title>` with
 /// optional `*(depends on: ...)*` / `*(prefer after: ...)*` markers, phase
 /// prose at column 0, top-level tasks at depth=0.
-fn write_phase_v2(out: &mut String, phase: &Phase) {
+fn write_phase(out: &mut String, phase: &Phase) {
     if phase.id.is_empty() {
         out.push_str("## Phase\n");
     } else {
@@ -95,41 +80,6 @@ fn write_phase_v2(out: &mut String, phase: &Phase) {
     }
 }
 
-/// Legacy v1 anchor form: `- [<state>] <id> <title>` checkbox + children
-/// indented at depth=1. Preserves user-applied phase state markers
-/// (`[x]`/`[-]`/`[>]`) until the operator explicitly canonicalizes.
-fn write_phase_v1_anchor(out: &mut String, phase: &Phase) {
-    let mark = match phase.state {
-        NodeState::Done => "x",
-        NodeState::WontDo => "-",
-        NodeState::Backlog => ">",
-        NodeState::Pending => " ",
-    };
-    let body = if phase.id.is_empty() {
-        phase.title.clone()
-    } else {
-        let id_rendered = match phase.id_style {
-            IdStyle::Bold => format!("**{}**", phase.id),
-            IdStyle::Plain => phase.id.clone(),
-        };
-        let separator = match phase.separator {
-            Separator::Space => " ",
-            Separator::EmDash => " — ",
-            Separator::Hyphen => " - ",
-        };
-        format!("{id_rendered}{separator}{}", phase.title)
-    };
-    out.push_str(&format!("- [{mark}] {body}\n"));
-
-    let inner = "  ";
-    for ann in &phase.annotations {
-        write_annotation(out, ann, inner);
-    }
-    for child in &phase.children {
-        write_node(out, child, 1);
-    }
-}
-
 fn write_node(out: &mut String, node: &Node, depth: usize) {
     let indent = " ".repeat(depth * 2);
     let mark = match node.state {
@@ -140,19 +90,11 @@ fn write_node(out: &mut String, node: &Node, depth: usize) {
     };
     // Phase 29.7: build the post-checkbox body explicitly so a bare-id leaf
     // (id == "") emits `- [ ] title`, not `- [ ]  title` (double-space).
+    // FORMATv2 always renders id + title with the ` - ` hyphen-space separator.
     let body = if node.id.is_empty() {
         node.title.clone()
     } else {
-        let id_rendered = match node.id_style {
-            IdStyle::Bold => format!("**{}**", node.id),
-            IdStyle::Plain => node.id.clone(),
-        };
-        let separator = match node.separator {
-            Separator::Space => " ",
-            Separator::EmDash => " — ",
-            Separator::Hyphen => " - ",
-        };
-        format!("{id_rendered}{separator}{}", node.title)
+        format!("{} - {}", node.id, node.title)
     };
     out.push_str(&format!("{indent}- [{mark}] {body}\n"));
 
@@ -229,52 +171,64 @@ mod tests {
 
     #[test]
     fn single_unchecked_phase() {
-        let plan = parse("- [ ] 1.0 Phase\n").unwrap();
-        assert_eq!(serialize(&plan), "- [ ] 1.0 Phase\n");
+        let plan = parse("## Phase 1 - Phase\n").unwrap();
+        assert_eq!(serialize(&plan), "## Phase 1 - Phase\n");
     }
 
     #[test]
     fn single_checked_phase() {
-        let plan = parse("- [x] 1.0 Done\n").unwrap();
-        assert_eq!(serialize(&plan), "- [x] 1.0 Done\n");
+        let plan = parse("## Phase 1 - Done\n- [x] 1.1 - Done task\n").unwrap();
+        assert_eq!(
+            serialize(&plan),
+            "## Phase 1 - Done\n- [x] 1.1 - Done task\n"
+        );
     }
 
     #[test]
     fn wont_do_phase_round_trips_with_dash() {
-        let plan = parse("- [-] 1.0 Skipped\n").unwrap();
-        assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
+        let plan = parse("## Phase 1 - Skipped\n- [-] 1.1 - Skipped task\n").unwrap();
+        assert_eq!(
+            serialize(&plan),
+            "## Phase 1 - Skipped\n- [-] 1.1 - Skipped task\n"
+        );
     }
 
     #[test]
     fn backlog_phase_round_trips_with_gt() {
-        let plan = parse("- [>] 1.0 Deferred\n").unwrap();
-        assert_eq!(serialize(&plan), "- [>] 1.0 Deferred\n");
+        let plan = parse("## Phase 1 - Deferred\n- [>] 1.1 - Deferred task\n").unwrap();
+        assert_eq!(
+            serialize(&plan),
+            "## Phase 1 - Deferred\n- [>] 1.1 - Deferred task\n"
+        );
     }
 
     #[test]
     fn tilde_input_normalizes_to_dash_on_write() {
-        let plan = parse("- [~] 1.0 Skipped\n").unwrap();
+        let plan = parse("## Phase 1 - Skipped\n- [~] 1.1 - Skipped task\n").unwrap();
         // Tilde is accepted on read, but canonical output is `[-]`.
-        assert_eq!(serialize(&plan), "- [-] 1.0 Skipped\n");
+        assert_eq!(
+            serialize(&plan),
+            "## Phase 1 - Skipped\n- [-] 1.1 - Skipped task\n"
+        );
     }
 
     #[test]
     fn backlog_field_renders_at_bottom() {
-        let mut plan = parse("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n").unwrap();
+        let mut plan = parse("## Phase 1 - Phase\n- [ ] 1.1 - Task\n").unwrap();
         plan.backlog
             .push("- **Deferred thing** — added 2026-05-19.".to_string());
         let out = serialize(&plan);
         assert_eq!(
             out,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Backlog (not yet phased)\n\n- **Deferred thing** — added 2026-05-19.\n"
+            "## Phase 1 - Phase\n- [ ] 1.1 - Task\n\n## Backlog (not yet phased)\n\n- **Deferred thing** — added 2026-05-19.\n"
         );
     }
 
     #[test]
     fn empty_backlog_field_emits_nothing() {
-        let plan = parse("- [ ] 1.0 Phase\n").unwrap();
+        let plan = parse("## Phase 1 - Phase\n").unwrap();
         assert!(plan.backlog.is_empty());
-        assert_eq!(serialize(&plan), "- [ ] 1.0 Phase\n");
+        assert_eq!(serialize(&plan), "## Phase 1 - Phase\n");
     }
 
     #[test]
@@ -291,16 +245,16 @@ mod tests {
     #[test]
     fn nested_normalizes_indent() {
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
     - [ ] 1.1 Task
         - [ ] 1.1.1 Sub
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         let expected = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
-    - [ ] 1.1.1 Sub
+## Phase 1 - Phase
+- [ ] 1.1 - Task
+  - [ ] 1.1.1 - Sub
 ";
         assert_eq!(out, expected);
     }
@@ -312,12 +266,12 @@ mod tests {
 
 Prose.
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         assert!(out.starts_with("# Header\n\nProse.\n\n"));
-        assert!(out.contains("- [ ] 1.0 Phase\n"));
+        assert!(out.contains("## Phase 1 - Phase\n"));
     }
 
     #[test]
@@ -329,27 +283,17 @@ Prose.
     #[test]
     fn roundtrips_with_annotations() {
         let input = "\
-- [ ] 1.0 Phase
-  Some text annotation.
-  - a bullet annotation
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+Some text annotation.
+- a bullet annotation
+- [ ] 1.1 - Task
 ";
         roundtrip_stable(input);
     }
 
     #[test]
-    fn bold_wrapped_id_round_trips() {
-        // Phase 29.4: a bold-wrapped id (`- [x] **X.4.a.1** — title`) survives
-        // parse → serialize without being stripped to plain.
-        let input = "- [x] **X.4.a.1** Studio severability test\n";
-        let plan = parse(input).unwrap();
-        let out = serialize(&plan);
-        assert_eq!(out, input, "bold wrap should round-trip:\n{out}");
-    }
-
-    #[test]
     fn plain_id_round_trips() {
-        let input = "- [ ] 1.2.3 Plain id\n";
+        let input = "## Phase 1 - Phase\n- [ ] 1.2.3 - Plain id\n";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         assert_eq!(out, input);
@@ -360,7 +304,7 @@ Prose.
         // Phase 29.7 regression. A bare-checkbox leaf (`- [ ] just a title`,
         // no id) used to round-trip as `- [ ]  just a title` (double space)
         // because the format string assumed an id was always present.
-        let input = "- [ ] Make the core domain model the source of truth.\n";
+        let input = "## Phase 1 - Phase\n- [ ] Make the core domain model the source of truth.\n";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         assert_eq!(out, input, "bare-id leaf must round-trip cleanly:\n{out}");
@@ -372,10 +316,10 @@ Prose.
         // Phase 29.6: blank lines inside a phase tree are captured as
         // `Annotation::Blank { count }` and re-emitted on serialize.
         let input = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+- [ ] 1.1 - Task
 
-  - [ ] 1.2 Task after blank
+- [ ] 1.2 - Task after blank
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
@@ -385,12 +329,12 @@ Prose.
     #[test]
     fn consecutive_blanks_coalesce_and_round_trip() {
         let input = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+- [ ] 1.1 - Task
 
 
 
-  - [ ] 1.2 After 3 blanks
+- [ ] 1.2 - After 3 blanks
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
@@ -398,55 +342,12 @@ Prose.
     }
 
     #[test]
-    fn em_dash_separator_round_trips() {
-        // Phase 29.5: `id — title` survives parse → serialize with the
-        // em-dash preserved, not flattened to plain space.
-        let input = "- [x] **X.4.a.1** — Studio severability test\n";
-        let plan = parse(input).unwrap();
-        let out = serialize(&plan);
-        assert_eq!(out, input, "em-dash should round-trip:\n{out}");
-    }
-
-    #[test]
     fn hyphen_separator_round_trips() {
-        let input = "- [x] 1.2.3 - Hyphen-separated title\n";
+        // FORMATv2 canonical separator is ` - ` (hyphen-space).
+        let input = "## Phase 1 - Phase\n- [x] 1.2.3 - Hyphen-separated title\n";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
         assert_eq!(out, input, "hyphen should round-trip:\n{out}");
-    }
-
-    #[test]
-    fn standardize_flattens_bold_only_keeps_separator() {
-        // Phase 37 conservative model: `standardize_to_canonical` only
-        // strips bold-wrapped IDs. Separator stays per-node — the explicit
-        // `canonicalize` verb (37.5) is what flips ` ` / ` — ` to ` - `.
-        // Routine archive paths that call standardize internally don't
-        // change a v1 plan's separator formatting.
-        let input = "- [x] **X.4.a.1** — Studio severability test\n";
-        let plan = parse(input).unwrap();
-        let (canonical, _) = plan.standardize_to_canonical().unwrap();
-        let out = serialize(&canonical);
-        assert!(!out.contains("**"), "bold should be flattened:\n{out}");
-        // Separator preserved (em-dash → em-dash).
-        assert!(
-            out.contains("X.4.a.1 — Studio severability test"),
-            "em-dash preserved through standardize:\n{out}"
-        );
-    }
-
-    #[test]
-    fn canonicalize_flattens_bold_id_to_plain() {
-        // Phase 29.4: the destructive normalization lives in
-        // standardize_to_canonical, NOT routine writeback.
-        let input = "- [x] **X.4.a.1** Studio severability test\n";
-        let plan = parse(input).unwrap();
-        let (canonical, _notes) = plan.standardize_to_canonical().unwrap();
-        let out = serialize(&canonical);
-        assert!(
-            !out.contains("**"),
-            "canonical form must strip bold:\n{out}"
-        );
-        assert!(out.contains("X.4.a.1 Studio severability test"));
     }
 
     #[test]
@@ -458,14 +359,16 @@ Prose.
         // preserve their original indent — not snap to the parent node's
         // canonical depth.
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
+- [ ] 1.1 - task
 
 ## Phase history
 
 - **Phase N** — done.
 - **Phase O** — done.
 
-- [ ] 2.0 Next phase
+## Phase 2 - Next phase
+- [ ] 2.1 - task
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
@@ -482,10 +385,10 @@ Prose.
     #[test]
     fn roundtrips_with_code_block() {
         let input = "\
-- [ ] 1.0 Phase
-  ```rust
-  fn foo() {}
-  ```
+## Phase 1 - Phase
+```rust
+fn foo() {}
+```
 ";
         roundtrip_stable(input);
     }
@@ -493,14 +396,14 @@ Prose.
     #[test]
     fn renders_annotations_at_correct_depth() {
         let input = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
-    text annotation on 1.1
+## Phase 1 - Phase
+- [ ] 1.1 - Task
+  text annotation on 1.1
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
-        // Annotation on 1.1 (depth 1) should be at 4-space indent.
-        assert!(out.contains("    text annotation on 1.1\n"), "got:\n{out}");
+        // Annotation on 1.1 (a column-0 task) should be at 2-space indent.
+        assert!(out.contains("  text annotation on 1.1\n"), "got:\n{out}");
     }
 
     #[test]
@@ -510,10 +413,11 @@ Prose.
         // used to be demoted to canonical-child indent (4+ spaces). Now it
         // stays at column 0.
         let input = "\
-- [ ] 1.0 First
-  - [ ] 1.1 sub
+## Phase 1 - First
+- [ ] 1.1 - sub
 ---
-- [ ] 2.0 Second
+## Phase 2 - Second
+- [ ] 2.1 - sub
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
@@ -536,21 +440,21 @@ Prose.
         // Phase 29.6: blanks come from source via `Annotation::Blank`, not
         // serializer auto-insertion. When source has blanks between phases,
         // they round-trip. When source has none, none are emitted.
-        let with_blanks = parse("- [ ] 1.0 A\n\n- [ ] 2.0 B\n\n- [ ] 3.0 C\n").unwrap();
+        let with_blanks = parse("## Phase 1 - A\n\n## Phase 2 - B\n\n## Phase 3 - C\n").unwrap();
         let out = serialize(&with_blanks);
         assert!(
-            out.contains("- [ ] 1.0 A\n\n- [ ] 2.0 B\n"),
+            out.contains("## Phase 1 - A\n\n## Phase 2 - B\n"),
             "blank between 1.0 and 2.0 preserved from source:\n{out}"
         );
         assert!(
-            out.contains("- [ ] 2.0 B\n\n- [ ] 3.0 C\n"),
+            out.contains("## Phase 2 - B\n\n## Phase 3 - C\n"),
             "blank between 2.0 and 3.0 preserved from source:\n{out}"
         );
 
-        let no_blanks = parse("- [ ] 1.0 A\n- [ ] 2.0 B\n").unwrap();
+        let no_blanks = parse("## Phase 1 - A\n## Phase 2 - B\n").unwrap();
         let out_no = serialize(&no_blanks);
         assert!(
-            !out_no.contains("\n\n- [ ] 2.0"),
+            !out_no.contains("\n\n## Phase 2 - B"),
             "no blank between phases when source had none:\n{out_no}"
         );
     }
@@ -575,59 +479,60 @@ Prose.
             out.contains("## Phase AS - Spine *(depends on: AR, AQ)* *(prefer after: AB)*"),
             "v2 header with both markers round-trips:\n{out}"
         );
-        // Top-level task lands at column 0 (depth=0) under a v2 phase.
+        // Top-level task lands at column 0 (depth=0) under a v2 phase, with the
+        // canonical ` - ` separator.
         assert!(
-            out.contains("\n- [ ] AS.0 plan\n"),
+            out.contains("\n- [ ] AS.0 - plan\n"),
             "task at column 0:\n{out}"
         );
-        // And no v1-anchor form.
+        // And the phase itself stays a header — no checkbox anchor for it.
         assert!(
-            !out.contains("- [ ] AS - Spine") && !out.contains("- [ ] AS.0 - "),
-            "no v1 anchor sneaks in:\n{out}"
+            !out.contains("- [ ] AS - Spine"),
+            "phase must not render as an anchor checkbox:\n{out}"
         );
     }
 
     #[test]
-    fn v1_anchor_phase_keeps_v1_form_on_routine_write() {
-        // Conservative dispatch: a phase parsed from `- [ ] N.0 Title`
-        // (source=LegacyAnchor) round-trips as `- [ ] N.0 Title`. Explicit
-        // canonicalize is the only way to flip to v2.
-        let input = "- [x] 1.0 Done legacy phase\n  - [ ] 1.1 task\n";
+    fn v2_phase_emits_header_form_with_tasks_at_column_zero() {
+        // A v2 header phase always serializes via `## Phase X - Title` with its
+        // tasks dedented to column 0 and the ` - ` separator — never an anchor
+        // checkbox for the phase.
+        let input = "## Phase 1 - Done legacy phase\n- [x] 1.1 - task\n";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
-        assert_eq!(out, input, "v1 anchor preserved on routine write:\n{out}");
+        assert_eq!(out, input, "v2 header round-trips canonically:\n{out}");
     }
 
     #[test]
-    fn mixed_v1_and_v2_phases_serialize_each_in_their_own_form() {
-        // A plan with one v1 anchor and one v2 header: each round-trips in
-        // its native form. The fixture covers this end-to-end; this is the
-        // minimal direct assertion.
+    fn mixed_phases_serialize_each_as_header() {
+        // Two v2 header phases: each round-trips as a header with column-0
+        // tasks. The fixture covers this end-to-end; this is the minimal
+        // direct assertion.
         let input = "\
-- [x] 1.0 Legacy
-  - [x] 1.1 done
+## Phase 1 - Legacy
+- [x] 1.1 - done
 
 ## Phase AI - New world
 
-- [ ] AI.0 task
+- [ ] AI.0 - task
 ";
         let plan = parse(input).unwrap();
         let out = serialize(&plan);
-        assert!(out.contains("- [x] 1.0 Legacy"), "v1 anchor preserved");
+        assert!(
+            out.contains("## Phase 1 - Legacy"),
+            "phase 1 header preserved"
+        );
         assert!(
             out.contains("## Phase AI - New world"),
             "v2 header preserved"
         );
-        assert!(out.contains("\n- [ ] AI.0 task\n"), "AI.0 at column 0");
-        assert!(
-            out.contains("  - [x] 1.1 done"),
-            "v1 task indented under v1 anchor (depth=1)"
-        );
+        assert!(out.contains("\n- [ ] AI.0 - task\n"), "AI.0 at column 0");
+        assert!(out.contains("- [x] 1.1 - done"), "phase-1 task at column 0");
     }
 
     #[test]
     fn no_blank_before_first_phase_or_after_last() {
-        let plan = parse("- [ ] 1.0 Only\n").unwrap();
+        let plan = parse("## Phase 1 - Only\n").unwrap();
         let out = serialize(&plan);
         assert!(
             !out.starts_with('\n'),

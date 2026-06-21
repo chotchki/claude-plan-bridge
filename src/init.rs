@@ -27,10 +27,11 @@ const STARTER_PLAN: &str = "\
 Describe what you're building.
 
 <!--
-This PLAN.md is driven by `claude-plan-bridge`:
-- TaskCreate adds a `- [ ] N.M task` line at `metadata.plan_path`; with no
-  `plan_path` it lands as a tracked note in the bottom `## Backlog (not yet
-  phased)` section instead.
+This PLAN.md is driven by `claude-plan-bridge` (FORMATv2):
+- Phases are `## Phase <ID> - <Title>` headers; tasks are `- [ ] <ID> - <task>`
+  lines under them.
+- TaskCreate adds a task line at `metadata.plan_path`; with no `plan_path` it
+  lands as a tracked note in the bottom `# Backlog (not yet phased)` section.
 - TaskUpdate(status='completed') ticks the box; (status='deleted') removes
   the line; (subject='...') rewrites the title.
 - Hand-edits between turns surface as `additionalContext` on the next
@@ -41,13 +42,14 @@ This PLAN.md is driven by `claude-plan-bridge`:
   looks wrong.
 -->
 
-- [ ] 1.0 Phase one
+## Phase 1 - Phase one
+- [ ] 1.1 - First task
 ";
 
 /// Idempotent install of the bridge into the project rooted at `cwd`:
 ///
-/// 1. Scaffold `PLAN.md` with a starter `1.0 Phase one` if missing (or always
-///    if `force=true`).
+/// 1. Scaffold `PLAN.md` with a starter `## Phase 1 - Phase one` if missing (or
+///    always if `force=true`).
 /// 2. Merge plan-bridge hooks into `.claude/settings.json`. Existing
 ///    `plan-bridge` entries are stripped and replaced — re-running is safe.
 /// 3. Append `.claude/plan-bridge-state.json` to `.gitignore` (creating it if
@@ -518,7 +520,7 @@ mod tests {
         assert!(report.created_gitignore);
 
         let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
-        assert!(plan.contains("- [ ] 1.0 Phase one"));
+        assert!(plan.contains("## Phase 1 - Phase one"));
 
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
@@ -1252,7 +1254,7 @@ mod tests {
         let report = init(&dir, true).unwrap();
         assert!(report.created_plan);
         let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
-        assert!(plan.contains("1.0 Phase one"));
+        assert!(plan.contains("## Phase 1 - Phase one"));
     }
 
     #[test]

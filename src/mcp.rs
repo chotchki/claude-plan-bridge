@@ -168,27 +168,12 @@ impl McpServer {
             id: plan_path.clone(),
             title: subject.clone(),
             state: NodeState::Pending,
-            id_style: crate::ast::IdStyle::Plain,
-            separator: crate::ast::Separator::Space,
             children: vec![],
             annotations: vec![],
         };
         match parent_id_for(&plan_path) {
             None => plan.phases.push(crate::ast::Phase::from_node(new_node)),
             Some(pid) => {
-                // Conditional canonicalize fallback: if the parent isn't found,
-                // it may be living as a `### Phase N — Title` markdown header
-                // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
-                // Promote those into checkboxes and retry. If still missing,
-                // surface the original error.
-                if !plan.contains_id(&pid) {
-                    let parsed = parse(&text)?;
-                    let (standardized, _notes) =
-                        parsed.standardize_to_canonical().map_err(|e| anyhow!(e))?;
-                    if standardized.contains_id(&pid) {
-                        plan = standardized;
-                    }
-                }
                 plan.add_child_of(&pid, new_node).map_err(|e| anyhow!(e))?;
             }
         }
@@ -232,8 +217,6 @@ impl McpServer {
                 id: format!("{id}.{}", i + 1),
                 title: subject.clone(),
                 state: NodeState::Pending,
-                id_style: crate::ast::IdStyle::Plain,
-                separator: crate::ast::Separator::Hyphen,
                 children: vec![],
                 annotations: vec![],
             })
@@ -419,9 +402,6 @@ impl McpServer {
         let phase = plan
             .find_phase_mut(&id)
             .ok_or_else(|| anyhow!("no phase with id `{id}` at top level"))?;
-        // Force HeaderV2 form so the markers can be emitted — legacy v1
-        // anchors don't have a place to render them.
-        phase.ensure_header_v2();
         if let Some(deps) = new_depends_on {
             phase.depends_on = deps;
         }
@@ -920,7 +900,7 @@ mod tests {
 
     #[test]
     fn initialize_returns_capabilities() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
@@ -933,7 +913,7 @@ mod tests {
 
     #[test]
     fn tools_list_includes_all_tools() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
@@ -1175,8 +1155,8 @@ mod tests {
             after.contains("## Phase AI - Fresh title *(depends on: AR)*"),
             "title rewritten, markers preserved:\n{after}"
         );
-        // Tasks untouched.
-        assert!(after.contains("- [ ] AI.0 task"));
+        // Tasks untouched (serializer normalizes to the ` - ` separator).
+        assert!(after.contains("- [ ] AI.0 - task"));
     }
 
     #[test]
@@ -1254,26 +1234,6 @@ mod tests {
             }}),
         );
         assert!(resp.get("error").is_some(), "must error: {resp}");
-    }
-
-    #[test]
-    fn plan_set_phase_deps_flips_v1_anchor_to_v2_form() {
-        // Setting deps on a legacy v1 anchor flips it to HeaderV2 — markers
-        // can only render in the header form.
-        let (_, s) = scratch_plan("- [ ] 1.0 Legacy phase\n  - [ ] 1.1 task\n");
-        let resp = rpc(
-            &s,
-            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                "name": "plan_set_phase_deps",
-                "arguments": {"id": "1.0", "depends_on": ["0.0"]}
-            }}),
-        );
-        assert!(resp.get("error").is_none(), "got: {resp}");
-        let after = std::fs::read_to_string(&s.plan_path).unwrap();
-        assert!(
-            after.contains("## Phase 1 - Legacy phase *(depends on: 0.0)*"),
-            "phase flipped to v2 form with marker:\n{after}"
-        );
     }
 
     #[test]
@@ -1419,14 +1379,14 @@ mod tests {
 
     #[test]
     fn plan_backlog_flips_pending_leaf() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 90, "method": "tools/call", "params": {"name": "plan_backlog", "arguments": {"plan_path": "1.1", "date": "2026-05-17"}}}),
         );
         assert!(resp.get("error").is_none(), "got: {resp}");
         let after = std::fs::read_to_string(&s.plan_path).unwrap();
-        assert!(after.contains("- [>] 1.1 Task"), "got: {after}");
+        assert!(after.contains("- [>] 1.1 - Task"), "got: {after}");
         // Phase 38.6: FORMATv2 backlog bullet ` - id - title *(...)*`.
         assert!(
             after.contains("- 1.1 - Task *(deferred from phase `1` on 2026-05-17)*"),
@@ -1436,31 +1396,32 @@ mod tests {
 
     #[test]
     fn plan_list_returns_ast_text() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "plan_list", "arguments": {}}}),
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("\"id\": \"1.0\""));
+        // FORMATv2: a `## Phase 1` header yields phase id "1" (not "1.0").
+        assert!(text.contains("\"id\": \"1\""));
         assert!(text.contains("\"id\": \"1.1\""));
     }
 
     #[test]
     fn plan_check_mutates_plan_md() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "plan_check", "arguments": {"plan_path": "1.1"}}}),
         );
         assert!(resp.get("error").is_none(), "unexpected error: {resp}");
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("- [x] 1.1 Task"), "got: {after}");
+        assert!(after.contains("- [x] 1.1 - Task"), "got: {after}");
     }
 
     #[test]
     fn plan_check_unknown_id_errors() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "plan_check", "arguments": {"plan_path": "9.9"}}}),
@@ -1472,29 +1433,30 @@ mod tests {
 
     #[test]
     fn plan_uncheck_works() {
-        let (p, s) = scratch_plan("- [x] 1.0 Phase\n");
+        // Uncheck flips a Done leaf back to Pending.
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n- [x] 1.1 - Done task\n");
         rpc(
             &s,
-            json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "plan_uncheck", "arguments": {"plan_path": "1.0"}}}),
+            json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "plan_uncheck", "arguments": {"plan_path": "1.1"}}}),
         );
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("- [ ] 1.0 Phase"), "got: {after}");
+        assert!(after.contains("- [ ] 1.1 - Done task"), "got: {after}");
     }
 
     #[test]
     fn plan_add_inserts_new_leaf() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n");
         rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "plan_add", "arguments": {"plan_path": "1.1", "subject": "new task"}}}),
         );
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("  - [ ] 1.1 new task"), "got: {after}");
+        assert!(after.contains("- [ ] 1.1 - new task"), "got: {after}");
     }
 
     #[test]
     fn plan_add_rejects_existing_id() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Old\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Old\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "plan_add", "arguments": {"plan_path": "1.1", "subject": "x"}}}),
@@ -1510,7 +1472,7 @@ mod tests {
 
     #[test]
     fn unknown_method_errors() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = rpc(&s, json!({"jsonrpc": "2.0", "id": 9, "method": "blarg"}));
         assert!(resp.get("error").is_some());
         assert!(
@@ -1523,7 +1485,7 @@ mod tests {
 
     #[test]
     fn malformed_json_returns_parse_error_with_null_id() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = s.handle_line("not json").expect("got something");
         let parsed: Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(parsed["id"], Value::Null);
@@ -1532,7 +1494,7 @@ mod tests {
 
     #[test]
     fn notifications_get_no_response() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         // Notification: no `id` field.
         let resp = s.handle_line(r#"{"jsonrpc": "2.0", "method": "notifications/initialized"}"#);
         assert!(resp.is_none());
@@ -1540,21 +1502,21 @@ mod tests {
 
     #[test]
     fn plan_skip_marks_wont_do() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "plan_skip", "arguments": {"plan_path": "1.1"}}}),
         );
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("- [-] 1.1 Task"), "got: {after}");
+        assert!(after.contains("- [-] 1.1 - Task"), "got: {after}");
     }
 
     #[test]
     fn plan_skip_no_op_when_already_skipped() {
-        let (_, s) = scratch_plan("- [-] 1.0 Skipped\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n- [-] 1.1 - Skipped\n");
         let resp = rpc(
             &s,
-            json!({"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "plan_skip", "arguments": {"plan_path": "1.0"}}}),
+            json!({"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "plan_skip", "arguments": {"plan_path": "1.1"}}}),
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("already"), "got: {text}");
@@ -1562,26 +1524,28 @@ mod tests {
 
     #[test]
     fn plan_phase_exit_archives_one_phase() {
-        let (p, s) = scratch_plan("- [x] 1.0 Done\n  - [x] 1.1 Sub\n- [x] 2.0 Also done\n");
+        let (p, s) = scratch_plan(
+            "## Phase 1 - Done\n- [x] 1.1 - Sub\n## Phase 2 - Also done\n- [x] 2.1 - Sub\n",
+        );
         let resp = rpc(
             &s,
-            json!({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1.0", "date": "2026-05-16"}}}),
+            json!({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1", "date": "2026-05-16"}}}),
         );
         assert!(resp.get("error").is_none(), "{resp}");
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(!after.contains("1.0 Done"));
+        assert!(!after.contains("## Phase 1 - Done"));
         assert!(
-            after.contains("2.0 Also done"),
+            after.contains("## Phase 2 - Also done"),
             "untargeted phase should remain"
         );
     }
 
     #[test]
     fn plan_phase_exit_refuses_unresolved_phase() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Pending\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Pending\n");
         let resp = rpc(
             &s,
-            json!({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1.0"}}}),
+            json!({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "plan_phase_exit", "arguments": {"plan_path": "1"}}}),
         );
         assert!(resp.get("error").is_some());
         assert!(
@@ -1594,39 +1558,43 @@ mod tests {
 
     #[test]
     fn plan_rename_leaf_rewrites_title() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Old title\n");
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Old title\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.1", "new_subject": "New title"}}}),
         );
         assert!(resp.get("error").is_none(), "got error: {resp}");
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("- [ ] 1.1 New title"), "got:\n{after}");
+        assert!(after.contains("- [ ] 1.1 - New title"), "got:\n{after}");
         assert!(!after.contains("Old title"));
     }
 
     #[test]
     fn plan_rename_parent_preserves_children() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Child\n");
+        let (p, s) =
+            scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Child\n");
         rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.1", "new_subject": "Renamed parent"}}}),
         );
         let after = std::fs::read_to_string(&p).unwrap();
-        assert!(after.contains("- [ ] 1.1 Renamed parent"), "got:\n{after}");
         assert!(
-            after.contains("- [ ] 1.1.1 Child"),
+            after.contains("- [ ] 1.1 - Renamed parent"),
+            "got:\n{after}"
+        );
+        assert!(
+            after.contains("- [ ] 1.1.1 - Child"),
             "child preserved:\n{after}"
         );
     }
 
     #[test]
     fn plan_rename_identical_title_is_no_op() {
-        let (p, s) = scratch_plan("- [ ] 1.0 Same\n");
+        let (p, s) = scratch_plan("## Phase 1 - Same\n");
         let before = std::fs::read_to_string(&p).unwrap();
         let resp = rpc(
             &s,
-            json!({"jsonrpc": "2.0", "id": 32, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1.0", "new_subject": "Same"}}}),
+            json!({"jsonrpc": "2.0", "id": 32, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "1", "new_subject": "Same"}}}),
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("already titled"), "got: {text}");
@@ -1636,7 +1604,7 @@ mod tests {
 
     #[test]
     fn plan_rename_unknown_path_errors() {
-        let (_, s) = scratch_plan("- [ ] 1.0 Phase\n");
+        let (_, s) = scratch_plan("## Phase 1 - Phase\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 33, "method": "tools/call", "params": {"name": "plan_rename", "arguments": {"plan_path": "9.9", "new_subject": "doesn't matter"}}}),
@@ -1650,7 +1618,7 @@ mod tests {
         // Set up: a tracked task at 1.1 with last_synced_title = "Old".
         // After plan_rename, the state's last_synced_title should be the new
         // title so reconcile is silent.
-        let (p, s) = scratch_plan("- [ ] 1.0 Phase\n  - [ ] 1.1 Old\n");
+        let (p, s) = scratch_plan("## Phase 1 - Phase\n  - [ ] 1.1 Old\n");
         let state_path = crate::state::default_state_path_for(&p);
         let mut state = crate::state::State::default();
         state.record(
@@ -1677,16 +1645,18 @@ mod tests {
 
     #[test]
     fn plan_archive_via_mcp() {
-        let (p, s) = scratch_plan("- [x] 1.0 Done\n  - [x] 1.1 Sub done\n- [ ] 2.0 Pending\n");
+        let (p, s) =
+            scratch_plan("## Phase 1 - Done\n- [x] 1.1 - Sub done\n## Phase 2 - Pending\n");
         let resp = rpc(
             &s,
             json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "plan_archive", "arguments": {"date": "2026-05-16"}}}),
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("archived"));
-        assert!(text.contains("1.0"));
+        // FORMATv2 header phase id is bare "1".
+        assert!(text.contains("1"));
         let plan_md = std::fs::read_to_string(&p).unwrap();
-        assert!(!plan_md.contains("1.0 Done"));
-        assert!(plan_md.contains("2.0 Pending"));
+        assert!(!plan_md.contains("## Phase 1 - Done"));
+        assert!(plan_md.contains("## Phase 2 - Pending"));
     }
 }

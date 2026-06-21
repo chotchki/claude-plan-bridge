@@ -115,7 +115,7 @@ CB
 PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` + the state file under an advisory file lock, and writes a JSON hook response.
 
 - **create** (`TaskCreate`): insert at `tool_input.metadata.plan_path` if set. With no `plan_path`, the work is unphased — it's recorded as a tracked note in the canonical `## Backlog (not yet phased)` section at the bottom of `PLAN.md` (mapped to a synthetic `backlog:<task_id>` path) and promoted into a real phase later by a deliberate planning move. Idempotent on `task_id`.
-  - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level phase `N` exists, the bridge synthesizes a `## Phase N - <title>` header for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback), with the new task hyphen-separated under it. No more manual "add the phase header, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error with the format-hint message — auto-creating non-anchor structure would invent nesting the user didn't ask for.
+  - **Auto-anchor.** When the first `TaskCreate(plan_path=N.X)` for a brand-new phase arrives and no top-level phase `N` exists, the bridge synthesizes a `## Phase N - <title>` header for you using `metadata.plan_phase` as the title (or `Phase N` as a fallback), with the new task hyphen-separated under it. No more manual "add the phase header, then retry" dance. Intermediate parents (e.g. a missing `1.2` blocking a `1.2.3` insert) still error asking you to create the parent first — auto-creating intermediate nesting would invent structure the user didn't ask for.
   - **What `plan_path` is.** It's the **per-leaf id** of the task — a dotted id like `BT.5`, `AT.2`, or `1.3.2` (phase id + dotted index). It is **not** a path to the `PLAN.md` file. File-shaped input (`PLAN.md`, `docs/PLAN.md`) matches no leaf, so the item lands in `## Backlog`; the hook output flags the file-path shape. The same id is mirrored into `description`, so the bridge recovers it from there if `metadata` is missing.
   - **Gotcha: load the `TaskCreate` schema first.** `TaskCreate` is a *deferred* tool. If its schema isn't loaded in the session, the `metadata` object serializes as a string, the client drops it, and the hook never sees `plan_path` — so the item silently falls into `## Backlog`. This is the usual cause of "my TaskCreates keep landing in Backlog." Run `ToolSearch select:TaskCreate` before metadata-carrying creates.
   - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
@@ -150,7 +150,7 @@ Delta variants Claude can act on:
 
 | Kind | Meaning | Suggested response |
 |---|---|---|
-| `leaf_added` | New checkbox in `PLAN.md` with no state mapping | `TaskCreate` to mirror (top-level `N.0` phase anchors are skipped — they're document structure, not tasks) |
+| `leaf_added` | New checkbox in `PLAN.md` with no state mapping | `TaskCreate` to mirror (`## Phase X` headers are skipped — they're document structure, not tasks) |
 | `leaf_removed` | Tracked task missing from `PLAN.md` | `TaskUpdate(status="deleted")` |
 | `leaf_state_changed` | Checkbox flipped between `[ ]`/`[x]`/`[-]`/`[>]` | `TaskUpdate` matching the new state |
 | `leaf_title_changed` | Title text edited | `TaskUpdate(subject=...)` |
@@ -229,8 +229,7 @@ tool (or edit PLAN.md directly) for task renames.
 
 Replace a phase's `*(depends on)*` / `*(prefer after)*` lists. At least
 one of the two flags must be passed; pass an empty list (`--depends-on
-""`) to clear. Flips a legacy v1 anchor to FORMATv2 header form so the
-markers can render.
+""`) to clear.
 
 ### `activate <PHASE>` / `deactivate`
 
@@ -419,28 +418,27 @@ Intro paragraph at the phase level — sweeps with the phase to archive.
   notes (`- **Subject** — added <date>.`) AND nested descoped subtrees
   (`- X.1 - …` with indented children).
 
-### Conservative format dispatch + canonicalize
+### FORMATv2-only (since v1.0.0)
 
-Routine writes (TaskCreate, TaskUpdate, archive sweep) **preserve format
-per phase**. v1 plans with `- [ ] N.0 Title` anchors keep their anchor
-form; v2 plans with `## Phase X` headers keep their header form. Both
-shapes coexist in the same PLAN.md without friction.
+The bridge speaks **FORMATv2 exclusively**: phases are `## Phase X - Title`
+headers, tasks are `- [ ] X.N - title` lines beneath them. The legacy v1
+"anchor" form — a column-0 checkbox like `- [ ] N.0 Title` that older
+versions auto-promoted into a phase — is gone. A column-0 checkbox with no
+`## Phase` header above it is now a parse error (`OrphanCheckbox`) rather
+than a silently-promoted phase.
 
-The single operation that flips everything to FORMATv2 canonical is:
+Reads are still forgiving about the **separator**: `- [ ] X.5 thing` (bare
+space) and `- [ ] X.5 - thing` both parse; the serializer always writes
+` - ` (hyphen-space). Bold-wrapped ids (`**X.5**`) and em-dash separators
+(` — `) are **no longer recognized** — a line using them parses with an
+empty id and the raw text as the title.
 
-```sh
-claude-plan-bridge canonicalize
-```
-
-It promotes v1 anchors to v2 headers, normalizes task separators to
-` - ` hyphen-space, flips the backlog heading h2 → h1, and preserves any
-v1 phase-state checkbox marker as a prose breadcrumb
-(`*(was marked [x] in v1 — archive to make it official)*`) so nothing is
-silently lost. Idempotent — second run is a no-op.
-
-The parser tolerates human-friendly variants on read (bold-wrapped ids,
-em-dash separators, alphanumeric components, bare checkboxes); only
-canonicalize normalizes them.
+**Migrating a pre-1.0 plan:** if your PLAN.md still has v1 anchors, bold
+ids, or em-dash separators, run `claude-plan-bridge canonicalize` on the
+**0.9.x** release first (it promotes anchors to headers, normalizes
+separators, and preserves any v1 phase-state marker as a prose breadcrumb),
+then upgrade to 1.0.0. The `canonicalize` verb does not exist in 1.0.0 —
+there's nothing left to canonicalize.
 
 <details>
 <summary>Full JSON schema (output of <code>parse</code>)</summary>
@@ -450,7 +448,7 @@ canonicalize normalizes them.
   "preamble": ["raw markdown lines before the first checkbox"],
   "phases": [
     {
-      "id": "1.0",            // dotted-decimal, project-scoped
+      "id": "AI",             // bare phase id (letter-sequence or legacy numeric)
       "title": "Phase title",
       "state": "pending",     // "pending" | "done" | "wont_do" | "backlog"
       "children": [ /* same Node shape, nested */ ],
@@ -468,7 +466,7 @@ Annotations:
 { "kind": "code_block", "lang": "rust", "content": "...", "indent": 2 }
 ```
 
-Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == parse(x)` holds, but source format (bold wrapping, em-dash separator, etc.) is intentionally normalized away.
+Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == parse(x)` holds. The serializer always writes the canonical ` - ` separator, so a hand-edited space-separated line (`X.5 thing`) normalizes to `X.5 - thing` on the next write.
 
 </details>
 
@@ -485,7 +483,7 @@ Four ways work lands in Backlog:
 3. **MCP `plan_backlog(plan_path, date?)`** — same effect as (2), callable directly without going through the harness task list. Useful when there's no active mapping (e.g., baselined plan).
 4. **CLI `plan-bridge backlog <plan_path>`** — same effect from the shell.
 
-The section is owned as a first-class trailing region: it always serializes below every phase and survives phase-appends without drifting. A `## Backlog` that's still sitting in the preamble (or split across duplicate sections) gets merged down to the bottom only when you run **`plan-bridge canonicalize`** (or on the next backlog-mutating write) — routine ticks and renames leave its placement alone. Conservative by design: only the bridge-owned `## Backlog (not yet phased)` h2 is touched; operator sections like `### Backlog (rehomed from ...)` or `## Sustainment` are left exactly where they are.
+The section is owned as a first-class trailing region: it always serializes below every phase and survives phase-appends without drifting. A `## Backlog` that's still sitting in the preamble (or split across duplicate sections) gets merged down to the bottom on the next backlog-mutating write (`plan-bridge backlog`, a no-`plan_path` TaskCreate, a `TaskUpdate(deleted)`) — routine ticks and renames leave its placement alone. Conservative by design: only the bridge-owned `## Backlog (not yet phased)` heading is touched; operator sections like `### Backlog (rehomed from ...)` or `## Sustainment` are left exactly where they are.
 
 What happens at phase exit: archive treats `[>]` like `[x]` and `[-]` — all three count as "resolved" for the `phase_fully_done` gate. When the phase sweeps to `PLAN_ARCHIVE.md`, the `[>]` lines go with it. But the `## Backlog (not yet phased)` bullet you got at deferral time **stays in PLAN.md**, so the deferred work is preserved as a durable record.
 

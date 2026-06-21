@@ -40,10 +40,7 @@ impl ArchiveReport {
 pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveReport> {
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
-    let parsed = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
-    let (mut plan, _notes) = parsed
-        .standardize_to_canonical()
-        .map_err(anyhow::Error::msg)?;
+    let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
 
     // Partition phases into "stay" vs "archive" preserving order.
     let mut keep: Vec<Phase> = Vec::new();
@@ -142,10 +139,7 @@ pub fn archive_phase(
 ) -> Result<ArchiveReport> {
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
-    let parsed = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
-    let (mut plan, _notes) = parsed
-        .standardize_to_canonical()
-        .map_err(anyhow::Error::msg)?;
+    let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
 
     let phase_idx = plan
         .phases
@@ -391,34 +385,30 @@ mod tests {
     #[test]
     fn no_op_when_nothing_complete() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
         assert!(report.is_empty());
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(after.contains("1.0 Phase"));
+        assert!(after.contains("## Phase 1 - Phase"));
         assert!(!archive_path_for(&plan).exists());
     }
 
     #[test]
     fn prefix_bundle_reports_one_phase_many_items() {
         // The under-report case the summary message guards against: a single
-        // top-level phase `AE.0` bundling `AE.1`..`AE.3` is 1 phase but 4 items.
+        // top-level phase `AE` bundling `AE.1`..`AE.3` is 1 phase but 4 items.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
             "\
-- [ ] AE.0 Phase AE
-  - [x] AE.1 One
-  - [x] AE.2 Two
-  - [-] AE.3 Three (won't do)
+## Phase AE - Phase AE
+- [x] AE.1 One
+- [x] AE.2 Two
+- [-] AE.3 Three (won't do)
 ",
         );
         let report = archive(&plan, false, "2026-05-19").unwrap();
-        assert_eq!(
-            report.archived_phase_ids,
-            vec!["AE.0"],
-            "one top-level phase"
-        );
+        assert_eq!(report.archived_phase_ids, vec!["AE"], "one top-level phase");
         assert_eq!(
             report.archived_plan_paths.len(),
             4,
@@ -433,27 +423,27 @@ mod tests {
         let plan = write_plan(
             &dir,
             "\
-- [ ] 1.0 Done phase
-  - [x] 1.1 Done
-  - [x] 1.2 Also done
-- [ ] 2.0 Still going
-  - [ ] 2.1 Pending
+## Phase 1 - Done phase
+- [x] 1.1 Done
+- [x] 1.2 Also done
+## Phase 2 - Still going
+- [ ] 2.1 Pending
 ",
         );
         let report = archive(&plan, false, "2026-05-16").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
-        assert!(report.archived_plan_paths.contains(&"1.0".to_string()));
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
+        assert!(report.archived_plan_paths.contains(&"1".to_string()));
         assert!(report.archived_plan_paths.contains(&"1.1".to_string()));
         assert!(report.archived_plan_paths.contains(&"1.2".to_string()));
 
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(!after.contains("1.0 Done phase"));
-        assert!(after.contains("2.0 Still going"));
+        assert!(!after.contains("## Phase 1 - Done phase"));
+        assert!(after.contains("## Phase 2 - Still going"));
 
         let archive_text = std::fs::read_to_string(archive_path_for(&plan)).unwrap();
         assert!(archive_text.starts_with("## 2026-05-16"));
-        assert!(archive_text.contains("1.0 Done phase"));
-        assert!(archive_text.contains("1.1 Done"));
+        assert!(archive_text.contains("## Phase 1 - Done phase"));
+        assert!(archive_text.contains("1.1 - Done"));
     }
 
     #[test]
@@ -462,18 +452,18 @@ mod tests {
         let plan = write_plan(
             &dir,
             "\
-- [ ] 1.0 Mixed-resolved phase
-  - [x] 1.1 Done
-  - [-] 1.2 Skipped
-  - [>] 1.3 Deferred
+## Phase 1 - Mixed-resolved phase
+- [x] 1.1 Done
+- [-] 1.2 Skipped
+- [>] 1.3 Deferred
 ",
         );
         let report = archive(&plan, false, "2026-05-17").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(!after.contains("1.0 Mixed-resolved phase"));
+        assert!(!after.contains("## Phase 1 - Mixed-resolved phase"));
         let archive_text = std::fs::read_to_string(archive_path_for(&plan)).unwrap();
-        assert!(archive_text.contains("- [>] 1.3 Deferred"));
+        assert!(archive_text.contains("- [>] 1.3 - Deferred"));
     }
 
     #[test]
@@ -481,15 +471,15 @@ mod tests {
         // Bridge doesn't auto-tick parents; a phase whose box reads `[ ]` but
         // whose subtree is fully `[x]` should archive based on subtree state.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Parent unchecked\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Parent unchecked\n  - [x] 1.1 Done\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
     }
 
     #[test]
     fn appends_to_existing_archive() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         let archive_path = archive_path_for(&plan);
         std::fs::write(&archive_path, "## 2026-04-01\n\n- [x] 0.0 Earlier work\n").unwrap();
         archive(&plan, false, "2026-05-16").unwrap();
@@ -511,7 +501,7 @@ mod tests {
         // two dated sections, a new sweep appends *after* both — the original
         // section order is preserved.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 9.0 Phase\n  - [x] 9.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 9 - Phase\n  - [x] 9.1 Done\n");
         let archive_path = archive_path_for(&plan);
         std::fs::write(
             &archive_path,
@@ -538,11 +528,11 @@ mod tests {
     #[test]
     fn dry_run_does_not_mutate() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         let before = std::fs::read_to_string(&plan).unwrap();
         let report = archive(&plan, true, "2026-05-16").unwrap();
         assert!(report.dry_run);
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
         let after = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(before, after);
         assert!(!archive_path_for(&plan).exists());
@@ -551,7 +541,7 @@ mod tests {
     #[test]
     fn drops_state_mappings_for_archived_nodes() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [x] 1.1 Done\n");
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
         state.record(
@@ -593,17 +583,21 @@ mod tests {
     #[test]
     fn empty_leaf_phase_unchecked_does_not_archive() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Empty phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Empty phase\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
         assert!(report.is_empty());
     }
 
     #[test]
-    fn empty_leaf_phase_checked_archives() {
+    fn phase_with_only_resolved_leaf_archives() {
+        // v1 used a childless `- [x] 1.0 Empty phase` anchor as a self-resolved
+        // unit. FORMATv2 phases have no checkbox, so completion comes from a
+        // resolved leaf: a phase with a single done task is fully-resolved and
+        // archives.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [x] 1.0 Empty phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Empty phase\n- [x] 1.1 - Done\n");
         let report = archive(&plan, false, "2026-05-16").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
     }
 
     #[test]
@@ -611,10 +605,10 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [-] 1.1 Skipped\n  - [-] 1.2 Also skipped\n",
+            "## Phase 1 - Phase\n  - [-] 1.1 Skipped\n  - [-] 1.2 Also skipped\n",
         );
         let report = archive(&plan, false, "2026-05-16").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
     }
 
     #[test]
@@ -622,10 +616,10 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 Done\n  - [-] 1.2 Skipped\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 Done\n  - [-] 1.2 Skipped\n",
         );
         let report = archive(&plan, false, "2026-05-16").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
     }
 
     #[test]
@@ -633,28 +627,28 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase one\n  - [x] 1.1 Done\n- [ ] 2.0 Phase two\n  - [x] 2.1 Also done\n",
+            "## Phase 1 - Phase one\n  - [x] 1.1 Done\n## Phase 2 - Phase two\n  - [x] 2.1 Also done\n",
         );
-        // Even though both phases are fully done, archive_phase only moves 1.0.
-        let report = archive_phase(&plan, "1.0", "2026-05-16", false).unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        // Even though both phases are fully done, archive_phase only moves phase 1.
+        let report = archive_phase(&plan, "1", "2026-05-16", false).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(!after.contains("1.0 Phase one"));
-        assert!(after.contains("2.0 Phase two"));
+        assert!(!after.contains("## Phase 1 - Phase one"));
+        assert!(after.contains("## Phase 2 - Phase two"));
     }
 
     #[test]
     fn archive_phase_refuses_unresolved_subtree() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Not done\n");
-        let err = archive_phase(&plan, "1.0", "2026-05-16", false).unwrap_err();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Not done\n");
+        let err = archive_phase(&plan, "1", "2026-05-16", false).unwrap_err();
         assert!(err.to_string().contains("not fully resolved"), "{err}");
     }
 
     #[test]
     fn archive_phase_errors_when_phase_missing() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let err = archive_phase(&plan, "9.9", "2026-05-16", false).unwrap_err();
         assert!(err.to_string().contains("9.9"));
     }
@@ -664,9 +658,9 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [ ] 1.2 pending\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 done\n  - [ ] 1.2 pending\n",
         );
-        let err = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap_err();
+        let err = archive_phase(&plan, "1", "2026-05-22", false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("--descope-pending"),
@@ -683,22 +677,25 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [ ] 1.2 still pending\n  - [ ] 1.3 also pending\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 done\n  - [ ] 1.2 still pending\n  - [ ] 1.3 also pending\n",
         );
-        let report = archive_phase(&plan, "1.0", "2026-05-22", true).unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let report = archive_phase(&plan, "1", "2026-05-22", true).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
 
-        // PLAN.md: phase 1.0 is gone, backlog has the descoped notes (h1).
+        // PLAN.md: phase 1 is gone, backlog has the descoped notes (h1).
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(!after.contains("1.0 Phase"), "phase archived:\n{after}");
+        assert!(
+            !after.contains("## Phase 1 - Phase"),
+            "phase archived:\n{after}"
+        );
         assert!(after.contains("# Backlog (not yet phased)"));
-        assert!(after.contains("- 1.2 - descoped from phase `1.0` on 2026-05-22"));
-        assert!(after.contains("- 1.3 - descoped from phase `1.0` on 2026-05-22"));
+        assert!(after.contains("- 1.2 - descoped from phase `1` on 2026-05-22"));
+        assert!(after.contains("- 1.3 - descoped from phase `1` on 2026-05-22"));
 
         // PLAN_ARCHIVE.md got the phase with its single done task.
         let archive_md = std::fs::read_to_string(dir.join("PLAN_ARCHIVE.md")).unwrap();
-        assert!(archive_md.contains("1.0 Phase"));
-        assert!(archive_md.contains("1.1 done"));
+        assert!(archive_md.contains("## Phase 1 - Phase"));
+        assert!(archive_md.contains("1.1 - done"));
         // Descoped leaves were removed before archive, so they're NOT in
         // PLAN_ARCHIVE.md.
         assert!(!archive_md.contains("1.2 still pending"));
@@ -710,12 +707,12 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [-] 1.2 won't-do\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 done\n  - [-] 1.2 won't-do\n",
         );
         // descope_pending=true on a fully-resolved phase: no leaves to
         // descope, no backlog notes added, phase archives normally.
-        let report = archive_phase(&plan, "1.0", "2026-05-22", true).unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        let report = archive_phase(&plan, "1", "2026-05-22", true).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
         let after = std::fs::read_to_string(&plan).unwrap();
         assert!(!after.contains("Backlog"), "no backlog noise:\n{after}");
     }
@@ -730,14 +727,14 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n  - [x] 1.2 also done\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 done\n  - [x] 1.2 also done\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
-        state.set_active_phase(Some("1.0".to_string()));
+        state.set_active_phase(Some("1".to_string()));
         state.save(&state_path).unwrap();
 
-        let _ = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap();
+        let _ = archive_phase(&plan, "1", "2026-05-22", false).unwrap();
         let after_state = State::load(&state_path).unwrap();
         assert_eq!(
             after_state.active_phase(),
@@ -748,18 +745,18 @@ mod tests {
 
     #[test]
     fn archive_phase_preserves_state_active_phase_when_different() {
-        // Active phase AS, archive 1.0 — focus stays on AS.
+        // Active phase AS, archive phase 1 — focus stays on AS.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [x] 1.1 done\n\n## Phase AS - Spine\n\n- [ ] AS.0 task\n",
+            "## Phase 1 - Phase\n  - [x] 1.1 done\n\n## Phase AS - Spine\n\n- [ ] AS.1 task\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
         state.set_active_phase(Some("AS".to_string()));
         state.save(&state_path).unwrap();
 
-        let _ = archive_phase(&plan, "1.0", "2026-05-22", false).unwrap();
+        let _ = archive_phase(&plan, "1", "2026-05-22", false).unwrap();
         let after_state = State::load(&state_path).unwrap();
         assert_eq!(after_state.active_phase(), Some("AS"));
     }
@@ -771,15 +768,15 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First\n  - [x] 1.1 done\n- [ ] 2.0 Second\n  - [ ] 2.1 pending\n",
+            "## Phase 1 - First\n  - [x] 1.1 done\n## Phase 2 - Second\n  - [ ] 2.1 pending\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
-        state.set_active_phase(Some("1.0".to_string()));
+        state.set_active_phase(Some("1".to_string()));
         state.save(&state_path).unwrap();
 
         let report = archive(&plan, false, "2026-05-22").unwrap();
-        assert_eq!(report.archived_phase_ids, vec!["1.0"]);
+        assert_eq!(report.archived_phase_ids, vec!["1"]);
         let after_state = State::load(&state_path).unwrap();
         assert_eq!(
             after_state.active_phase(),
@@ -797,7 +794,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase one\n  - [x] 1.1 done\n- [ ] 2.0 Phase two\n  - [ ] 2.1 pending\n",
+            "## Phase 1 - Phase one\n  - [x] 1.1 done\n## Phase 2 - Phase two\n  - [ ] 2.1 pending\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();
@@ -821,7 +818,7 @@ mod tests {
         );
         state.save(&state_path).unwrap();
 
-        archive_phase(&plan, "1.0", "2026-05-30", false).unwrap();
+        archive_phase(&plan, "1", "2026-05-30", false).unwrap();
         let loaded = State::load(&state_path).unwrap();
         assert_eq!(
             loaded.plan_path("t-1-1"),
@@ -840,7 +837,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First\n  - [x] 1.1 done\n- [ ] 2.0 Second\n  - [ ] 2.1 pending\n",
+            "## Phase 1 - First\n  - [x] 1.1 done\n## Phase 2 - Second\n  - [ ] 2.1 pending\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut state = State::default();

@@ -657,12 +657,6 @@ fn insert_at_path(
         id: plan_path.to_string(),
         title: subject.to_string(),
         state: NodeState::Pending,
-        id_style: crate::ast::IdStyle::Plain,
-        // Phase 42.4: new tasks land in canonical FORMATv2 form with the
-        // ` - ` hyphen-space separator, matching `canonicalize` output and
-        // the documented plan format. (The frozen archive keeps its older
-        // space-separated leaves; they aren't re-serialized.)
-        separator: crate::ast::Separator::Hyphen,
         children: vec![],
         annotations: vec![],
     };
@@ -671,53 +665,25 @@ fn insert_at_path(
         None => plan.insert_phase(crate::ast::Phase::from_node(new_node)),
         Some(parent_id) => {
             if !plan.contains_id(&parent_id) {
-                // Conditional canonicalize fallback: if the parent isn't found,
-                // it may be living as a `### Phase N — Title` markdown header
-                // (Annotation::Text) rather than a `- [ ] N.0` checkbox.
-                // Standardize, retry the lookup; if the parent's now visible
-                // use the standardized plan. Otherwise, if the missing parent
-                // is itself a top-level phase anchor (`parent_id_for` returns
-                // None for it), auto-synthesize it (Phase 31.2). For deeper
-                // nesting that's still missing, bail with the structural-error
-                // guidance — auto-creating intermediate non-phase parents
-                // would invent structure the user didn't ask for.
-                let (standardized, _notes) = plan
-                    .clone()
-                    .standardize_to_canonical()
-                    .map_err(|e| anyhow!(e))?;
-                if standardized.contains_id(&parent_id) {
-                    plan = standardized;
-                } else if parent_id_for(&parent_id).is_none() {
-                    // Phase 38.7: auto-anchor synthesizes a FORMATv2
-                    // `## Phase X - Title` header (source=HeaderV2) instead
-                    // of the legacy `- [ ] X.0 Title` checkbox.
-                    // Phase 42.4: `parent_id` is a bare phase id now, so the
-                    // header renders directly as `## Phase X - Title` with no
-                    // `.0` to strip.
+                // Parent missing. If it's itself a top-level phase id
+                // (`parent_id_for` returns None for it), auto-synthesize the
+                // `## Phase X - Title` header (Phase 38.7). For deeper nesting
+                // that's still missing, bail — auto-creating intermediate
+                // non-phase parents would invent structure the user didn't ask
+                // for.
+                if parent_id_for(&parent_id).is_none() {
                     let anchor_title = plan_phase
                         .map(str::to_string)
                         .unwrap_or_else(|| synthesize_anchor_title(&parent_id));
-                    let phase = crate::ast::Phase {
-                        id: parent_id.clone(),
-                        title: anchor_title,
-                        state: NodeState::Pending,
-                        id_style: crate::ast::IdStyle::Plain,
-                        separator: crate::ast::Separator::Hyphen,
-                        children: vec![],
-                        annotations: vec![],
-                        depends_on: vec![],
-                        prefer_after: vec![],
-                        source: crate::ast::PhaseSource::HeaderV2,
-                    };
+                    let phase = crate::ast::Phase::header_v2(parent_id.clone(), anchor_title);
                     plan.insert_phase(phase);
                     anchor_created = Some(parent_id.clone());
                 } else {
                     anyhow::bail!(
                         "inserting {plan_path}: parent `{parent_id}` not found in PLAN.md. \
-                         Either the parent doesn't exist yet (create it first with a \
-                         `- [ ] {parent_id} ...` checkbox), or your plan uses an unrecognized \
-                         section-header format. Try `plan-bridge canonicalize --dry-run` to \
-                         see how the bridge would normalize the structure."
+                         Create the parent first (a `## Phase {parent_id} - Title` header for a \
+                         top-level phase, or a `- [ ] {parent_id} - ...` task line for a nested \
+                         parent)."
                     );
                 }
             } else if parent_id_for(&parent_id).is_none() && plan.find_phase(&parent_id).is_none() {
@@ -853,7 +819,7 @@ mod tests {
         // re-links the mapping — the message must say "attached to existing",
         // not the misleading "added".
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let out = writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         let j = out.to_json();
         assert!(j.contains("attached to existing"), "{j}");
@@ -866,7 +832,7 @@ mod tests {
         // title is already real — the message must NOT tell the agent to "pass
         // metadata.plan_phase" (it just did).
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let out = writeback_create(
             &payload_create_with_phase("t-9", "First task", "9.1", "Ninth phase"),
             &plan,
@@ -885,7 +851,7 @@ mod tests {
         // Counterpart: no plan_phase → the bland synthesized title stands, so
         // the nag to set a real title remains useful.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let out =
             writeback_create(&payload_for_create("t-9", "First task", Some("9.1")), &plan).unwrap();
         let j = out.to_json();
@@ -900,7 +866,7 @@ mod tests {
         // BY.2: a no-plan_path create that lands in Backlog must say so and
         // point at the schema-eviction cause.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let out = writeback_create(&payload_for_create("t-b", "loose work", None), &plan).unwrap();
         let j = out.to_json();
         assert!(j.contains("added to Backlog"), "{j}");
@@ -919,7 +885,7 @@ mod tests {
         // BY.2: when the description looks like a file path (the "plan_path is
         // PLAN.md" confusion), call it out explicitly.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_create_desc("t-f", "do the thing", "docs/PLAN.md", None);
         let out = writeback_create(&payload, &plan).unwrap();
         let j = out.to_json();
@@ -929,12 +895,12 @@ mod tests {
     #[test]
     fn inserts_leaf_under_existing_parent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_for_create("t-1", "New subtask", Some("1.1.1"));
         let out = writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            new_contents.contains("    - [ ] 1.1.1 - New subtask"),
+            new_contents.contains("  - [ ] 1.1.1 - New subtask"),
             "got:\n{new_contents}"
         );
         assert!(out.to_json().contains("added"));
@@ -943,12 +909,12 @@ mod tests {
     #[test]
     fn inserts_task_under_phase() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("t-1", "First task", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            new_contents.contains("  - [ ] 1.1 - First task"),
+            new_contents.contains("- [ ] 1.1 - First task"),
             "got:\n{new_contents}"
         );
     }
@@ -956,7 +922,7 @@ mod tests {
     #[test]
     fn records_state_mapping() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("task-abc", "x", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let state_path = default_state_path_for(&plan);
@@ -967,7 +933,7 @@ mod tests {
     #[test]
     fn idempotent_when_task_id_already_mapped() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("task-abc", "x", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let first = std::fs::read_to_string(&plan).unwrap();
@@ -985,7 +951,7 @@ mod tests {
         // plan_path under a new task_id "99". Result: state holds only the
         // new mapping; PLAN.md line stays put; no duplicate.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         // Seed prior-session state.
         let state_path = default_state_path_for(&plan);
         let mut prior = State::default();
@@ -1008,7 +974,7 @@ mod tests {
         // PLAN.md untouched (line already existed).
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert_eq!(
-            contents.matches("1.1 Task").count(),
+            contents.matches("1.1 - Task").count(),
             1,
             "PLAN.md duplicated the line: {contents}"
         );
@@ -1028,7 +994,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
@@ -1051,7 +1017,7 @@ mod tests {
     #[test]
     fn no_plan_path_lands_in_backlog_tracked() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("t-loose", "loose task", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
@@ -1112,7 +1078,7 @@ mod tests {
         // the plan_path from description and attaches the task to that leaf
         // instead of dropping it into Backlog.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_create_desc("t-r", "Task", "1.1", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
@@ -1133,7 +1099,7 @@ mod tests {
         // BY.11 guard: a normal prose description (spaces → fails the id
         // grammar) must NOT be mistaken for a plan_path; it still backlogs.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_create_desc("t-p", "Some work", "just some prose", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
@@ -1151,7 +1117,7 @@ mod tests {
         // fabricate a leaf — it falls through to Backlog. Only pre-existing
         // ids are adopted, which is exactly the rehydration case.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_create_desc("t-x", "New thing", "9.9", None);
         let out = writeback_create(&payload, &plan).unwrap();
         assert!(
@@ -1173,7 +1139,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         let payload = payload_create_desc("t-m", "x", "1.1", Some("1.2"));
         writeback_create(&payload, &plan).unwrap();
@@ -1184,7 +1150,7 @@ mod tests {
     #[test]
     fn no_plan_path_create_is_idempotent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("t-loose", "loose task", None);
         writeback_create(&payload, &plan).unwrap();
         let after_first = std::fs::read_to_string(&plan).unwrap();
@@ -1200,7 +1166,7 @@ mod tests {
         // Backlog sitting in the preamble (above the phase) — the legacy spot.
         let plan = write_plan(
             &dir,
-            "## Backlog (not yet phased)\n\n- **Old item** — added 2026-05-01.\n\n- [ ] 1.0 Phase\n",
+            "## Backlog (not yet phased)\n\n- **Old item** — added 2026-05-01.\n\n## Phase 1 - Phase\n",
         );
         let payload = payload_for_create("t-new", "fresh note", None);
         writeback_create(&payload, &plan).unwrap();
@@ -1211,7 +1177,7 @@ mod tests {
             1
         );
         let heading_pos = new_contents.find("## Backlog").unwrap();
-        let phase_pos = new_contents.find("- [ ] 1.0 Phase").unwrap();
+        let phase_pos = new_contents.find("## Phase 1 - Phase").unwrap();
         assert!(
             heading_pos > phase_pos,
             "Backlog should be below the phase:\n{new_contents}"
@@ -1223,7 +1189,7 @@ mod tests {
     #[test]
     fn errors_when_parent_missing() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("t-1", "x", Some("9.9.9"));
         let err = writeback_create(&payload, &plan).unwrap_err();
         assert!(err.to_string().contains("9.9"), "err: {err}");
@@ -1238,17 +1204,20 @@ mod tests {
         // (typo / structural-mismatch surface). Drop a request through that
         // path and check the hint text.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let payload = payload_for_create("t-1", "nested sub", Some("1.2.3"));
         let err = writeback_create(&payload, &plan).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("1.2"), "should name missing parent: {msg}");
+        // FORMATv2 hint: point the agent at the two ways to create the missing
+        // parent (a `## Phase` header for a top-level phase, or a `- [ ] ...`
+        // task line for a nested parent).
         assert!(
-            msg.contains("section-header") || msg.contains("canonicalize"),
-            "should hint at format issue + canonicalize escape hatch: {msg}"
+            msg.contains("## Phase") || msg.contains("task line"),
+            "should hint at the FORMATv2 parent shapes: {msg}"
         );
         assert!(
-            msg.contains("doesn't exist yet") || msg.contains("create it first"),
+            msg.contains("Create the parent first"),
             "should also suggest creating the parent: {msg}"
         );
     }
@@ -1256,7 +1225,7 @@ mod tests {
     #[test]
     fn errors_when_no_task_id_in_response() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let mut payload = payload_for_create("ignored", "x", Some("1.1"));
         payload.tool_response = serde_json::json!({});
         let err = writeback_create(&payload, &plan).unwrap_err();
@@ -1271,7 +1240,7 @@ mod tests {
         // replacing would orphan the original harness task from writeback
         // — its future TaskUpdates would no-op.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let mut first = payload_for_create("t-first", "Task", Some("1.1"));
         first.session_id = "sess-A".to_string();
         writeback_create(&first, &plan).unwrap();
@@ -1303,7 +1272,7 @@ mod tests {
         // didn't run / wipe state). It must still evict cleanly so the
         // bridge stays usable when the hook is missing.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let state_path = default_state_path_for(&plan);
         let mut prior = State::default();
         prior.record(
@@ -1340,7 +1309,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut seed = State::default();
@@ -1381,7 +1350,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut seed = State::default();
@@ -1418,7 +1387,7 @@ mod tests {
         // empty before AND after — `evicted` is false, so the signal
         // suppresses cleanly.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         // No seed; pending_rehydration starts empty.
         let out = writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan)
             .unwrap()
@@ -1439,7 +1408,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 First\n  - [ ] 1.2 Second\n",
         );
         let state_path = default_state_path_for(&plan);
         let mut seed = State::default();
@@ -1467,7 +1436,7 @@ mod tests {
         // NOT in pending_rehydration is genuine new work and keeps the full
         // "added `<title>` at <path>" confirmation.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Existing\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Existing\n");
         let out = writeback_create(&payload_for_create("t-1", "Brand new", Some("1.2")), &plan)
             .unwrap()
             .to_json();
@@ -1496,7 +1465,7 @@ mod tests {
     #[test]
     fn backlog_item_completed_removes_bullet_and_unlinks() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-loose", "loose task", None), &plan).unwrap();
         let out = writeback_update(&payload_for_update("t-loose", "completed"), &plan).unwrap();
         assert!(
@@ -1521,7 +1490,7 @@ mod tests {
     #[test]
     fn backlog_item_deleted_removes_bullet_and_unlinks() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-loose", "loose task", None), &plan).unwrap();
         let out = writeback_update(&payload_for_update("t-loose", "deleted"), &plan).unwrap();
         assert!(
@@ -1538,7 +1507,7 @@ mod tests {
     #[test]
     fn backlog_item_rename_swaps_bullet_title() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-loose", "old name", None), &plan).unwrap();
         writeback_update(&payload_for_update_subject("t-loose", "new name"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
@@ -1561,17 +1530,17 @@ mod tests {
     #[test]
     fn update_completed_flips_checkbox() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update("t-1", "completed"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
-        assert!(contents.contains("  - [x] 1.1 - Task"), "got:\n{contents}");
+        assert!(contents.contains("- [x] 1.1 - Task"), "got:\n{contents}");
     }
 
     #[test]
     fn update_completed_idempotent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update("t-1", "completed"), &plan).unwrap();
         let after_first = std::fs::read_to_string(&plan).unwrap();
@@ -1586,7 +1555,7 @@ mod tests {
         // to `[>]` and appends a bullet under `## Backlog (not yet phased)`.
         // The mapping is dropped from state. The line is never hard-deleted.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
         let after = std::fs::read_to_string(&plan).unwrap();
@@ -1609,23 +1578,39 @@ mod tests {
     #[test]
     fn update_deleted_on_non_leaf_unlinks_only() {
         // Regression guard for the destruction class: a stale cross-session
-        // mapping pointing at a phase root previously caused TaskUpdate(deleted)
-        // to wipe the phase and every subtask under it. The Phase 28 backlog
-        // flip is leaf-only — non-leaves fall back to unlink-only behavior so
-        // a stale mapping can't turn into a destructive backlog flip on a
-        // parent node.
+        // mapping pointing at a parent node (one with children) previously
+        // caused TaskUpdate(deleted) to wipe that node and every subtask under
+        // it. The Phase 28 backlog flip is leaf-only — non-leaves fall back to
+        // unlink-only behavior so a stale mapping can't turn into a destructive
+        // backlog flip on a parent node.
+        //
+        // Seed the mapping directly at the non-leaf `1.1` (a parent of 1.1.1 /
+        // 1.1.2): going through writeback_create would synthesize a fresh leaf
+        // rather than attaching to an existing parent.
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Child A\n  - [ ] 1.2 Child B\n",
+            "## Phase 1 - Phase\n- [ ] 1.1 Parent\n  - [ ] 1.1.1 Child A\n  - [ ] 1.1.2 Child B\n",
         );
-        writeback_create(&payload_for_create("t-phase", "Phase", Some("1.0")), &plan).unwrap();
+        let mut state = State::default();
+        state.record(
+            "t-parent",
+            Mapping {
+                plan_path: "1.1".to_string(),
+                last_synced_title: "Parent".to_string(),
+                ..Default::default()
+            },
+        );
+        state.save(&default_state_path_for(&plan)).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
-        writeback_update(&payload_for_update("t-phase", "deleted"), &plan).unwrap();
+        writeback_update(&payload_for_update("t-parent", "deleted"), &plan).unwrap();
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert_eq!(before, after, "phase + subtree must survive a delete");
-        assert!(after.contains("1.1 Child A"), "child A wiped: {after}");
-        assert!(after.contains("1.2 Child B"), "child B wiped: {after}");
+        // Non-leaf delete only unlinks the mapping — PLAN.md is never
+        // rewritten, so the children survive verbatim (in their original
+        // input form, not re-serialized).
+        assert_eq!(before, after, "parent + subtree must survive a delete");
+        assert!(after.contains("1.1.1 Child A"), "child A wiped: {after}");
+        assert!(after.contains("1.1.2 Child B"), "child B wiped: {after}");
         assert!(
             !after.contains("[>]"),
             "non-leaf must not flip to backlog: {after}"
@@ -1635,7 +1620,7 @@ mod tests {
     #[test]
     fn update_pending_is_no_op() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
         writeback_update(&payload_for_update("t-1", "pending"), &plan).unwrap();
@@ -1647,7 +1632,7 @@ mod tests {
     #[test]
     fn update_unmapped_task_is_silent_no_op() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let before = std::fs::read_to_string(&plan).unwrap();
         let out =
             writeback_update(&payload_for_update("never-created", "completed"), &plan).unwrap();
@@ -1660,14 +1645,14 @@ mod tests {
     fn update_deleted_on_wont_do_leaf_keeps_line() {
         let dir = scratch_dir();
         // Pre-existing PLAN.md with a `[-]` leaf the user added by hand.
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [-] 1.1 Skipped\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [-] 1.1 Skipped\n");
         // Bridge tracks it.
         writeback_create(&payload_for_create("t-1", "Skipped", Some("1.1")), &plan).unwrap();
         // Claude calls TaskUpdate(deleted). The line should remain.
         writeback_update(&payload_for_update("t-1", "deleted"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [-] 1.1 Skipped"),
+            contents.contains("- [-] 1.1 - Skipped"),
             "the [-] line should be preserved: {contents}"
         );
         let state = State::load(&default_state_path_for(&plan)).unwrap();
@@ -1691,12 +1676,12 @@ mod tests {
         // Phase 12: TaskUpdate(subject=...) without a status change should
         // rewrite the title in PLAN.md AND update state.last_synced_title.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Old title", Some("1.1")), &plan).unwrap();
         writeback_update(&payload_for_update_subject("t-1", "New title"), &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [ ] 1.1 - New title"),
+            contents.contains("- [ ] 1.1 - New title"),
             "PLAN.md not renamed:\n{contents}"
         );
         assert!(
@@ -1712,7 +1697,7 @@ mod tests {
     #[test]
     fn update_subject_with_completed_status_renames_and_ticks() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Old", Some("1.1")), &plan).unwrap();
         let combined = HookPayload {
             session_id: String::new(),
@@ -1730,7 +1715,7 @@ mod tests {
         writeback_update(&combined, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [x] 1.1 - New"),
+            contents.contains("- [x] 1.1 - New"),
             "expected ticked + renamed line:\n{contents}"
         );
     }
@@ -1738,7 +1723,7 @@ mod tests {
     #[test]
     fn update_subject_on_unmapped_task_is_silent() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Untracked\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Untracked\n");
         let before = std::fs::read_to_string(&plan).unwrap();
         let out = writeback_update(
             &payload_for_update_subject("never-created", "Anything"),
@@ -1753,7 +1738,7 @@ mod tests {
     #[test]
     fn update_subject_unchanged_is_noop() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Same", Some("1.1")), &plan).unwrap();
         let before = std::fs::read_to_string(&plan).unwrap();
         let out = writeback_update(&payload_for_update_subject("t-1", "Same"), &plan).unwrap();
@@ -1771,7 +1756,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Leaf\n",
+            "## Phase 1 - Phase\n  - [ ] 1.1 Parent\n    - [ ] 1.1.1 Leaf\n",
         );
         writeback_create(
             &payload_for_create("t-parent", "Parent", Some("1.1")),
@@ -1787,10 +1772,10 @@ mod tests {
         .unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("- [ ] 1.1 Renamed parent"),
+            contents.contains("- [ ] 1.1 - Renamed parent"),
             "parent rename should land:\n{contents}"
         );
-        assert!(contents.contains("1.1.1 Leaf"), "child preserved");
+        assert!(contents.contains("1.1.1 - Leaf"), "child preserved");
     }
 
     // -----------------------------------------------------------------
@@ -1884,40 +1869,13 @@ mod tests {
     }
 
     #[test]
-    fn writeback_create_falls_back_to_canonicalize_when_parent_is_header_only() {
-        // Phase 29.2: writeback no longer canonicalizes implicitly. But if the
-        // requested plan_path's parent ONLY exists as a `### Phase N — Title`
-        // markdown header (not a checkbox), insert_at_path's conditional
-        // fallback runs standardize_to_canonical so the new task can land.
-        //
-        // Phase 37 update: the promotion target is now a FORMATv2 `## Phase`
-        // header rather than a v1 `- [ ] N.0` checkbox — but the rescue
-        // behavior (header → real phase → child landing) is unchanged.
-        let dir = scratch_dir();
-        let original = "- [x] 0.1 First\n\n### Phase 1 — Build\n\n- [ ] 1.1 Build it\n";
-        let plan = write_plan(&dir, original);
-
-        let payload = payload_for_create("t-x", "new sub", Some("1.2"));
-        writeback_create(&payload, &plan).expect("conditional canonicalize fallback");
-        let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(
-            after.contains("## Phase 1.0 - Build") || after.contains("## Phase 1 - Build"),
-            "phase header promoted by fallback:\n{after}"
-        );
-        assert!(
-            after.contains("- [ ] 1.2 - new sub"),
-            "new task lands under the promoted phase:\n{after}"
-        );
-    }
-
-    #[test]
     fn writeback_create_preserves_narrative_sub_headers_when_parent_already_checkbox() {
         // Phase 29.2 (regression class). When the parent is already a
         // checkbox phase, writeback parses + inserts without invoking
         // standardize_to_canonical. Any `### X.4.a — Sub-section` headers
         // that the user uses for grouping inside the phase stay verbatim.
         let dir = scratch_dir();
-        let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### X.4.a — Sub-section grouping\n\n  - [ ] 1.2 Existing\n";
+        let original = "## Phase 1 - Phase\n  - [ ] 1.1 Task\n\n### X.4.a — Sub-section grouping\n\n  - [ ] 1.2 Existing\n";
         let plan = write_plan(&dir, original);
         let payload = payload_for_create("t-x", "new sub", Some("1.3"));
         writeback_create(&payload, &plan).expect("clean append");
@@ -1938,7 +1896,7 @@ mod tests {
         // narrative; writeback should proceed (insert the new task) and the
         // header should still be in the file afterward at its original column.
         let dir = scratch_dir();
-        let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n";
+        let original = "## Phase 1 - Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n";
         let plan = write_plan(&dir, original);
         let payload = payload_for_create("t-x", "new sub", Some("1.2"));
         writeback_create(&payload, &plan).expect("narrative headers don't block");
@@ -1969,7 +1927,7 @@ mod tests {
         // header elsewhere in the document stays put — the user's chosen
         // format isn't collateral damage from a routine status change.
         let dir = scratch_dir();
-        let original = "- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n### Phase 2 — Other work\n\n- [ ] 2.1 Other task\n";
+        let original = "## Phase 1 - Phase\n  - [ ] 1.1 Task\n\n### Phase 2 — Other work\n\n- [ ] 2.1 Other task\n";
         let plan = write_plan(&dir, original);
         let mut state = State::default();
         state.record(
@@ -1986,13 +1944,13 @@ mod tests {
 
         writeback_update(&payload_for_update("t-1", "completed"), &plan).expect("tick succeeds");
         let after = std::fs::read_to_string(&plan).unwrap();
-        assert!(after.contains("  - [x] 1.1 Task"), "1.1 ticked:\n{after}");
+        assert!(after.contains("- [x] 1.1 - Task"), "1.1 ticked:\n{after}");
         assert!(
             after.contains("### Phase 2 — Other work"),
             "unrelated narrative header preserved:\n{after}"
         );
         assert!(
-            !after.contains("- [ ] 2.0 Other work"),
+            !after.contains("## Phase 2 - Other work"),
             "Phase 2 must NOT be promoted by a routine update:\n{after}"
         );
     }
@@ -2008,7 +1966,7 @@ mod tests {
         use std::thread;
 
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Parent\n");
+        let plan = write_plan(&dir, "## Phase 1 - Parent\n");
         let plan = Arc::new(plan);
 
         let n: usize = 10;
@@ -2054,7 +2012,7 @@ mod tests {
         // PLAN.md already has the node; state file doesn't track this task yet.
         // Expected: don't double-insert; do record the mapping.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n  - [ ] 1.1 Already here\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n  - [ ] 1.1 Already here\n");
         let payload = payload_for_create("t-new", "Already here", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let new_contents = std::fs::read_to_string(&plan).unwrap();
@@ -2087,7 +2045,7 @@ mod tests {
         // should store the clean form in PLAN.md AND state, so when the user
         // hand-cleans the file it doesn't drift forever.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         let payload = payload_for_create("t-1", "Build \\\"/blog\\\" listing", Some("1.1"));
         writeback_create(&payload, &plan).unwrap();
         let contents = std::fs::read_to_string(&plan).unwrap();
@@ -2108,7 +2066,7 @@ mod tests {
     fn update_subject_normalizes_escaped_quotes() {
         // Phase 31.1: same escape-stripping on rename.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 Phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
         writeback_create(&payload_for_create("t-1", "Old", Some("1.1")), &plan).unwrap();
         let rename = HookPayload {
             session_id: String::new(),
@@ -2141,7 +2099,7 @@ mod tests {
         // Phase 42.4: bare phase id (`## Phase 10`, not `10.0`) and the child
         // lands hyphen-separated (canonical FORMATv2).
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - First phase\n");
         let payload = payload_for_create("t-1", "First task of phase 10", Some("10.1"));
         let out = writeback_create(&payload, &plan).expect("auto-anchor should not bail");
         let contents = std::fs::read_to_string(&plan).unwrap();
@@ -2168,7 +2126,7 @@ mod tests {
         // hook output should nudge toward the uppercase-letter sequence —
         // softly, the phase still lands.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - First phase\n");
         let payload = payload_for_create("t-1", "Numeric phase task", Some("10.1"));
         let out = writeback_create(&payload, &plan).unwrap();
         let json = out.to_json();
@@ -2181,7 +2139,7 @@ mod tests {
     #[test]
     fn auto_anchor_letter_id_no_advisory() {
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 First phase\n");
+        let plan = write_plan(&dir, "## Phase 1 - First phase\n");
         let payload = payload_for_create("t-1", "Letter phase task", Some("CB.1"));
         let out = writeback_create(&payload, &plan).unwrap();
         let json = out.to_json();
@@ -2196,7 +2154,7 @@ mod tests {
         // Phase 31.2: the optional `metadata.plan_phase` field becomes the
         // anchor title so the agent can spell out the real phase name.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 First\n");
+        let plan = write_plan(&dir, "## Phase 1 - First\n");
         let payload = HookPayload {
             session_id: String::new(),
             cwd: String::new(),
@@ -2232,7 +2190,7 @@ mod tests {
         let dir = scratch_dir();
         let plan = write_plan(
             &dir,
-            "- [ ] 1.0 First phase\n  - [ ] 1.5 some leaf\n    - [ ] 10.0 misplaced anchor\n",
+            "## Phase 1 - First phase\n  - [ ] 1.5 some leaf\n    - [ ] 10.0 misplaced anchor\n",
         );
         let payload = payload_for_create("t-1", "First", Some("10.1"));
         writeback_create(&payload, &plan).expect("should synthesize a fresh top-level phase");
@@ -2246,22 +2204,25 @@ mod tests {
             "10.1 should land hyphen-separated under the new phase:\n{after}"
         );
         assert!(
-            after.contains("10.0 misplaced anchor"),
+            after.contains("10.0 - misplaced anchor"),
             "the misplaced node is left where it was:\n{after}"
         );
     }
 
     #[test]
     fn create_still_uses_top_level_anchor_when_present() {
-        // Phase 31.3 sanity: a correctly-placed top-level `10.0` is still
-        // accepted (the refusal is narrow — only fires when N.0 is nested).
+        // A correctly-placed top-level `## Phase 10` header is accepted as the
+        // parent of `10.1`: the child lands at column 0 under that header.
         let dir = scratch_dir();
-        let plan = write_plan(&dir, "- [ ] 1.0 First\n- [ ] 10.0 Hand-added anchor\n");
+        let plan = write_plan(
+            &dir,
+            "## Phase 1 - First\n## Phase 10 - Hand-added anchor\n",
+        );
         let payload = payload_for_create("t-1", "First child", Some("10.1"));
         writeback_create(&payload, &plan).expect("top-level anchor should be accepted");
         let contents = std::fs::read_to_string(&plan).unwrap();
         assert!(
-            contents.contains("  - [ ] 10.1 - First child"),
+            contents.contains("- [ ] 10.1 - First child"),
             "child should land under existing top-level anchor:\n{contents}"
         );
     }

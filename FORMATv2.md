@@ -20,7 +20,7 @@ Random prose that shouldn't be as task, will be swept with the phase.
 
 When archiving a phase, the bridge should error unless every task and subtask is decided
 
-## Phase AS — invariant spine (D6) *(depends on: AR)*
+## Phase AS - invariant spine (D6) *(depends on: AR)*
 
 The destination: invariant as single source of truth, with generators + views referencing
 it. Biggest lift; AS.0 re-plans the decomposition from the spike findings first (the layer

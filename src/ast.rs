@@ -35,29 +35,23 @@ pub struct Plan {
 /// A top-level phase. Tasks live in `children`; phase-level metadata
 /// (`depends_on`, eventually FORMATv2 prose) live on the Phase itself.
 ///
-/// The `state`/`id_style`/`separator` fields are v1 holdovers — they describe
-/// the legacy `- [ ] N.0` anchor form. Once Phase 37 lands the FORMATv2
-/// serializer they become advisory only (and a future phase will drop them
-/// from the on-disk representation entirely).
+/// FORMATv2-only: a phase is always a `## Phase X - Title` header. Phases have
+/// no checkbox of their own — completion is derived from their leaves — so the
+/// `state` field is advisory only (kept for state-file back-compat and the
+/// rare childless-phase render); routine flows derive completion from leaves.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Phase {
     pub id: String,
     pub title: String,
     #[serde(default)]
     pub state: NodeState,
-    #[serde(default)]
-    pub id_style: IdStyle,
-    #[serde(default)]
-    pub separator: Separator,
     /// Tasks under the phase. Field is named `children` (rather than `tasks`)
     /// for 36.1 so consumers that read `phase.children` keep compiling without
     /// a rename sweep; 36.2 will tighten the naming.
     #[serde(default)]
     pub children: Vec<Node>,
-    /// Annotations attached at the phase level. Today this is everything the
-    /// parser used to hang off the v1 `N.0` anchor; 36.5 will split out
-    /// phase-level prose (lines under a `## Phase` header not attached to any
-    /// task) as a distinct bucket.
+    /// Annotations attached at the phase level — prose under a `## Phase`
+    /// header not attached to any task.
     #[serde(default)]
     pub annotations: Vec<Annotation>,
     /// FORMATv2: phases declared with `*(depends on: AB, AC)*` carry the
@@ -73,69 +67,23 @@ pub struct Phase {
     /// ("AS prefers AR has landed first").
     #[serde(default)]
     pub prefer_after: Vec<String>,
-    /// Tracks how this phase appeared on disk so the serializer can preserve
-    /// the format on routine writes. v1 `- [ ] N.0 Title` anchors stay as
-    /// anchors; v2 `## Phase X - Title` headers stay as headers. Explicit
-    /// canonicalize flips every phase to `HeaderV2` for a one-shot
-    /// migration. Default `LegacyAnchor` keeps backward compatibility for
-    /// state-file deserialization and bridge-internal Phase construction.
-    #[serde(default)]
-    pub source: PhaseSource,
-}
-
-/// Origin format of a [Phase] — controls serializer dispatch. New phases
-/// parsed from a v1 `- [ ] N.0` anchor (and Phases created via the legacy
-/// path before 37) are [PhaseSource::LegacyAnchor]; phases parsed from a v2
-/// `## Phase X - Title` header are [PhaseSource::HeaderV2].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PhaseSource {
-    #[default]
-    LegacyAnchor,
-    HeaderV2,
 }
 
 /// A single checkbox node in the plan. Tasks and subtasks share this shape;
 /// depth is determined by the dotted `id` (e.g., `1.1`, `1.1.1`) and by tree
 /// position. Top-level phases use [Phase] instead.
+///
+/// FORMATv2-only: the id is always plain (no bold) and the on-disk separator is
+/// always ` - ` (hyphen-space). Reads tolerate a bare space between id and
+/// title; the serializer normalizes every line back to ` - `.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
     pub title: String,
     #[serde(default)]
     pub state: NodeState,
-    /// Presentation-only: whether the id was bold-wrapped (`**1.2.3**`) in
-    /// source. Round-trip preserves this; `standardize_to_canonical` flattens
-    /// to `Plain`.
-    #[serde(default)]
-    pub id_style: IdStyle,
-    /// Presentation-only: separator between id and title in source. Round-trip
-    /// preserves this; canonical form is `Space`.
-    #[serde(default)]
-    pub separator: Separator,
     pub children: Vec<Node>,
     pub annotations: Vec<Annotation>,
-}
-
-/// Whether the id was bold-wrapped (`**1.2.3**`) in the source. Round-trip
-/// preserves this; canonical form is `Plain`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum IdStyle {
-    #[default]
-    Plain,
-    Bold,
-}
-
-/// Separator between id and title in the source line. Round-trip preserves
-/// this; canonical form is `Space`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum Separator {
-    #[default]
-    Space,
-    EmDash,
-    Hyphen,
 }
 
 /// Checkbox state. `Pending` = `[ ]`, `Done` = `[x]`, `WontDo` = `[-]`, `Backlog` = `[>]`.
@@ -271,47 +219,39 @@ impl Phase {
         None
     }
 
-    /// Build a Phase from a top-level Node — used by the parser when it
-    /// finishes assembling a `- [ ] N.0 ...` anchor and promotes it to the
-    /// phase tier, and by anywhere that wants to wrap a legacy-anchor-shaped
-    /// node into a Phase for insertion.
+    /// Build a Phase from a Node — wraps a node's id/title/children/annotations
+    /// into the phase tier for insertion (e.g. a TaskCreate whose `plan_path`
+    /// is a bare phase id, or a phase detached and re-inserted by archive).
     pub fn from_node(node: Node) -> Self {
         Self {
             id: node.id,
             title: node.title,
             state: node.state,
-            id_style: node.id_style,
-            separator: node.separator,
             children: node.children,
             annotations: node.annotations,
             depends_on: Vec::new(),
             prefer_after: Vec::new(),
-            source: PhaseSource::LegacyAnchor,
         }
     }
 
-    /// Phase 41.3: build a fresh FORMATv2 phase header with canonical
-    /// defaults (state=Pending, id_style=Plain, separator=Hyphen,
-    /// source=HeaderV2; tasks/annotations/deps all empty). The minimal
-    /// constructor — for the "I want a new phase, deps come later" case.
+    /// Build a fresh FORMATv2 phase header (state=Pending; tasks/annotations/
+    /// deps all empty). The minimal constructor — for the "I want a new phase,
+    /// deps come later" case.
     pub fn header_v2(id: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Hyphen,
             children: Vec::new(),
             annotations: Vec::new(),
             depends_on: Vec::new(),
             prefer_after: Vec::new(),
-            source: PhaseSource::HeaderV2,
         }
     }
 
-    /// Phase 41.3: build a fresh FORMATv2 phase header pre-populated with
-    /// dep markers — for the `plan_add_phase(id, title, depends_on,
-    /// prefer_after)` flow that wants every field at construction time.
+    /// Build a fresh FORMATv2 phase header pre-populated with dep markers — for
+    /// the `plan_add_phase(id, title, depends_on, prefer_after)` flow that wants
+    /// every field at construction time.
     pub fn header_v2_with_deps(
         id: impl Into<String>,
         title: impl Into<String>,
@@ -323,30 +263,6 @@ impl Phase {
             prefer_after,
             ..Self::header_v2(id, title)
         }
-    }
-
-    /// Phase 41.3: flip a legacy v1 anchor in-place to FORMATv2 header
-    /// form (source=HeaderV2, separator=Hyphen, id_style=Plain).
-    /// Idempotent on an already-HeaderV2 phase. Used by canonicalize and
-    /// by the dep-setting verbs (`phase-deps`, `plan_set_phase_deps`) —
-    /// those need HeaderV2 so their `*(depends on)*` markers can render.
-    pub fn ensure_header_v2(&mut self) {
-        self.source = PhaseSource::HeaderV2;
-        self.separator = Separator::Hyphen;
-        self.id_style = IdStyle::Plain;
-        // Phase 42.5: v2 header phases carry bare ids — drop the legacy `.0`
-        // anchor suffix so the header emits as `## Phase N`, not `## Phase N.0`.
-        if let Some(bare) = self.id.strip_suffix(".0") {
-            self.id = bare.to_string();
-        }
-    }
-
-    /// True when the serializer should emit this phase as a FORMATv2
-    /// `## Phase X - Title` header rather than a v1 `- [ ] N.0` anchor.
-    /// Driven by `Phase::source`; canonicalize is the explicit operation
-    /// that flips legacy anchors to header form.
-    pub fn is_v2_header_form(&self) -> bool {
-        matches!(self.source, PhaseSource::HeaderV2)
     }
 }
 
@@ -495,184 +411,13 @@ pub fn is_backlog_heading(line: &str) -> bool {
     trimmed.starts_with("# Backlog") || trimmed.starts_with("## Backlog")
 }
 
-/// Parse `### Phase N — Title` style headers OR the more general
-/// `### <id> — Title` style. Returns `(id, title)` when the header matches;
-/// None otherwise (caller treats as unrecognized).
-///
-/// Accepts numeric and alphanumeric id tokens. Dotted ids preserved verbatim
-/// (`Phase 3.5` → id `3.5`, `### AA.A — ...` → id `AA.A`). Pure numeric or
-/// pure-alpha ids get `.0` appended (`Phase 1` → `1.0`, `### AA — ...` →
-/// `AA.0`) so parent_id_for of children resolves correctly. The general path
-/// REQUIRES an em-dash or hyphen separator after the id, to keep generic
-/// headings (`### Architecture`, `## Notes`) from being mistakenly promoted.
-fn parse_phase_header(text: &str) -> Option<(String, String)> {
-    let trimmed = text.trim_start();
-    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-    // Promotion only fires for `##` and `###`. `#` is too shallow to be a
-    // phase header; `####+` is sub-section labeling inside a phase (the real
-    // hierarchy lives in dotted ids, e.g. `X.4.a.1`). Both stay as narrative
-    // annotations on serialize (preserved at original indent — see
-    // write_annotation).
-    if !(2..=3).contains(&hashes) {
-        return None;
-    }
-    let after_hashes = trimmed.get(hashes..)?.trim_start();
-
-    // Legacy: `Phase N — Title`. Strip the `Phase ` keyword and recurse.
-    if let Some(after_phase) = after_hashes.strip_prefix("Phase ") {
-        return parse_id_with_separator(after_phase);
-    }
-
-    // General: `<id> — Title` with a required em-dash/hyphen separator.
-    parse_id_with_separator(after_hashes)
-}
-
-fn parse_id_with_separator(s: &str) -> Option<(String, String)> {
-    let s = s.trim_start();
-    let id_end = s
-        .find(|c: char| c.is_whitespace() || c == '—' || c == '-')
-        .unwrap_or(s.len());
-    let id_part = &s[..id_end];
-    if id_part.is_empty() {
-        return None;
-    }
-    let mut chars = id_part.chars();
-    if !chars.next()?.is_ascii_alphanumeric() {
-        return None;
-    }
-    if !id_part
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.')
-    {
-        return None;
-    }
-
-    // Require em-dash or hyphen separator after the id, NOT just whitespace —
-    // that's the guard that keeps generic `### Architecture` from being
-    // mistaken for an `### Architecture — ...` phase heading.
-    let after_id = s[id_end..].trim_start_matches(|c: char| c.is_whitespace());
-    if !(after_id.starts_with('—') || after_id.starts_with('-')) {
-        return None;
-    }
-
-    // Phase 42.5: phase ids are bare under FORMATv2 — use the header id
-    // verbatim (`Phase 1` -> `1`, `Phase AA` -> `AA`) instead of appending
-    // the legacy `.0` anchor suffix.
-    let id = id_part.to_string();
-    let title = after_id
-        .trim_start_matches('—')
-        .trim_start_matches('-')
-        .trim()
-        .to_string();
-    Some((id, title))
-}
-
-/// Depth-first: strip every `Phase N — Title` header annotation from this
-/// node and all descendants. Captures (id, title) into `out` in document
-/// order (descendants first, then this node's own annotations).
-///
-/// If the subtree contains MORE than one Phase-N header, we bail without
-/// stripping anything — promotion would be ambiguous (which header bounds
-/// which top-level phase?). The headers stay as `Annotation::Text` and the
-/// serializer (which respects their original indent for markdown headers)
-/// preserves them verbatim. The user sees no refusal and no demotion; the
-/// only thing they lose is auto-promotion of those particular headers.
-fn strip_and_collect_phase_headers(
-    node: &mut Node,
-    out: &mut Vec<(String, String)>,
-    conversions: &mut Vec<String>,
-) {
-    if count_phase_headers_in_subtree(node) > 1 {
-        return;
-    }
-    for child in &mut node.children {
-        strip_and_collect_phase_headers(child, out, conversions);
-    }
-    node.annotations.retain(|a| {
-        if let Annotation::Text { text, .. } = a
-            && let Some((id, title)) = parse_phase_header(text)
-        {
-            let preview = text.lines().next().unwrap_or("").trim().to_string();
-            conversions.push(format!("{preview} → `- [ ] {id} {title}`"));
-            out.push((id, title));
-            false
-        } else {
-            true
-        }
-    });
-}
-
-fn flatten_id_style(node: &mut Node) {
-    // Narrow normalization: only strips bold-wrapped IDs. Separator stays
-    // per-node (preserved by routine archive/writeback). The full FORMATv2
-    // flip — separator → hyphen-space, phase source → HeaderV2, backlog
-    // heading → h1 — lives in the explicit `canonicalize` verb (37.5),
-    // which routine paths don't trigger.
-    node.id_style = IdStyle::Plain;
-    for child in &mut node.children {
-        flatten_id_style(child);
-    }
-}
-
-fn count_phase_headers_in_subtree(node: &Node) -> usize {
-    let here = node
-        .annotations
-        .iter()
-        .filter(
-            |a| matches!(a, Annotation::Text { text, .. } if parse_phase_header(text).is_some()),
-        )
-        .count();
-    here + node
-        .children
-        .iter()
-        .map(count_phase_headers_in_subtree)
-        .sum::<usize>()
-}
-
-fn flush_phase_group(
-    out: &mut Vec<Phase>,
-    pending: &mut Vec<Node>,
-    current_header: &mut Option<(String, String)>,
-) {
-    if pending.is_empty() {
-        return;
-    }
-    if let Some((id, title)) = current_header.take() {
-        // Phase 42.5: promoted header phases carry bare ids too.
-        let id = id.strip_suffix(".0").map(str::to_string).unwrap_or(id);
-        let children: Vec<Node> = std::mem::take(pending);
-        out.push(Phase {
-            id,
-            title,
-            state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
-            children,
-            annotations: vec![],
-            depends_on: vec![],
-            prefer_after: vec![],
-            // Standardize-promoted phases (from legacy `### Phase N — Title`
-            // markdown headers) land in HeaderV2 form so the next write emits
-            // them as `## Phase N - Title`.
-            source: PhaseSource::HeaderV2,
-        });
-    } else {
-        // Promote every orphan top-level Node (no captured Phase header
-        // wrapping it) into its own Phase. Legacy `- [ ] N.0` anchors land
-        // here — their state/style/separator come along for v1 round-trip.
-        for node in pending.drain(..) {
-            out.push(Phase::from_node(node));
-        }
-    }
-}
-
 impl Plan {
     /// Every leaf across all phases, returned as a uniform Phase-or-Node view.
-    /// A *phase* qualifies as a leaf when it has no tasks under it (legacy v1
-    /// `- [ ] N.0 Foo` with no children — the anchor itself was the unit of
-    /// work). A *task* qualifies as a leaf when it has no nested children.
-    /// Document order: childless phase emits its own item; non-empty phase
-    /// emits each leaf descendant of its task subtree.
+    /// A *phase* qualifies as a leaf only in the degenerate case where it has
+    /// no tasks under it (a `## Phase X` header not yet broken down). A *task*
+    /// qualifies as a leaf when it has no nested children. Document order:
+    /// childless phase emits its own item; non-empty phase emits each leaf
+    /// descendant of its task subtree.
     pub fn leaves(&self) -> Vec<PlanItemRef<'_>> {
         let mut out: Vec<PlanItemRef<'_>> = Vec::new();
         for phase in &self.phases {
@@ -806,8 +551,6 @@ impl Plan {
                 id: id.clone(),
                 title: subject.to_string(),
                 state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Hyphen,
                 children: vec![],
                 annotations: vec![],
             };
@@ -824,88 +567,6 @@ impl Plan {
     /// Insert a top-level phase in id-sort order against existing phases.
     pub fn insert_phase(&mut self, phase: Phase) {
         insert_phase_in_order(&mut self.phases, phase);
-    }
-
-    /// Standardize a plan to canonical form before writeback. Promotes
-    /// `### Phase N — Title` markdown headers (which the parser captures as
-    /// annotations) into proper `N.0` phase nodes, with subsequent top-level
-    /// phases re-parented as children. Returns the rewritten plan plus a list
-    /// of human-readable conversion notes for the hook output so the user
-    /// sees what changed.
-    ///
-    /// Refuses with Err when a header doesn't match the `Phase N — Title`
-    /// pattern (e.g., `## Notes`, `### Phase 2/3 — ...`) — those need manual
-    /// resolution. Phase numbers with dots (`Phase 3.5`) are accepted and used
-    /// verbatim as the id (so `Phase 3.5` becomes `3.5`, not `3.5.0`).
-    pub fn standardize_to_canonical(self) -> Result<(Plan, Vec<String>), String> {
-        // No refusal pass — headers that don't match the promotion shape
-        // stay as `Annotation::Text` and get emitted verbatim at their
-        // original indent by the serializer. Narrative dividers like
-        // `## Phase history`, `### Parallelism map`, or `#### X.4.a` are
-        // preserved in-place; only `##` / `###` headers matching
-        // `<id> — Title` get promoted to canonical phase checkboxes.
-
-        // Three input-phase shapes drive the promotion pass:
-        //   (a) v2 header-sourced Phase (`source: HeaderV2`): pass through
-        //       unchanged — preserves depends_on / prefer_after / state /
-        //       annotations. Flush any pending v1 group first so promotion
-        //       boundaries don't cross.
-        //   (b) Legacy anchor with NO `### Phase N — Title` annotations in
-        //       its subtree: queue as Node into pending, no header to
-        //       capture. Final flush will rebuild it as a top-level Phase
-        //       via Phase::from_node (loses no metadata it didn't have).
-        //   (c) Legacy anchor with one or more Phase-N header annotations:
-        //       strip the headers (capturing them for new-phase synthesis),
-        //       queue the stripped node, optionally set the current header
-        //       so the *next* flush groups under it.
-        let mut conversions: Vec<String> = Vec::new();
-        let mut new_phases: Vec<Phase> = Vec::new();
-        let mut pending: Vec<Node> = Vec::new();
-        let mut current_header: Option<(String, String)> = None;
-
-        for phase in self.phases {
-            if matches!(phase.source, PhaseSource::HeaderV2) {
-                // (a) pass-through preserves FORMATv2 metadata
-                flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
-                new_phases.push(phase);
-                continue;
-            }
-            let mut as_node = phase_to_node(phase);
-            let mut headers_in_subtree: Vec<(String, String)> = Vec::new();
-            strip_and_collect_phase_headers(
-                &mut as_node,
-                &mut headers_in_subtree,
-                &mut conversions,
-            );
-            pending.push(as_node);
-            if let Some((id, title)) = headers_in_subtree.pop() {
-                flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
-                current_header = Some((id, title));
-            }
-        }
-        flush_phase_group(&mut new_phases, &mut pending, &mut current_header);
-
-        // Phase 29.4: canonical form strips bold-wrapped IDs. Separator
-        // normalization is NOT done here — that's the explicit canonicalize
-        // verb's job (37.5), so routine archive/writeback preserve user
-        // formatting. (Pass-through HeaderV2 phases also flow through here;
-        // the id_style assignment is a safe no-op for them.)
-        for phase in &mut new_phases {
-            phase.id_style = IdStyle::Plain;
-            for child in &mut phase.children {
-                flatten_id_style(child);
-            }
-        }
-
-        Ok((
-            Plan {
-                preamble: self.preamble,
-                phases: new_phases,
-                backlog: self.backlog,
-                backlog_h1: self.backlog_h1,
-            },
-            conversions,
-        ))
     }
 
     /// Remove a node by id from anywhere in the tree. Returns the detached
@@ -1227,15 +888,12 @@ fn remove_descendant_in_phase(phase: &mut Phase, id: &str) -> Option<Node> {
 
 /// Flatten a [Phase] back into a Node. Lossy — drops `depends_on`. Used by
 /// callers that store a swept phase as a Node for re-serialization
-/// (`Plan::remove`), and internally by `standardize_to_canonical` so the
-/// header-promotion logic can keep operating on Node subtrees.
+/// (`Plan::remove`).
 fn phase_to_node(phase: Phase) -> Node {
     Node {
         id: phase.id,
         title: phase.title,
         state: phase.state,
-        id_style: phase.id_style,
-        separator: phase.separator,
         children: phase.children,
         annotations: phase.annotations,
     }
@@ -1392,8 +1050,6 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
                 annotations: vec![Annotation::Text {
                     text: "note".to_string(),
                     indent: 2,
@@ -1402,14 +1058,11 @@ mod tests {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
                     state: NodeState::Done,
-                    id_style: IdStyle::Plain,
-                    separator: Separator::Space,
                     children: vec![],
                     annotations: vec![],
                 }],
                 depends_on: vec![],
                 prefer_after: vec![],
-                source: PhaseSource::LegacyAnchor,
             }],
         };
         let json = serde_json::to_string(&plan).unwrap();
@@ -1439,20 +1092,14 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
                 children: vec![Node {
                     id: "1.1".to_string(),
                     title: "Task".to_string(),
                     state: NodeState::Pending,
-                    id_style: IdStyle::Plain,
-                    separator: Separator::Space,
                     children: vec![Node {
                         id: "1.1.1".to_string(),
                         title: "Sub".to_string(),
                         state: NodeState::Done,
-                        id_style: IdStyle::Plain,
-                        separator: Separator::Space,
                         children: vec![],
                         annotations: vec![],
                     }],
@@ -1461,7 +1108,6 @@ mod tests {
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
-                source: PhaseSource::LegacyAnchor,
             }],
         };
         // Phase 36: top-level phase ids resolve via find_phase / contains_id.
@@ -1484,21 +1130,16 @@ mod tests {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
                 state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
                 children: vec![],
                 annotations: vec![],
                 depends_on: vec![],
                 prefer_after: vec![],
-                source: PhaseSource::LegacyAnchor,
             }],
         };
         let child = Node {
             id: "1.1".to_string(),
             title: "Task".to_string(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -1539,37 +1180,33 @@ mod tests {
         // Regression for 7.7: given children [7.1, 7.2, 7.3], inserting `7.2a`
         // must land between 7.2 and 7.3, not at the end.
         let mut plan =
-            parse_for_test("- [ ] 7.0 Phase\n  - [ ] 7.1 a\n  - [ ] 7.2 b\n  - [ ] 7.3 c\n");
+            parse_for_test("## Phase 7 - Phase\n  - [ ] 7.1 a\n  - [ ] 7.2 b\n  - [ ] 7.3 c\n");
         let new_child = Node {
             id: "7.2a".to_string(),
             title: "between".to_string(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
-        plan.add_child_of("7.0", new_child).unwrap();
-        let parent = plan.find_phase("7.0").unwrap();
+        plan.add_child_of("7", new_child).unwrap();
+        let parent = plan.find_phase("7").unwrap();
         let ids: Vec<&str> = parent.children.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["7.1", "7.2", "7.2a", "7.3"]);
     }
 
     #[test]
     fn add_child_of_prepends_when_new_id_is_smallest() {
-        let mut plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.5 mid\n  - [ ] 1.9 last\n");
+        let mut plan = parse_for_test("## Phase 1 - Phase\n  - [ ] 1.5 mid\n  - [ ] 1.9 last\n");
         let new_child = Node {
             id: "1.1".to_string(),
             title: "first".to_string(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
-        plan.add_child_of("1.0", new_child).unwrap();
+        plan.add_child_of("1", new_child).unwrap();
         let ids: Vec<&str> = plan
-            .find_phase("1.0")
+            .find_phase("1")
             .unwrap()
             .children
             .iter()
@@ -1581,21 +1218,18 @@ mod tests {
     #[test]
     fn insert_phase_orders_top_level_too() {
         // Symmetry: top-level phases use the same ordering as child insertion.
-        let mut plan = parse_for_test("- [ ] 1.0 a\n- [ ] 3.0 c\n");
+        let mut plan = parse_for_test("## Phase 1 - a\n## Phase 3 - c\n");
         plan.insert_phase(Phase {
-            id: "2.0".to_string(),
+            id: "2".to_string(),
             title: "b".to_string(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
             depends_on: vec![],
             prefer_after: vec![],
-            source: PhaseSource::LegacyAnchor,
         });
         let ids: Vec<&str> = plan.phases.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(ids, vec!["1.0", "2.0", "3.0"]);
+        assert_eq!(ids, vec!["1", "2", "3"]);
     }
 
     #[test]
@@ -1605,8 +1239,6 @@ mod tests {
             id: "1.1".to_string(),
             title: "Task".to_string(),
             state: NodeState::Pending,
-            id_style: IdStyle::Plain,
-            separator: Separator::Space,
             children: vec![],
             annotations: vec![],
         };
@@ -1616,24 +1248,24 @@ mod tests {
 
     #[test]
     fn remove_pulls_a_leaf() {
-        let mut plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n");
+        let mut plan = parse_for_test("## Phase 1 - Phase\n  - [ ] 1.1 Task\n");
         let removed = plan.remove("1.1").unwrap();
         assert_eq!(removed.id, "1.1");
         assert!(plan.find("1.1").is_none());
-        assert!(plan.find_phase("1.0").is_some(), "parent should remain");
+        assert!(plan.find_phase("1").is_some(), "parent should remain");
     }
 
     #[test]
     fn remove_pulls_a_top_level_phase() {
-        let mut plan = parse_for_test("- [ ] 1.0 P1\n- [ ] 2.0 P2\n");
-        plan.remove("1.0").unwrap();
-        assert!(plan.find_phase("1.0").is_none());
-        assert!(plan.find_phase("2.0").is_some());
+        let mut plan = parse_for_test("## Phase 1 - P1\n## Phase 2 - P2\n");
+        plan.remove("1").unwrap();
+        assert!(plan.find_phase("1").is_none());
+        assert!(plan.find_phase("2").is_some());
     }
 
     #[test]
     fn remove_returns_none_when_missing() {
-        let mut plan = parse_for_test("- [ ] 1.0 P\n");
+        let mut plan = parse_for_test("## Phase 1 - P\n");
         assert!(plan.remove("nope").is_none());
     }
 
@@ -1681,7 +1313,7 @@ mod tests {
 - **A** — added 2026-05-19.
 - **B** — deferred from 1.2 on 2026-05-19.
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let mut plan = parse_for_test(input);
         assert!(plan.backlog.is_empty(), "preamble backlog not auto-lifted");
@@ -1711,7 +1343,7 @@ mod tests {
 - **Dup** — added 2026-05-19.
 - **Unique** — added 2026-05-19.
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let mut plan = parse_for_test(input);
         plan.consolidate_backlog();
@@ -1736,7 +1368,7 @@ mod tests {
         // Post-41.6: every bullet + indented continuation + blank-line
         // gap survives the move with indent intact.
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 ## Backlog (not yet phased)
 
@@ -1750,7 +1382,7 @@ mod tests {
 - AA.A.10 (stretch) — Tree-walk picker→column derivation
   Even after AA.A.9, PickerSpec.column is still hand-mapped.
 
-- [ ] 2.0 Next phase
+## Phase 2 - Next phase
 ";
         let mut plan = parse_for_test(input);
         plan.consolidate_backlog();
@@ -1799,7 +1431,7 @@ mod tests {
     #[test]
     fn consolidate_leaves_h3_and_sustainment_untouched() {
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 ### Backlog (rehomed from AA)
 
@@ -1826,229 +1458,11 @@ mod tests {
     }
 
     #[test]
-    fn standardize_passes_through_canonical_plan() {
-        let plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n- [ ] 2.0 Another\n");
-        let (out, notes) = plan.clone().standardize_to_canonical().unwrap();
-        assert!(notes.is_empty(), "no conversions on canonical input");
-        assert_eq!(out.phases.len(), plan.phases.len());
-    }
-
-    #[test]
-    fn standardize_passes_through_headers_in_preamble() {
-        // Preamble headers are preserved verbatim; not in-tree → no rewrite.
-        let plan = parse_for_test(
-            "# Project\n\n## Goal\n\nSome prose.\n\n- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n",
-        );
-        let (_, notes) = plan.standardize_to_canonical().unwrap();
-        assert!(
-            notes.is_empty(),
-            "preamble headers shouldn't trigger conversion"
-        );
-    }
-
-    #[test]
-    fn standardize_promotes_phase_n_header_to_canonical_phase() {
-        // The shakeout shape: `### Phase 1 — Build` between checkboxes.
-        // After standardize: phases 1.1+ become children of a new bare `1` node.
-        let plan = parse_for_test(
-            "- [ ] 0.1 First\n- [ ] 0.5 Last in zero\n\n### Phase 1 — Build\n\n- [ ] 1.1 Build it\n- [ ] 1.2 Build more\n",
-        );
-        let (out, notes) = plan.standardize_to_canonical().unwrap();
-        assert_eq!(notes.len(), 1);
-        assert!(
-            notes[0].contains("Phase 1"),
-            "note should call out promotion: {notes:?}"
-        );
-
-        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        // 0.1 and 0.5 are orphans (no preceding Phase header for them), stay top-level.
-        // Phase 42.5: the synthesized phase parent is bare `1`, with 1.1/1.2 as children.
-        assert_eq!(ids, vec!["0.1", "0.5", "1"], "got phases: {ids:?}");
-        let p10 = out.phases.iter().find(|n| n.id == "1").unwrap();
-        assert_eq!(p10.title, "Build");
-        let child_ids: Vec<&str> = p10.children.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(child_ids, vec!["1.1", "1.2"]);
-    }
-
-    #[test]
-    fn standardize_handles_dotted_phase_numbers() {
-        // `### Phase 3.5 — Titles` → id="3.5", title="Titles". Verbatim dot preserved.
-        let plan = parse_for_test(
-            "- [ ] 0.1 First\n\n### Phase 3.5 — Titles via vision OCR [done]\n\n- [ ] 3.5.1 Sub\n",
-        );
-        let (out, notes) = plan.standardize_to_canonical().unwrap();
-        assert_eq!(notes.len(), 1);
-        let p35 = out
-            .phases
-            .iter()
-            .find(|n| n.id == "3.5")
-            .expect("3.5 created");
-        assert_eq!(p35.title, "Titles via vision OCR [done]");
-    }
-
-    #[test]
-    fn standardize_promotes_alphanumeric_id_heading() {
-        // Phase 16.3 — quicksight shakeout. `### AA.A — Title` (no "Phase"
-        // keyword, alphanumeric id) should also promote to canonical.
-        let plan = parse_for_test(
-            "- [ ] 0.1 First\n\n### AA.A — Dropdown-control flip\n\n- [ ] AA.A.1 Audit\n",
-        );
-        let (out, notes) = plan.standardize_to_canonical().unwrap();
-        assert_eq!(notes.len(), 1);
-        let p_aa_a = out
-            .phases
-            .iter()
-            .find(|n| n.id == "AA.A")
-            .expect("AA.A phase created");
-        assert_eq!(p_aa_a.title, "Dropdown-control flip");
-        let child_ids: Vec<&str> = p_aa_a.children.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(child_ids, vec!["AA.A.1"]);
-    }
-
-    #[test]
-    fn standardize_alpha_only_id_stays_bare() {
-        // Phase 42.5: `### AA — Title` → bare id "AA" (children like "AA.1"
-        // resolve their parent as "AA" via parent_id_for). No `.0` appended.
-        let plan =
-            parse_for_test("- [ ] 0.1 First\n\n### AA — Top-level alpha\n\n- [ ] AA.1 Sub\n");
-        let (out, _) = plan.standardize_to_canonical().unwrap();
-        let p_aa = out
-            .phases
-            .iter()
-            .find(|n| n.id == "AA")
-            .expect("AA phase created");
-        assert_eq!(p_aa.title, "Top-level alpha");
-    }
-
-    #[test]
-    fn standardize_leaves_generic_heading_without_separator_alone() {
-        // Phase 19 — `### Architecture` doesn't match Phase-N shape (no
-        // separator) → stays as an annotation, no refusal. Original column
-        // 0 indent is preserved via serializer.
-        let plan = parse_for_test("- [ ] 0.1 First\n\n### Architecture\n\n- [ ] 1.0 Phase\n");
-        let (out, _) = plan
-            .standardize_to_canonical()
-            .expect("non-matching headers no longer refused");
-        // No promotion — original phases remain (0.1 and 1.0 at top level).
-        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        assert!(
-            ids.contains(&"0.1") && ids.contains(&"1.0"),
-            "phases preserved: {ids:?}"
-        );
-    }
-
-    #[test]
-    fn standardize_leaves_unrecognized_headers_alone() {
-        // `## Notes` stays as narrative. Plan parses, standardizes, and the
-        // annotation survives on whichever node the parser attached it to.
-        let plan = parse_for_test("- [ ] 1.0 Phase\n  - [ ] 1.1 Task\n\n## Notes\n\nSome stuff.\n");
-        let (out, _) = plan.standardize_to_canonical().unwrap();
-        // Look for `## Notes` text annotation anywhere in the resulting tree.
-        let found = out.phases.iter().any(|p| {
-            p.annotations
-                .iter()
-                .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("## Notes")))
-                || p.children.iter().any(|c| {
-                    c.annotations.iter().any(
-                        |a| matches!(a, Annotation::Text { text, .. } if text.contains("## Notes")),
-                    )
-                })
-        });
-        assert!(found, "## Notes should remain as annotation");
-    }
-
-    #[test]
-    fn standardize_leaves_phase_with_slash_alone() {
-        // `Phase 2/3` isn't a valid id token (the `/`) → no promotion, but
-        // also no refusal. Stays as narrative.
-        let plan =
-            parse_for_test("- [ ] 0.1 First\n\n### Phase 2/3 — Batch pipeline\n\n- [ ] 2.1 Sub\n");
-        let (out, _) = plan
-            .standardize_to_canonical()
-            .expect("Phase 2/3 stays as narrative");
-        // No `2.0` or `2/3.0` phase synthesized; 0.1 and 2.1 stay top-level.
-        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"0.1") && ids.contains(&"2.1"), "got: {ids:?}");
-    }
-
-    #[test]
-    fn standardize_leaves_multi_header_subtree_alone() {
-        // Phase 20 regression — quicksight shakeout v0.1.6. When multiple
-        // `## Phase N — Title` headers attach to the same top-level phase's
-        // subtree (because intervening content didn't pop the parser stack),
-        // standardize should leave them ALL as narrative rather than refuse.
-        //
-        // Phase 36.3 update: `## Phase X - Title` (and the em-dash variant)
-        // is now a first-class FORMATv2 phase boundary at PARSE time — each
-        // header opens its own Phase. The "multi-header subtree" case the
-        // original test guarded is no longer possible: the parser produces
-        // [0.1, X, AA, Z] phases directly. `standardize_to_canonical` is a
-        // no-op on this input because every header already became a phase.
-        let plan = parse_for_test(
-            "- [ ] 0.1 First\n\n## Phase X — Top\n## Phase AA — Other\n## Phase Z — Third\n",
-        );
-        let pre_ids: Vec<String> = plan.phases.iter().map(|n| n.id.clone()).collect();
-        assert_eq!(
-            pre_ids,
-            vec!["0.1", "X", "AA", "Z"],
-            "v2 parser opens a phase per header at parse time"
-        );
-
-        let (out, _) = plan
-            .standardize_to_canonical()
-            .expect("standardize is a no-op when headers already parsed as phases");
-        let post_ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(post_ids, vec!["0.1", "X", "AA", "Z"]);
-    }
-
-    #[test]
-    fn standardize_skips_promotion_for_deep_hash_headers() {
-        // Phase 19 — `####+` headers are sub-section labels inside a phase;
-        // they don't form phase boundaries. Even though `#### X.4.a — ...`
-        // matches the `<id> — Title` shape, depth 4 disqualifies it.
-        let plan = parse_for_test(
-            "- [ ] X.0 Phase\n  - [ ] X.1 Sub\n\n#### X.4.a — Foundations\n\n- [ ] X.4.a.1 Detail\n",
-        );
-        let (out, _) = plan.standardize_to_canonical().unwrap();
-        // No `X.4.a` phase synthesized — X.4.a.1 stays top-level.
-        let ids: Vec<&str> = out.phases.iter().map(|n| n.id.as_str()).collect();
-        assert!(!ids.contains(&"X.4.a"), "should NOT promote ####: {ids:?}");
-        assert!(ids.contains(&"X.4.a.1"), "X.4.a.1 stays top-level: {ids:?}");
-    }
-
-    #[test]
-    fn standardize_ignores_text_starting_with_hash_but_not_header() {
-        // `#hashtag` (no space after #) isn't a markdown header → not collected.
-        let plan = Plan {
-            preamble: vec![],
-            backlog: vec![],
-            backlog_h1: false,
-            phases: vec![Phase {
-                id: "1.0".to_string(),
-                title: "Phase".to_string(),
-                state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Space,
-                children: vec![],
-                annotations: vec![Annotation::Text {
-                    text: "#hashtag style not a header".to_string(),
-                    indent: 2,
-                }],
-                depends_on: vec![],
-                prefer_after: vec![],
-                source: PhaseSource::LegacyAnchor,
-            }],
-        };
-        let (_, notes) = plan.standardize_to_canonical().unwrap();
-        assert!(notes.is_empty());
-    }
-
-    #[test]
     fn deferral_consolidates_preamble_backlog_to_bottom() {
         // A legacy preamble Backlog merges down to the bottom field rather than
         // splitting into two sections when a new deferral lands.
         let mut plan = parse_for_test(
-            "# Title\n\n## Backlog (not yet phased)\n\n- **Existing item** — context.\n\n- [ ] 1.0 Phase\n",
+            "# Title\n\n## Backlog (not yet phased)\n\n- **Existing item** — context.\n\n## Phase 1 - Phase\n",
         );
         plan.consolidate_backlog();
         plan.append_backlog_deferral("28.7", "Test entry", "2026-05-17");
@@ -2058,13 +1472,13 @@ mod tests {
         assert!(serialized.contains("- **Test entry** — deferred from 28.7 on 2026-05-17."));
         // Backlog renders below the phase.
         assert!(
-            serialized.find("## Backlog").unwrap() > serialized.find("- [ ] 1.0 Phase").unwrap()
+            serialized.find("## Backlog").unwrap() > serialized.find("## Phase 1 - Phase").unwrap()
         );
     }
 
     #[test]
     fn deferral_creates_section_when_missing() {
-        let mut plan = parse_for_test("# Title\n\n- [ ] 1.0 Phase\n");
+        let mut plan = parse_for_test("# Title\n\n## Phase 1 - Phase\n");
         plan.append_backlog_deferral("28.7", "Bootstrap entry", "2026-05-17");
         let serialized = crate::serializer::serialize(&plan);
         assert!(serialized.contains("## Backlog (not yet phased)"));

@@ -1,10 +1,10 @@
-use crate::ast::{Annotation, IdStyle, Node, NodeState, Phase, Plan, Separator};
+use crate::ast::{Annotation, Node, NodeState, Phase, Plan};
 use thiserror::Error;
 use winnow::Parser;
 use winnow::ascii::space0;
-use winnow::combinator::{alt, delimited, opt};
+use winnow::combinator::opt;
 use winnow::error::ContextError;
-use winnow::token::{rest, take_until, take_while};
+use winnow::token::{rest, take_while};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
@@ -12,6 +12,13 @@ pub enum ParseError {
     BadCheckboxState { line: usize, state: String },
     #[error("line {line}: unterminated fenced code block opened at line {opened_at}")]
     UnterminatedCodeFence { line: usize, opened_at: usize },
+    #[error(
+        "column-0 checkbox `- [ ] {id} {title}` has no `## Phase` header above it. \
+         FORMATv2 (v1.0.0+) requires every task to live under a `## Phase X - Title` \
+         header; the legacy `- [ ] N.0` anchor form is no longer supported. \
+         Run `claude-plan-bridge canonicalize` on v0.9 to migrate, then upgrade."
+    )]
+    OrphanCheckbox { id: String, title: String },
 }
 
 pub fn parse(input: &str) -> Result<Plan, ParseError> {
@@ -96,29 +103,22 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
             && let Some(header) = parse_v2_phase_header(raw_line)
         {
             while let Some((node, _)) = stack.pop() {
-                push_into_parent(&mut plan, &mut stack, &mut current_phase, node);
+                push_into_parent(&mut stack, &mut current_phase, node)?;
             }
             if let Some(p) = current_phase.take() {
                 plan.phases.push(p);
             }
             current_phase = Some(Phase {
-                // Phase 42.3: phases are bare ids under FORMATv2. Strip a
-                // trailing `.0` left over from the legacy convention
-                // (`## Phase 42.0`) so in-memory phase ids are always bare,
-                // regardless of on-disk form — old plans auto-migrate to
-                // `## Phase 42` on the next write.
+                // Phases are bare ids under FORMATv2. Strip a trailing `.0`
+                // left over from an old `## Phase 42.0` so in-memory phase ids
+                // are always bare — the header re-emits as `## Phase 42`.
                 id: bare_phase_id(&header.id),
                 title: header.title,
                 state: NodeState::Pending,
-                id_style: IdStyle::Plain,
-                separator: Separator::Hyphen,
                 children: vec![],
                 annotations: vec![],
                 depends_on: header.depends_on,
                 prefer_after: header.prefer_after,
-                // Mark this phase as v2-sourced so the serializer emits it
-                // back as `## Phase X - Title` rather than a v1 anchor.
-                source: crate::ast::PhaseSource::HeaderV2,
             });
             // Opening a phase header counts as entering the tree — subsequent
             // blank lines coalesce as Annotation::Blank instead of preamble.
@@ -127,20 +127,12 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
         }
 
         match parse_checkbox(trimmed, line_no)? {
-            CheckboxLine::Checkbox {
-                state,
-                id,
-                title,
-                id_style,
-                separator,
-            } => {
+            CheckboxLine::Checkbox { state, id, title } => {
                 saw_checkbox = true;
                 let node = Node {
                     id,
                     title,
                     state,
-                    id_style,
-                    separator,
                     children: Vec::new(),
                     annotations: Vec::new(),
                 };
@@ -148,7 +140,7 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
                 while let Some((_, top_indent)) = stack.last() {
                     if *top_indent >= indent {
                         let (done, _) = stack.pop().unwrap();
-                        push_into_parent(&mut plan, &mut stack, &mut current_phase, done);
+                        push_into_parent(&mut stack, &mut current_phase, done)?;
                     } else {
                         break;
                     }
@@ -190,7 +182,7 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
 
     // Drain the stack — anything remaining is complete.
     while let Some((node, _)) = stack.pop() {
-        push_into_parent(&mut plan, &mut stack, &mut current_phase, node);
+        push_into_parent(&mut stack, &mut current_phase, node)?;
     }
     if let Some(p) = current_phase.take() {
         plan.phases.push(p);
@@ -201,21 +193,26 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
 }
 
 fn push_into_parent(
-    plan: &mut Plan,
     stack: &mut [(Node, usize)],
     current_phase: &mut Option<Phase>,
     node: Node,
-) {
+) -> Result<(), ParseError> {
     if let Some((parent, _)) = stack.last_mut() {
         parent.children.push(node);
     } else if let Some(phase) = current_phase.as_mut() {
         // Inside a FORMATv2 phase: top-level checkboxes become its tasks.
         phase.children.push(node);
     } else {
-        // No header context — legacy v1 `- [ ] N.0` anchor. Promote to Phase
-        // via from_node so the Node-shaped state/style/separator come along.
-        plan.phases.push(Phase::from_node(node));
+        // No header context — a column-0 checkbox before any `## Phase`
+        // header. The legacy `- [ ] N.0` anchor that v1 promoted to a phase
+        // is gone in FORMATv2; refuse with a migration hint rather than
+        // silently inventing structure.
+        return Err(ParseError::OrphanCheckbox {
+            id: node.id,
+            title: node.title,
+        });
     }
+    Ok(())
 }
 
 /// Parsed FORMATv2 phase header (`## Phase <ID> - <Title>` with optional
@@ -239,9 +236,9 @@ fn bare_phase_id(id: &str) -> String {
 /// including `## Backlog`, `### Phase`, indented headers, headers without
 /// the `Phase ` keyword, and bare `## Notes` style sections.
 ///
-/// Separator tolerance on read (canonical write is ` - `): ` - ` hyphen,
-/// ` — ` em-dash, or a plain space following the ID — same liberality as
-/// checkbox lines.
+/// Separator tolerance on read (canonical write is ` - `): ` - ` hyphen or a
+/// plain space following the ID — same liberality as checkbox lines. Em-dash
+/// is a dropped v1 separator and is no longer recognized.
 fn parse_v2_phase_header(line: &str) -> Option<PhaseHeader> {
     // Column-0 only. An indented `## Phase X` is markdown content inside a
     // task, not a phase boundary.
@@ -251,9 +248,9 @@ fn parse_v2_phase_header(line: &str) -> Option<PhaseHeader> {
     let after_hashes = line.strip_prefix("## ")?;
     let after_phase_keyword = after_hashes.strip_prefix("Phase ")?;
 
-    // Extract the ID (alphanumeric, may include `.` for legacy/edge cases).
+    // Extract the ID (alphanumeric, may include `.` for an edge `42.0`).
     let id_end = after_phase_keyword
-        .find(|c: char| c.is_whitespace() || c == '—' || c == '-' || c == '*')
+        .find(|c: char| c.is_whitespace() || c == '-' || c == '*')
         .unwrap_or(after_phase_keyword.len());
     let id_part = after_phase_keyword[..id_end].trim();
     if id_part.is_empty() {
@@ -267,9 +264,9 @@ fn parse_v2_phase_header(line: &str) -> Option<PhaseHeader> {
     }
     let rest = after_phase_keyword[id_end..].trim_start();
 
-    // Strip the separator (` - ` / ` — ` / bare whitespace). After the rest
-    // may still start with `-` or `—` from the separator itself.
-    let after_sep = rest.trim_start_matches(['—', '-']).trim_start();
+    // Strip the separator (` - ` or bare whitespace). The rest may still start
+    // with `-` from the separator itself.
+    let after_sep = rest.trim_start_matches('-').trim_start();
 
     // Title runs until the first `*(` marker or end-of-line.
     let (title_raw, markers_part) = match after_sep.find("*(") {
@@ -487,8 +484,6 @@ enum CheckboxLine {
         state: NodeState,
         id: String,
         title: String,
-        id_style: crate::ast::IdStyle,
-        separator: crate::ast::Separator,
     },
     NotACheckbox,
 }
@@ -516,99 +511,39 @@ fn parse_checkbox(trimmed: &str, line_no: usize) -> Result<CheckboxLine, ParseEr
         }
     };
 
-    let (id, title, id_style, separator) = extract_id_title_style(rest);
-    Ok(CheckboxLine::Checkbox {
-        state,
-        id,
-        title,
-        id_style,
-        separator,
-    })
+    let (id, title) = extract_id_title(rest);
+    Ok(CheckboxLine::Checkbox { state, id, title })
 }
 
 /// Pull an optional id off the front of the post-checkbox text.
 ///
-/// Accepts:
-/// - bold-wrapped ids:  `**X.4.a.1** — title`
-/// - bare ids:          `X.4.a.1 title` or `1.0 title`
-/// - no id:             `do the thing` (returns `("", "do the thing", Plain)`)
+/// FORMATv2-only. Accepts:
+/// - canonical:  `X.4.a.1 - title`
+/// - space-only: `X.4.a.1 title`  (tolerated on read; serialized back as ` - `)
+/// - no id:      `do the thing`   (returns `("", "do the thing")`)
 ///
-/// Returns the captured `IdStyle` so the serializer can round-trip the source
-/// format. The joined-bold strategy (where the bold span wraps id + title)
-/// can't be fully preserved on round-trip; it flattens to `Plain` for now —
-/// the id and title are still parsed correctly, only the bold-wrap is lost.
-fn extract_id_title_style(
-    input: &str,
-) -> (String, String, crate::ast::IdStyle, crate::ast::Separator) {
+/// Bold (`**id**`) and em-dash separators are no longer recognized — a line
+/// using them parses with an empty id and the raw text as the title. Run
+/// `canonicalize` on v0.9 before upgrading if your plan still has them.
+fn extract_id_title(input: &str) -> (String, String) {
     let mut input = input;
     id_and_title
         .parse_next(&mut input)
         .expect("id_and_title is total")
 }
 
-fn id_and_title(
-    input: &mut &str,
-) -> winnow::ModalResult<(String, String, crate::ast::IdStyle, crate::ast::Separator), ContextError>
-{
-    use crate::ast::{IdStyle, Separator};
+fn id_and_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
     space0.parse_next(input)?;
-
-    // Strategy A — joined-bold `**id — title.**` (the bold span contains BOTH
-    // the id AND part of the title). Surfaces during the quicksight shakeout:
-    // `- [x] **AA.A.1 — Audit existing dropdowns.** Walked L1...`.
-    let snapshot = *input;
-    if let Ok((id, title_inside)) = joined_bold_id_title.parse_next(input) {
-        let trailing_raw: &str = rest.parse_next(input)?;
-        let trailing = trailing_raw.trim();
-        let title = if trailing.is_empty() {
-            title_inside
-        } else if title_inside.is_empty() {
-            trailing.to_string()
-        } else {
-            format!("{title_inside} {trailing}")
-        };
-        // Joined-bold flattens to Plain on round-trip (the bold span covers
-        // both id + title; preserving it would require a different style enum
-        // variant). Acceptable for now — this shape is rare.
-        return Ok((id, title, IdStyle::Plain, Separator::Space));
+    let id = opt(bare_id).parse_next(input)?.unwrap_or_default();
+    if !id.is_empty() {
+        // Consume the id/title separator: a run of spaces and/or hyphens
+        // (` `, ` - `, `--`). Em-dash is intentionally NOT consumed — it's a
+        // dropped v1 separator, so a stray `—` stays in the title verbatim.
+        let _: &str =
+            take_while(0.., |c: char| c == '-' || c == ' ' || c == '\t').parse_next(input)?;
     }
-    *input = snapshot;
-
-    // Strategy B — existing path: simple `**id**` or `id`, then separator,
-    // then title. Capture which style + separator matched so the serializer
-    // can round-trip.
-    let id_match = opt(alt((
-        bold_id.map(|id| (id, IdStyle::Bold)),
-        bare_id.map(|id| (id, IdStyle::Plain)),
-    )))
-    .parse_next(input)?;
-    let (id, id_style) = id_match.unwrap_or_else(|| (String::new(), IdStyle::Plain));
-    let separator = if id.is_empty() {
-        Separator::Space
-    } else {
-        capture_separator.parse_next(input)?
-    };
     let title = rest.parse_next(input)?.trim_end().to_string();
-    Ok((id, title, id_style, separator))
-}
-
-fn bold_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
-    delimited("**", id_chars, "**").parse_next(input)
-}
-
-/// Matches `**<id> <separator> <title-content>**` where the bold span contains
-/// both the id and the title text (joined). Caller gets `(id, title_inside)`;
-/// trailing prose after the closing `**` is captured separately.
-fn joined_bold_id_title(input: &mut &str) -> winnow::ModalResult<(String, String), ContextError> {
-    "**".parse_next(input)?;
-    let id = id_chars.parse_next(input)?;
-    // Require at least one separator char (em-dash, hyphen, or whitespace)
-    // after the id, else this is just `**id**` — let Strategy B handle it.
-    let _: &str =
-        take_while(1.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;
-    let title_inside: &str = take_until(0.., "**").parse_next(input)?;
-    "**".parse_next(input)?;
-    Ok((id, title_inside.trim().to_string()))
+    Ok((id, title))
 }
 
 fn bare_id(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
@@ -620,20 +555,6 @@ fn id_chars(input: &mut &str) -> winnow::ModalResult<String, ContextError> {
         .verify(is_valid_id)
         .map(String::from)
         .parse_next(input)
-}
-
-fn capture_separator(input: &mut &str) -> winnow::ModalResult<crate::ast::Separator, ContextError> {
-    use crate::ast::Separator;
-    let chunk: &str =
-        take_while(0.., |c: char| c == '—' || c == '-' || c.is_whitespace()).parse_next(input)?;
-    let sep = if chunk.contains('—') {
-        Separator::EmDash
-    } else if chunk.contains('-') {
-        Separator::Hyphen
-    } else {
-        Separator::Space
-    };
-    Ok(sep)
 }
 
 fn is_valid_id(s: &str) -> bool {
@@ -682,11 +603,11 @@ mod tests {
 
     #[test]
     fn parses_single_phase_no_children() {
-        let input = "- [ ] 1.0 First phase\n";
+        let input = "## Phase 1 - First phase\n";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases.len(), 1);
         let phase = &plan.phases[0];
-        assert_eq!(phase.id, "1.0");
+        assert_eq!(phase.id, "1");
         assert_eq!(phase.title, "First phase");
         assert!(!phase.is_done());
         assert!(phase.children.is_empty());
@@ -694,37 +615,39 @@ mod tests {
 
     #[test]
     fn parses_completed_checkbox() {
-        let plan = parse("- [x] 1.0 Done phase\n").unwrap();
-        assert!(plan.phases[0].is_done());
+        let plan = parse("## Phase 1 - Done phase\n- [x] 1.1 - Done task\n").unwrap();
+        assert!(plan.phases[0].children[0].is_done());
     }
 
     #[test]
     fn parses_wont_do_checkbox() {
-        let plan = parse("- [-] 1.0 Skipped phase\n").unwrap();
-        assert_eq!(plan.phases[0].state, NodeState::WontDo);
-        assert!(!plan.phases[0].is_done());
-        assert!(plan.phases[0].is_resolved());
+        let plan = parse("## Phase 1 - Skipped phase\n- [-] 1.1 - Skipped task\n").unwrap();
+        let task = &plan.phases[0].children[0];
+        assert_eq!(task.state, NodeState::WontDo);
+        assert!(!task.is_done());
+        assert!(task.is_resolved());
     }
 
     #[test]
     fn parses_tilde_as_wont_do_alias() {
-        let plan = parse("- [~] 1.0 Skipped via tilde\n").unwrap();
-        assert_eq!(plan.phases[0].state, NodeState::WontDo);
+        let plan = parse("## Phase 1 - Skipped via tilde\n- [~] 1.1 - Skipped task\n").unwrap();
+        assert_eq!(plan.phases[0].children[0].state, NodeState::WontDo);
     }
 
     #[test]
     fn parses_backlog_checkbox() {
-        let plan = parse("- [>] 1.0 Deferred phase\n").unwrap();
-        assert_eq!(plan.phases[0].state, NodeState::Backlog);
-        assert!(!plan.phases[0].is_done());
-        assert!(plan.phases[0].is_resolved());
+        let plan = parse("## Phase 1 - Deferred phase\n- [>] 1.1 - Deferred task\n").unwrap();
+        let task = &plan.phases[0].children[0];
+        assert_eq!(task.state, NodeState::Backlog);
+        assert!(!task.is_done());
+        assert!(task.is_resolved());
     }
 
     #[test]
     fn lifts_trailing_backlog_into_field() {
         let input = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+- [ ] 1.1 - Task
 
 ## Backlog (not yet phased)
 
@@ -747,7 +670,7 @@ mod tests {
     #[test]
     fn trailing_backlog_round_trips_idempotently() {
         let input =
-            "- [ ] 1.0 Phase\n\n## Backlog (not yet phased)\n\n- **X** — added 2026-05-19.\n";
+            "## Phase 1 - Phase\n\n## Backlog (not yet phased)\n\n- **X** — added 2026-05-19.\n";
         let plan1 = parse(input).unwrap();
         let out = crate::serializer::serialize(&plan1);
         assert_eq!(
@@ -768,7 +691,7 @@ mod tests {
 
 - **Early note** — added 2026-05-19.
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let plan = parse(input).unwrap();
         assert!(
@@ -782,7 +705,7 @@ mod tests {
     fn does_not_lift_non_backlog_trailing_section() {
         // A `## Sustainment`-style trailing section is left for the tree walk.
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 ## Sustainment & minor features
 
@@ -795,9 +718,9 @@ mod tests {
     #[test]
     fn parses_nested_three_levels() {
         let input = "\
-- [ ] 1.0 Phase
-  - [ ] 1.1 Task
-    - [ ] 1.1.1 Subtask
+## Phase 1 - Phase
+- [ ] 1.1 - Task
+  - [ ] 1.1.1 - Subtask
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases.len(), 1);
@@ -812,13 +735,13 @@ mod tests {
     #[test]
     fn handles_four_space_indent() {
         let input = "\
-- [ ] 1.0 Phase
-    - [ ] 1.1 Task
-        - [ ] 1.1.1 Subtask
+## Phase 1 - Phase
+- [ ] 1.1 - Task
+    - [ ] 1.1.1 - Subtask
 ";
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
-        assert_eq!(phase.children.len(), 1, "1.1 should be child of 1.0");
+        assert_eq!(phase.children.len(), 1, "1.1 should be child of phase 1");
         assert_eq!(
             phase.children[0].children.len(),
             1,
@@ -829,10 +752,10 @@ mod tests {
     #[test]
     fn handles_mixed_indent_across_phases() {
         let input = "\
-- [ ] 1.0 P1
-  - [ ] 1.1 T
-- [ ] 2.0 P2
-    - [ ] 2.1 T
+## Phase 1 - P1
+- [ ] 1.1 - T
+## Phase 2 - P2
+    - [ ] 2.1 - T
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases.len(), 2);
@@ -847,7 +770,7 @@ mod tests {
 
 Some prose.
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.preamble.len(), 4); // header, blank, prose, blank
@@ -858,9 +781,9 @@ Some prose.
     #[test]
     fn attaches_bullet_annotation_to_node() {
         let input = "\
-- [ ] 1.0 Phase
-  - note as bullet
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+- note as bullet
+- [ ] 1.1 - Task
 ";
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
@@ -868,7 +791,7 @@ Some prose.
         match &phase.annotations[0] {
             Annotation::Bullet { text, indent } => {
                 assert_eq!(text, "note as bullet");
-                assert_eq!(*indent, 2);
+                assert_eq!(*indent, 0);
             }
             other => panic!("expected Bullet, got {other:?}"),
         }
@@ -878,8 +801,8 @@ Some prose.
     #[test]
     fn attaches_text_annotation_to_node() {
         let input = "\
-- [ ] 1.0 Phase
-  Some context for the phase.
+## Phase 1 - Phase
+Some context for the phase.
 ";
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
@@ -887,7 +810,7 @@ Some prose.
         match &phase.annotations[0] {
             Annotation::Text { text, indent } => {
                 assert_eq!(text, "Some context for the phase.");
-                assert_eq!(*indent, 2);
+                assert_eq!(*indent, 0);
             }
             other => panic!("expected Text, got {other:?}"),
         }
@@ -896,10 +819,10 @@ Some prose.
     #[test]
     fn attaches_code_block_annotation() {
         let input = "\
-- [ ] 1.0 Phase
-  ```rust
-  fn foo() {}
-  ```
+## Phase 1 - Phase
+```rust
+fn foo() {}
+```
 ";
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
@@ -912,7 +835,7 @@ Some prose.
             } => {
                 assert_eq!(lang.as_deref(), Some("rust"));
                 assert!(content.contains("fn foo()"));
-                assert_eq!(*indent, 2);
+                assert_eq!(*indent, 0);
             }
             other => panic!("expected CodeBlock, got {other:?}"),
         }
@@ -920,98 +843,51 @@ Some prose.
 
     #[test]
     fn tolerates_checkbox_without_id() {
-        let plan = parse("- [ ] no id here\n").unwrap();
-        assert_eq!(plan.phases[0].id, "");
-        assert_eq!(plan.phases[0].title, "no id here");
-    }
-
-    #[test]
-    fn parses_bold_wrapped_id() {
-        let plan = parse("- [x] **X.4.a.1** — Studio severability test\n").unwrap();
-        assert_eq!(plan.phases[0].id, "X.4.a.1");
-        assert_eq!(plan.phases[0].title, "Studio severability test");
-        assert!(plan.phases[0].is_done());
-    }
-
-    #[test]
-    fn parses_joined_bold_id_title_with_trailing_prose() {
-        // Phase 16.2 regression — quicksight shakeout. Bold span contains
-        // BOTH id and title (period included), followed by more prose.
-        let plan =
-            parse("- [x] **AA.A.1 — Audit existing dropdowns.** Walked L1 / L2 / forms\n").unwrap();
-        assert_eq!(plan.phases[0].id, "AA.A.1");
-        assert_eq!(
-            plan.phases[0].title,
-            "Audit existing dropdowns. Walked L1 / L2 / forms"
-        );
-        assert!(plan.phases[0].is_done());
-    }
-
-    #[test]
-    fn parses_joined_bold_no_trailing_prose() {
-        let plan = parse("- [ ] **1.0 — Just the bold contents**\n").unwrap();
-        assert_eq!(plan.phases[0].id, "1.0");
-        assert_eq!(plan.phases[0].title, "Just the bold contents");
-    }
-
-    #[test]
-    fn parses_joined_bold_with_space_separator() {
-        // Em-dash isn't required — any separator works.
-        let plan = parse("- [ ] **AA.A.1 Audit dropdowns.** trailing\n").unwrap();
-        assert_eq!(plan.phases[0].id, "AA.A.1");
-        assert_eq!(plan.phases[0].title, "Audit dropdowns. trailing");
+        let plan = parse("## Phase 1 - Phase\n- [ ] no id here\n").unwrap();
+        let task = &plan.phases[0].children[0];
+        assert_eq!(task.id, "");
+        assert_eq!(task.title, "no id here");
     }
 
     #[test]
     fn parses_alphanumeric_id_without_bold() {
-        let plan = parse("- [ ] X.4.a.1 title here\n").unwrap();
-        assert_eq!(plan.phases[0].id, "X.4.a.1");
-        assert_eq!(plan.phases[0].title, "title here");
-    }
-
-    #[test]
-    fn parses_em_dash_separator() {
-        let plan = parse("- [ ] 1.0 — title with em-dash\n").unwrap();
-        assert_eq!(plan.phases[0].id, "1.0");
-        assert_eq!(plan.phases[0].title, "title with em-dash");
-    }
-
-    #[test]
-    fn parses_hyphen_separator() {
-        let plan = parse("- [ ] 1.0 - title with hyphen\n").unwrap();
-        assert_eq!(plan.phases[0].id, "1.0");
-        assert_eq!(plan.phases[0].title, "title with hyphen");
+        // FORMATv2: alphanumeric task ids (`X.4.a.1`) parse plain — no bold
+        // wrapping — under a phase header.
+        let plan = parse("## Phase X - Title\n- [ ] X.4.a.1 - title here\n").unwrap();
+        let task = &plan.phases[0].children[0];
+        assert_eq!(task.id, "X.4.a.1");
+        assert_eq!(task.title, "title here");
     }
 
     #[test]
     fn does_not_treat_first_title_word_as_id() {
         // "Make" has no dot and isn't all-digits, so it must NOT be grabbed as an id.
-        let plan = parse("- [ ] Make the core domain model the source\n").unwrap();
-        assert_eq!(plan.phases[0].id, "");
-        assert_eq!(
-            plan.phases[0].title,
-            "Make the core domain model the source"
-        );
+        let plan =
+            parse("## Phase 1 - Phase\n- [ ] Make the core domain model the source\n").unwrap();
+        let task = &plan.phases[0].children[0];
+        assert_eq!(task.id, "");
+        assert_eq!(task.title, "Make the core domain model the source");
     }
 
     #[test]
     fn section_header_inside_tree_attaches_as_text_annotation() {
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
+- [ ] 1.1 - Task
   ## A markdown heading
-  - [ ] 1.1 Task
 ";
         let plan = parse(input).unwrap();
         let phase = &plan.phases[0];
-        assert_eq!(phase.annotations.len(), 1);
-        match &phase.annotations[0] {
+        let task = &phase.children[0];
+        assert_eq!(task.annotations.len(), 1);
+        match &task.annotations[0] {
             Annotation::Text { text, .. } => assert_eq!(text, "## A markdown heading"),
             other => panic!("expected Text, got {other:?}"),
         }
         assert_eq!(
             phase.children.len(),
             1,
-            "1.1 should still be a child of 1.0"
+            "1.1 should still be a child of phase 1"
         );
     }
 
@@ -1052,13 +928,15 @@ Some prose.
 
     #[test]
     fn tolerates_short_id_form() {
+        // Short numeric ids (`1`, no dot) are valid both for the phase header
+        // and for a bare task id under it.
         let input = "\
-- [ ] 1 Phase
-  - [ ] 1.1 Task
+## Phase 1 - Phase
+- [ ] 1 - Task
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases[0].id, "1");
-        assert_eq!(plan.phases[0].children[0].id, "1.1");
+        assert_eq!(plan.phases[0].children[0].id, "1");
     }
 
     #[test]
@@ -1074,7 +952,7 @@ Some prose.
         assert_eq!(plan.phases.len(), 2);
 
         let p1 = &plan.phases[0];
-        assert_eq!(p1.id, "1.0");
+        assert_eq!(p1.id, "1");
         assert!(!p1.is_done());
         assert_eq!(p1.children.len(), 2);
 
@@ -1088,13 +966,12 @@ Some prose.
         assert_eq!(t12.id, "1.2");
         assert_eq!(
             t12.annotations.len(),
-            2,
-            "1.2 has text + bullet annotations"
+            3,
+            "1.2 has text + bullet + trailing-blank annotations"
         );
 
         let p2 = &plan.phases[1];
-        assert_eq!(p2.id, "2.0");
-        assert!(p2.is_done());
+        assert_eq!(p2.id, "2");
         assert_eq!(p2.children.len(), 1);
         assert!(p2.children[0].is_done());
     }
@@ -1113,11 +990,11 @@ Some prose.
     #[test]
     fn ignores_blank_lines_inside_tree() {
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
-  - [ ] 1.1 Task
+- [ ] 1.1 - Task
 
-  - [ ] 1.2 Other
+- [ ] 1.2 - Other
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.phases[0].children.len(), 2);
@@ -1195,16 +1072,6 @@ Some prose.
     }
 
     #[test]
-    fn v2_header_with_em_dash_separator_still_parses() {
-        // Tolerance: read-side accepts em-dash even though canonical write is
-        // hyphen-space.
-        let input = "## Phase AI — Studio dogfood\n";
-        let plan = parse(input).unwrap();
-        assert_eq!(plan.phases[0].id, "AI");
-        assert_eq!(plan.phases[0].title, "Studio dogfood");
-    }
-
-    #[test]
     fn v2_header_with_no_markers_and_no_separator_is_id_only() {
         // The bare `## Phase AI` form (no title) parses as id-only, title="".
         // Matches the user's current quicksight PLAN.md mid-pivot state.
@@ -1217,15 +1084,16 @@ Some prose.
 
     #[test]
     fn v2_header_does_not_match_indented_or_h3_or_h1() {
-        // `### Phase X` (h3) → not a v2 phase header (h2 only).
-        let plan = parse("### Phase AI - Title\n- [ ] AI.0 task\n").unwrap();
-        // Falls back to legacy: `### Phase` becomes a text annotation; the
-        // top-level checkbox promotes to a v1 Phase.
-        assert!(plan.phases[0].id != "AI" || plan.phases.len() != 1);
+        // `### Phase X` (h3) → not a v2 phase header (h2 only). With no real
+        // `## Phase` header, the h3 line lands in the preamble and there are no
+        // phases.
+        let plan = parse("### Phase AI - Title\n").unwrap();
+        assert!(plan.phases.is_empty());
 
         // Indented `  ## Phase X` is task-internal markdown, not a header.
-        let plan = parse("- [ ] 1.0 outer\n  ## Phase X\n  - [ ] 1.1 inner\n").unwrap();
-        assert_eq!(plan.phases[0].id, "1.0");
+        let plan = parse("## Phase 1 - outer\n- [ ] 1.1 - inner\n  ## Phase X\n").unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].id, "1");
     }
 
     #[test]
@@ -1233,41 +1101,10 @@ Some prose.
         // `## Backlog (not yet phased)` is a backlog section, NOT a phase
         // header. The trailing-backlog peel handles it; if mid-document, the
         // existing extract_backlog_from_* paths sweep it.
-        let plan = parse("- [ ] 1.0 Phase\n\n## Backlog (not yet phased)\n").unwrap();
+        let plan = parse("## Phase 1 - Phase\n\n## Backlog (not yet phased)\n").unwrap();
         // Single phase, no v2 phase added for `## Backlog`.
         assert_eq!(plan.phases.len(), 1);
-        assert_eq!(plan.phases[0].id, "1.0");
-    }
-
-    #[test]
-    fn v2_header_phase_followed_by_v1_anchor_keeps_anchor_as_task() {
-        // Mixed plan: a `## Phase AI` header followed by a `- [ ] 36.0 ...`
-        // checkbox lands the checkbox as a task of AI (since we're inside the
-        // v2 phase). User-visible weirdness, but the canonicalize path can
-        // sort it out — for now, preserve everything.
-        let input = "## Phase AI - Header phase\n\n- [ ] 36.0 Legacy anchor\n";
-        let plan = parse(input).unwrap();
-        assert_eq!(plan.phases.len(), 1);
-        assert_eq!(plan.phases[0].id, "AI");
-        assert_eq!(plan.phases[0].children.len(), 1);
-        assert_eq!(plan.phases[0].children[0].id, "36.0");
-    }
-
-    #[test]
-    fn v1_anchors_before_first_v2_header_still_become_phases() {
-        // Legacy phases lead, FORMATv2 header follows. Both coexist.
-        let input = "\
-- [ ] 1.0 Legacy phase
-
-## Phase AI - New phase
-
-- [ ] AI.0 New work
-";
-        let plan = parse(input).unwrap();
-        assert_eq!(plan.phases.len(), 2);
-        assert_eq!(plan.phases[0].id, "1.0");
-        assert_eq!(plan.phases[1].id, "AI");
-        assert_eq!(plan.phases[1].children.len(), 1);
+        assert_eq!(plan.phases[0].id, "1");
     }
 
     #[test]
@@ -1293,7 +1130,7 @@ Some prose.
     #[test]
     fn h1_backlog_heading_is_recognized_on_read() {
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 # Backlog (not yet phased)
 
@@ -1318,7 +1155,7 @@ Some prose.
         // as nested plain bullets with optional continuation prose. All lines
         // must round-trip verbatim.
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 # Backlog (not yet phased)
 
@@ -1354,7 +1191,7 @@ Some prose.
   - X.1.1 - subtask
     notes
 
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 ";
         let mut plan = parse(input).unwrap();
         // Preamble form isn't auto-lifted (only trailing blocks are).
@@ -1385,7 +1222,7 @@ Some prose.
         // must keep accepting it on read so installed projects don't break
         // when the bridge upgrades.
         let input = "\
-- [ ] 1.0 Phase
+## Phase 1 - Phase
 
 ## Backlog (not yet phased)
 
@@ -1544,20 +1381,19 @@ Closing prose.
         let input = include_str!("../tests/fixtures/v2_mixed.md");
         let plan = parse(input).unwrap();
 
-        // 5 phases total: legacy 1.0, then AI / AQ / AM / AS.
+        // 5 phases total: 1, then AI / AQ / AM / AS.
         let ids: Vec<&str> = plan.phases.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["1.0", "AI", "AQ", "AM", "AS"]);
+        assert_eq!(ids, vec!["1", "AI", "AQ", "AM", "AS"]);
 
-        // 1.0 is a legacy v1 anchor with all four states represented.
-        let legacy = &plan.phases[0];
-        assert_eq!(legacy.state, NodeState::Done);
-        assert_eq!(legacy.children.len(), 3);
-        assert_eq!(legacy.children[0].state, NodeState::Done);
-        assert_eq!(legacy.children[1].state, NodeState::WontDo);
-        assert_eq!(legacy.children[2].state, NodeState::Backlog);
+        // Phase 1 carries tasks with done / won't-do / backlog states.
+        let first = &plan.phases[0];
+        assert_eq!(first.children.len(), 3);
+        assert_eq!(first.children[0].state, NodeState::Done);
+        assert_eq!(first.children[1].state, NodeState::WontDo);
+        assert_eq!(first.children[2].state, NodeState::Backlog);
         assert!(
-            legacy.depends_on.is_empty() && legacy.prefer_after.is_empty(),
-            "v1 anchors have no FORMATv2 metadata"
+            first.depends_on.is_empty() && first.prefer_after.is_empty(),
+            "this phase has no FORMATv2 dependency metadata"
         );
 
         // AI: header phase, intro prose, between-task prose, trailing prose.
@@ -1649,10 +1485,8 @@ Closing prose.
 
     #[test]
     fn v2_mixed_fixture_round_trips_through_serialize() {
-        // Phase 37: v2-sourced phases (`source: HeaderV2`) serialize via
-        // `write_phase_v2` (`## Phase X - Title`), v1 anchors via
-        // `write_phase_v1_anchor` (`- [ ] N.0 Title`). The v2_mixed fixture
-        // mixes both — full round-trip is now AST-stable.
+        // FORMATv2: header phases serialize via `## Phase X - Title` with tasks
+        // dedented to column 0. Full round-trip is AST-stable.
         let input = include_str!("../tests/fixtures/v2_mixed.md");
         let plan1 = parse(input).unwrap();
         let out = crate::serializer::serialize(&plan1);
@@ -1664,46 +1498,10 @@ Closing prose.
     }
 
     #[test]
-    fn v2_mixed_fixture_v1_anchor_round_trips_in_isolation() {
-        // The v1-only slice of the fixture (Phase 1.0 with its three states)
-        // DOES round-trip cleanly through the current serializer, since v1
-        // anchors emit and re-parse as `- [ ] N.0 Title` checkboxes.
-        let input = "\
-- [x] 1.0 Legacy v1 anchor phase
-  - [x] 1.1 done task
-  - [-] 1.2 won't-do task
-  - [>] 1.3 backlog task
-";
-        let plan1 = parse(input).unwrap();
-        let out = crate::serializer::serialize(&plan1);
-        let plan2 = parse(&out).unwrap();
-        assert_eq!(plan1, plan2);
-    }
-
-    #[test]
-    fn v1_anchor_column0_prose_keeps_legacy_stack_attachment() {
-        // v1 plans never set current_phase, so column-0 prose mid-tree still
-        // attaches to the open stack node — preserves backward compatibility.
-        let input = "\
-- [ ] 1.0 Legacy phase
-  - [ ] 1.1 task
-
-Column-zero prose under a v1 anchor.
-";
-        let plan = parse(input).unwrap();
-        let phase = &plan.phases[0];
-        // The v1 anchor itself owns the column-0 prose (since the stack still
-        // has 1.0/1.1 open when the prose arrives — the deepest open node
-        // captures it).
-        let prose_anywhere = std::iter::once(phase)
-            .flat_map(|p| {
-                p.annotations.iter().chain(
-                    p.children
-                        .iter()
-                        .flat_map(|c| c.annotations.iter()),
-                )
-            })
-            .any(|a| matches!(a, Annotation::Text { text, .. } if text.contains("Column-zero prose")));
-        assert!(prose_anywhere, "v1 mode preserves stack-attached prose");
+    fn column0_checkbox_without_phase_header_is_orphan_error() {
+        // FORMATv2: a column-0 checkbox with no `## Phase` header above it is
+        // rejected — the legacy `- [ ] N.0` anchor form is gone.
+        let err = parse("- [ ] 1.0 Phase\n  - [ ] 1.1 task\n").unwrap_err();
+        assert!(matches!(err, ParseError::OrphanCheckbox { .. }));
     }
 }

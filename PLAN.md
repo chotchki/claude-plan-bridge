@@ -18,13 +18,13 @@ Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e te
 Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonicalize` on <=0.9, then upgrade. Implementation finding (from starting CF.2.1): `standardize_to_canonical` (ast.rs) is the *shared* v1 engine — called by `archive.rs` (archive + archive_phase) and `mcp.rs` (plan_add fallback), not just the `canonicalize` command, and it does v1 **structure promotion AND cosmetics** in one pass. So the CF.2.1–4 boundaries overlap through it and the removal cascades to archive + mcp + tests. On a pure-v2 plan it's a pass-through (identity), so archive/mcp can use the parsed plan directly once v1 reading is gone. The breakdown is a scaffold — expect to merge/reshape CF.2.1–3 into a more holistic pass.
 
 - [x] CF.1 - Plan & breakdown
-- [ ] CF.2 - Implement
-  - [ ] CF.2.1 - Remove canonicalize + standardize_to_canonical
-  - [ ] CF.2.2 - Parser: v2-only structure (drop v1 anchors and headers)
-  - [ ] CF.2.3 - Drop v1 cosmetics (bold + em-dash + .0)
-  - [ ] CF.2.4 - Prune dead v1 tests and fixtures
-- [ ] CF.3 - Tests + docs
-- [ ] CF.4 - Review
+- [x] CF.2 - Implement
+  - [x] CF.2.1 - Remove canonicalize + standardize_to_canonical
+  - [x] CF.2.2 - Parser: v2-only structure (drop v1 anchors and headers)
+  - [x] CF.2.3 - Drop v1 cosmetics (bold + em-dash + .0)
+  - [x] CF.2.4 - Prune dead v1 tests and fixtures
+- [x] CF.3 - Tests + docs
+- [x] CF.4 - Review
 - [ ] CF.5 - Release (bump + tag + push)
 
 ## Backlog (not yet phased)
