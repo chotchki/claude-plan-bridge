@@ -624,3 +624,24 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CG.3 - Implement the promote verb (CLI + MCP)
 - [x] CG.4 - Tests + docs + phase exit (promote)
 
+---
+
+## 2026-06-25
+
+## Phase CH - Robust trailing-backlog peel (terminal phase swallows ## Backlog)
+
+  Root: phase-region detection keys on ## Phase headers (+ EOF fallback) and does NOT treat other top-level ## sections (## Backlog, ## Non-goals, ## Risks) as boundaries. So a phase that's the LAST ## Phase before such a section is computed as extending to EOF — swallowing the Backlog.
+
+  Symptom A — archive <PHASE> clobbers the Backlog. PLAN ends ## Phase R\n<tasks>\n## Backlog\n<items>; archive R removes Phase R and the entire Backlog (to EOF), not just Phase R. Expected: only Phase R moves to PLAN_ARCHIVE.
+
+  Symptom B — writeback relocates the terminal phase's leaves to EOF. ## Phase R (last before ## Backlog) holds hand-authored - [ ] leaves. Any writeback (a TaskCreate adding another phase, or a TaskUpdate completing a task) moves R's leaves to after the Backlog content (EOF). Observed: harness-task-backed leaves (created via TaskCreate) elsewhere were untouched — only the terminal phase's hand-authored/baseline-only leaves relocate (root unclear, could be positional).
+
+  Suggested fix: treat ANY top-level ##  header as a section boundary for BOTH the archive sweep-range and the writeback re-emit anchor; and re-emit in-phase leaves at their original position, not the phase-end.
+
+  Workaround: keep a live ## Phase after the one being archived/written; otherwise hand-edit. Hit twice, 2026-06-25 (skylander-portal-controller): archive S ate the Backlog; Phase-21 TaskCreate/TaskUpdate relocated Phase R's R.1–R.3.
+- [x] CH.1 - Rewrite peel_trailing_backlog to scan down from the last Backlog heading
+- [x] CH.2 - Add parser unit regression tests for robust backlog peel
+- [x] CH.3 - Add end-to-end archive regression test (terminal phase preserves backlog)
+- [x] CH.4 - Adversarial edge-case sweep, full test suite, binary reproduction
+- [x] CH.5 - Update docs and log the related out-of-scope absorption issue
+
