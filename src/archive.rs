@@ -849,4 +849,89 @@ mod tests {
         let after_state = State::load(&state_path).unwrap();
         assert_eq!(after_state.active_phase(), Some("2.0"));
     }
+
+    // -----------------------------------------------------------------
+    // Phase CH: archiving a terminal phase that sits right before a
+    // `## Backlog` section must not swallow the backlog. Regression for the
+    // reproduced case where a column-0 prose line inside the backlog defeated
+    // the old upward peel, the section was absorbed into the phase, and
+    // `archive` swept it into PLAN_ARCHIVE.md.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn archive_preserves_trailing_backlog_with_column0_prose() {
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "\
+## Phase R - Terminal done phase
+- [x] R.1 - done one
+- [x] R.2 - done two
+
+## Backlog (not yet phased)
+
+- keep me item one
+
+A column-0 prose line that broke the old upward backlog scan.
+
+- keep me item two
+",
+        );
+        let report = archive(&plan, false, "2026-06-25").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["R"]);
+
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("## Phase R"), "phase R archived:\n{after}");
+        assert!(
+            after.contains("## Backlog (not yet phased)"),
+            "backlog heading kept:\n{after}"
+        );
+        assert!(
+            after.contains("- keep me item one"),
+            "item 1 kept:\n{after}"
+        );
+        assert!(
+            after.contains("- keep me item two"),
+            "item 2 kept:\n{after}"
+        );
+        assert!(
+            after.contains("A column-0 prose line"),
+            "backlog prose kept:\n{after}"
+        );
+
+        let archive_md = std::fs::read_to_string(archive_path_for(&plan)).unwrap();
+        assert!(
+            archive_md.contains("## Phase R"),
+            "phase R is in the archive:\n{archive_md}"
+        );
+        assert!(
+            !archive_md.contains("keep me"),
+            "backlog must NOT leak into the archive:\n{archive_md}"
+        );
+    }
+
+    #[test]
+    fn archive_phase_preserves_trailing_backlog_with_column0_prose() {
+        // Same guarantee via the single-phase `archive_phase` entry point.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "\
+## Phase R - Terminal done phase
+- [x] R.1 - done one
+
+## Backlog (not yet phased)
+
+- survivor
+
+Prose paragraph at column 0.
+",
+        );
+        let report = archive_phase(&plan, "R", "2026-06-25", false).unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["R"]);
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("## Phase R"));
+        assert!(after.contains("- survivor"), "backlog survived:\n{after}");
+        assert!(after.contains("Prose paragraph at column 0."));
+    }
 }

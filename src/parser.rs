@@ -316,58 +316,107 @@ fn split_id_list(list: &str) -> impl Iterator<Item = String> + '_ {
         .map(String::from)
 }
 
-/// Split `input` into (body lines, trailing-backlog body). When the document
-/// *ends* with a `## Backlog (not yet phased)` section — heading followed only
-/// by bullet/blank/continuation lines to EOF — the heading-and-below is peeled
-/// off and the bullet lines (leading/trailing blanks trimmed) are returned as
-/// the backlog body. The serializer re-emits the heading, so it's not stored.
+/// Split `input` into (body lines, trailing-backlog body, was_h1). When the
+/// document *ends* with the canonical `## Backlog (not yet phased)` section, the
+/// heading-and-below is peeled off and its lines (leading/trailing blanks
+/// trimmed) are returned — verbatim — as the backlog body. The serializer
+/// re-emits the heading, so it's not stored.
 ///
-/// Conservative by construction: the upward scan stops at the first line that
-/// isn't blank, a `-` bullet, or an indented continuation. If that stopping
-/// line isn't the Backlog heading (e.g. it's `## Sustainment`, a `### Backlog`
-/// subsection, prose, or a checkbox), nothing is peeled — the Backlog stays in
-/// the body for the tree walk / `consolidate_backlog` to handle.
+/// Detection lifts everything from the canonical heading to EOF, so it is robust
+/// to arbitrary backlog *content*: column-0 prose, `###` substanza headings,
+/// fenced code blocks, `---` dividers, AND indented descoped subtrees that still
+/// carry `- [ ]`/`- [x]` state markers all round-trip. (The original
+/// implementation scanned *up* from EOF accepting only blank / `-` bullet /
+/// indented lines; any other line aborted the scan before the heading, the whole
+/// section was absorbed into the final phase's annotations, `archive` swept it
+/// away [Symptom A] and `serialize` re-emitted the phase's leaves below it
+/// [Symptom B]. Phase CH.)
+///
+/// Hardened against edge cases two adversarial sweeps surfaced:
+/// - **Exact canonical heading only.** A user section whose heading merely
+///   *starts with* `## Backlog` (e.g. `## Backlog grooming TODO`) is NOT the
+///   bridge's backlog and must not have its heading rewritten / bullets lifted.
+///   (The shared [crate::ast::is_backlog_heading] is a deliberately-loose prefix
+///   match used elsewhere; the peel needs the strict [is_canonical_backlog_heading].)
+/// - **Anchor after the last structural heading, earliest-first.** The trailing
+///   region begins after the last `## Phase` header or non-backlog top-level
+///   section. Anchoring on the *first* canonical heading inside that region (not
+///   the last) folds a duplicate `## Backlog` block into the backlog body rather
+///   than stranding it to be absorbed into the preceding phase.
+/// - **Empty heading is dropped, not absorbed.** An empty canonical heading
+///   carries no data; removing it (rather than leaving it for the tree-walk)
+///   avoids the serializer relocating it above the preceding phase's tasks. The
+///   bridge re-creates it on the next backlog write.
+///
+/// KNOWN LIMITATIONS (both need an AST trailer region; tracked in the Backlog):
+/// a non-Backlog `##` section, or a `## Phase N`-shaped line, placed *after* a
+/// trailing `## Backlog` (violating the backlog-is-last invariant the bridge
+/// writes) is treated as document structure — so the backlog is not lifted and
+/// the stray line may mint a phantom phase. The conservative call protects a
+/// genuinely misplaced real phase from being swallowed into the backlog.
 fn peel_trailing_backlog(input: &str) -> (Vec<&str>, Vec<String>, bool) {
     let lines: Vec<&str> = input.lines().collect();
 
-    // Walk up from EOF over backlog-body-shaped lines, looking for the heading.
-    let mut i = lines.len();
-    while i > 0 {
-        let line = lines[i - 1];
-        let trimmed = line.trim_start();
-        // A checkbox line ends the scan — backlog bullets are never checkboxes,
-        // so a `- [ ] ...` below the heading means this isn't a trailing block
-        // (the Backlog sits above real phases and belongs to the preamble).
-        let is_checkbox = trimmed.starts_with("- [");
-        let is_body_shaped = !is_checkbox
-            && (trimmed.is_empty()
-                || trimmed.starts_with('-')
-                || (line.starts_with(char::is_whitespace) && !trimmed.is_empty()));
-        if crate::ast::is_backlog_heading(line) {
-            // Detect heading level for round-trip: h1 `# Backlog` (FORMATv2)
-            // vs h2 `## Backlog` (legacy). Both are accepted on read; the
-            // serializer honors `plan.backlog_h1`. `# B...` starts with `# `
-            // exactly, while `## B...` starts with `## ` (second char is `#`
-            // not space), so prefix-match on `# ` AND NOT `## ` distinguishes.
-            let was_h1 = trimmed.starts_with("# ") && !trimmed.starts_with("## ");
-            let body_lines: Vec<String> =
-                lines[i..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            let backlog = trim_blank_edges(body_lines);
-            if backlog.is_empty() {
-                return (lines, Vec::new(), false);
-            }
-            let mut kept: Vec<&str> = lines[..i - 1].to_vec();
-            while kept.last().is_some_and(|l| l.trim().is_empty()) {
-                kept.pop();
-            }
-            return (kept, backlog, was_h1);
-        }
-        if !is_body_shaped {
-            break;
-        }
-        i -= 1;
+    // The trailing region begins right after the last `## Phase` header or
+    // non-backlog top-level (h1/h2) section heading. The canonical Backlog must
+    // live inside that region to count as trailing.
+    let search_start = lines
+        .iter()
+        .rposition(|l| parse_v2_phase_header(l).is_some() || is_top_level_section_heading(l))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    // Anchor on the EARLIEST canonical heading in the region — so a duplicate
+    // `## Backlog` block downstream is folded into the backlog body rather than
+    // left in the document tail to be absorbed into the preceding phase.
+    let Some(rel) = lines[search_start..]
+        .iter()
+        .position(|l| is_canonical_backlog_heading(l))
+    else {
+        return (lines, Vec::new(), false);
+    };
+    let h = search_start + rel;
+
+    // Heading level for round-trip: h1 `# Backlog` (FORMATv2) vs h2 `## Backlog`
+    // (legacy). `# B...` starts with `# ` exactly; `## B...`'s second char is
+    // `#` not space, so prefix-match on `# ` AND NOT `## ` distinguishes them.
+    let trimmed = lines[h].trim_start();
+    let was_h1 = trimmed.starts_with("# ") && !trimmed.starts_with("## ");
+    let backlog = trim_blank_edges(lines[h + 1..].iter().map(|s| s.to_string()).collect());
+    // Drop the canonical heading from the body whether or not it has content: an
+    // empty one must not be left for the tree-walk to absorb and relocate.
+    let mut kept: Vec<&str> = lines[..h].to_vec();
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
     }
-    (lines, Vec::new(), false)
+    (kept, backlog, was_h1)
+}
+
+/// True for the EXACT canonical bridge-owned Backlog heading at column 0 —
+/// `## Backlog (not yet phased)` (legacy h2) or `# Backlog (not yet phased)`
+/// (FORMATv2 h1), trailing whitespace tolerated. Stricter than the shared
+/// [crate::ast::is_backlog_heading] prefix match on purpose: the peel rewrites
+/// the heading on round-trip, so it must fire only on the bridge's own section,
+/// never on an operator-authored `## Backlog grooming TODO`.
+fn is_canonical_backlog_heading(line: &str) -> bool {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return false;
+    }
+    let t = line.trim_end();
+    t == "## Backlog (not yet phased)" || t == "# Backlog (not yet phased)"
+}
+
+/// A column-0 h1 or h2 markdown heading (`# ...` / `## ...`) that is NOT the
+/// bridge's own canonical Backlog heading. Used by [peel_trailing_backlog] to
+/// locate where the trailing region starts. h3+ (`### ...`) are deliberately
+/// allowed through — they're legitimate backlog *content* (substanza headings),
+/// not section boundaries.
+fn is_top_level_section_heading(line: &str) -> bool {
+    if line.starts_with(' ') || line.starts_with('\t') || is_canonical_backlog_heading(line) {
+        return false;
+    }
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    (hashes == 1 || hashes == 2) && line[hashes..].starts_with(' ')
 }
 
 fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {
@@ -1230,6 +1279,397 @@ fn foo() {}
 ";
         let plan = parse(input).unwrap();
         assert_eq!(plan.backlog, vec!["- **Legacy** — added 2026-05-19."]);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase CH: robust trailing-backlog peel. The old upward scan aborted at
+    // the first line that wasn't blank / a `-` bullet / indented, so a trailing
+    // `## Backlog` containing column-0 prose, a sub-heading, a code fence, a
+    // `---` divider, or a descoped subtree with state markers was never lifted —
+    // the whole section got absorbed into the final phase's annotations (archive
+    // then swept it away [Symptom A]; the serializer re-emitted the phase's
+    // leaves below it [Symptom B]).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn trailing_backlog_with_column0_prose_is_lifted_not_absorbed() {
+        let input = "\
+## Phase R - Terminal
+- [ ] R.1 - leaf one
+- [ ] R.2 - leaf two
+
+## Backlog (not yet phased)
+
+- bullet before prose
+
+A column-0 prose paragraph inside the backlog.
+
+- bullet after prose
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].children.len(), 2);
+        assert!(
+            plan.phases[0].annotations.is_empty(),
+            "no backlog absorbed as phase annotations: {:?}",
+            plan.phases[0].annotations
+        );
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- bullet before prose",
+                "",
+                "A column-0 prose paragraph inside the backlog.",
+                "",
+                "- bullet after prose",
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_backlog_with_subheading_and_code_fence_is_lifted() {
+        let input = "\
+## Phase 1 - Phase
+- [ ] 1.1 - task
+
+## Backlog (not yet phased)
+
+- a bullet
+
+### A substanza heading
+
+```rust
+fn x() {}
+```
+
+- trailing bullet
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert!(plan.phases[0].annotations.is_empty());
+        assert!(plan.backlog.iter().any(|l| l == "### A substanza heading"));
+        assert!(plan.backlog.iter().any(|l| l == "```rust"));
+        assert!(plan.backlog.iter().any(|l| l == "fn x() {}"));
+        assert!(plan.backlog.iter().any(|l| l == "- trailing bullet"));
+    }
+
+    #[test]
+    fn trailing_backlog_with_hr_divider_is_lifted() {
+        let input = "\
+## Phase 1 - Phase
+- [ ] 1.1 - task
+
+## Backlog (not yet phased)
+
+- item one
+
+---
+
+- item two
+";
+        let plan = parse(input).unwrap();
+        assert!(plan.phases[0].annotations.is_empty());
+        assert!(plan.backlog.iter().any(|l| l == "---"));
+        assert!(plan.backlog.iter().any(|l| l == "- item two"));
+    }
+
+    #[test]
+    fn prose_backlog_round_trips_idempotently() {
+        let input = "\
+## Phase 1 - Phase
+- [ ] 1.1 - task
+
+## Backlog (not yet phased)
+
+- bullet
+
+Column-0 prose continuation.
+
+- another bullet
+";
+        let plan1 = parse(input).unwrap();
+        let out = crate::serializer::serialize(&plan1);
+        assert_eq!(
+            out, input,
+            "prose backlog must round-trip byte-stable:\n{out}"
+        );
+        let plan2 = parse(&out).unwrap();
+        assert_eq!(plan1, plan2, "parse→serialize→parse must be AST-stable");
+    }
+
+    #[test]
+    fn terminal_phase_leaves_not_relocated_below_backlog_on_serialize() {
+        // Symptom B regression: the terminal phase's hand-authored leaves must
+        // stay under the phase header, ABOVE the Backlog.
+        let input = "\
+## Phase R - Terminal
+- [ ] R.1 - leaf one
+- [ ] R.2 - leaf two
+
+## Backlog (not yet phased)
+
+- backlog item
+
+Prose that used to break the peel.
+";
+        let plan = parse(input).unwrap();
+        let out = crate::serializer::serialize(&plan);
+        let r1 = out.find("R.1").expect("R.1 present");
+        let r2 = out.find("R.2").expect("R.2 present");
+        let backlog = out.find("## Backlog").expect("backlog present");
+        assert!(
+            r1 < backlog && r2 < backlog,
+            "phase leaves must stay above the backlog:\n{out}"
+        );
+    }
+
+    #[test]
+    fn backlog_followed_by_a_phase_is_not_lifted() {
+        let input = "\
+## Phase 1 - Phase
+- [ ] 1.1 - task
+
+## Backlog (not yet phased)
+
+- stray note
+
+## Phase 2 - Later
+- [ ] 2.1 - task
+";
+        let plan = parse(input).unwrap();
+        assert!(
+            plan.backlog.is_empty(),
+            "non-trailing backlog must not be lifted: {:?}",
+            plan.backlog
+        );
+        assert_eq!(plan.phases.len(), 2);
+    }
+
+    #[test]
+    fn only_the_last_backlog_heading_is_lifted_when_two_exist() {
+        // A preamble `## Backlog` and a trailing `## Backlog`: only the trailing
+        // one lifts; the preamble one stays put for `consolidate_backlog`.
+        let input = "\
+# Title
+
+## Backlog (not yet phased)
+
+- early note
+
+## Phase 1 - P
+- [ ] 1.1 - t
+
+## Backlog (not yet phased)
+
+- late note
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.backlog, vec!["- late note"]);
+        assert!(
+            plan.preamble.iter().any(|l| l.contains("early note")),
+            "preamble backlog stays in preamble: {:?}",
+            plan.preamble
+        );
+    }
+
+    #[test]
+    fn backlog_only_plan_lifts_with_no_phases() {
+        // The real shape this repo's PLAN.md takes between phase exits: preamble
+        // + a trailing Backlog, no live phases.
+        let input = "\
+# PLAN
+
+## Backlog (not yet phased)
+
+- **A note** — added 2026-06-25.
+
+Some column-0 prose under the backlog.
+";
+        let plan = parse(input).unwrap();
+        assert!(plan.phases.is_empty());
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **A note** — added 2026-06-25.",
+                "",
+                "Some column-0 prose under the backlog.",
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_backlog_lifts_without_a_final_newline() {
+        let input = "## Phase 1 - P\n- [ ] 1.1 - t\n\n## Backlog (not yet phased)\n\n- last item, no newline";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert!(plan.phases[0].annotations.is_empty());
+        assert_eq!(plan.backlog, vec!["- last item, no newline"]);
+    }
+
+    // ---- Defects found by adversarial sweep #1 (first cut of the fix) ----
+
+    #[test]
+    fn empty_trailing_backlog_heading_does_not_swallow_phase_tasks() {
+        // Defect 1 (critical): an empty `## Backlog (not yet phased)` placeholder
+        // after a phase's tasks must NOT, across writebacks, relocate above the
+        // tasks and then lift them into the backlog as inert bullets.
+        let input = "\
+## Phase 1 - P
+- [ ] 1.1 - first task
+- [ ] 1.2 - second task
+
+## Backlog (not yet phased)
+";
+        let plan1 = parse(input).unwrap();
+        assert_eq!(plan1.phases.len(), 1);
+        assert_eq!(
+            plan1.phases[0].children.len(),
+            2,
+            "both tasks stay under the phase: {:?}",
+            plan1.phases[0].children
+        );
+        assert!(
+            plan1.backlog.is_empty(),
+            "no tasks lifted: {:?}",
+            plan1.backlog
+        );
+        assert!(
+            plan1.phases[0].annotations.is_empty(),
+            "empty heading dropped, not absorbed: {:?}",
+            plan1.phases[0].annotations
+        );
+        // Idempotent across repeated writebacks (each is a parse→serialize).
+        let out1 = crate::serializer::serialize(&plan1);
+        let plan2 = parse(&out1).unwrap();
+        let out2 = crate::serializer::serialize(&plan2);
+        assert_eq!(out1, out2, "must be stable across writebacks:\n{out1}");
+        assert_eq!(
+            plan2.phases[0].children.len(),
+            2,
+            "tasks survive writeback 2"
+        );
+    }
+
+    #[test]
+    fn duplicate_canonical_backlogs_do_not_absorb_into_phase() {
+        // Defect 2 (high): two trailing `## Backlog (not yet phased)` blocks must
+        // not leave the first stranded in the body (absorbed into the phase).
+        let input = "\
+## Phase 1 - P
+- [ ] 1.1 - t
+
+## Backlog (not yet phased)
+
+- **First note** — added 2026-06-20.
+
+## Backlog (not yet phased)
+
+- **Second note** — added 2026-06-25.
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].children.len(), 1, "leaf intact");
+        assert!(
+            plan.phases[0].annotations.is_empty(),
+            "first backlog not absorbed into the phase: {:?}",
+            plan.phases[0].annotations
+        );
+        assert!(plan.backlog.iter().any(|l| l.contains("First note")));
+        assert!(plan.backlog.iter().any(|l| l.contains("Second note")));
+        let plan2 = parse(&crate::serializer::serialize(&plan)).unwrap();
+        assert_eq!(plan, plan2, "duplicate-backlog round-trip must be stable");
+    }
+
+    #[test]
+    fn user_section_with_backlog_prefix_is_not_rewritten_or_lifted() {
+        // Defect 3 (medium): a section whose heading only *starts with*
+        // `## Backlog` is operator-owned, not the bridge's. Its heading text must
+        // survive and its bullets must not be lifted into plan.backlog.
+        let input = "\
+## Phase 1 - P
+- [ ] 1.1 - t
+
+## Backlog grooming TODO
+
+- groom this item
+- and that one
+";
+        let plan = parse(input).unwrap();
+        assert!(
+            plan.backlog.is_empty(),
+            "operator section must not be lifted as the backlog: {:?}",
+            plan.backlog
+        );
+        let out = crate::serializer::serialize(&plan);
+        assert!(
+            out.contains("## Backlog grooming TODO"),
+            "operator heading text must survive verbatim:\n{out}"
+        );
+        assert!(
+            !out.contains("## Backlog (not yet phased)"),
+            "must NOT be rewritten to the canonical heading:\n{out}"
+        );
+    }
+
+    // ---- Findings from adversarial sweep #2 (a checkbox-bail over-correction
+    // would have stranded these; the final design lifts them verbatim) ----
+
+    #[test]
+    fn descoped_subtree_with_state_markers_lifts_verbatim() {
+        // Finding 1: a backlog note carrying an indented descoped subtree with
+        // `- [x]`/`- [ ]` markers must lift verbatim — the markers are note text,
+        // NOT tracked work, and must not become phantom children of a phase task.
+        let input = "\
+## Phase 1 - A
+- [ ] 1.1 - keep
+
+## Backlog (not yet phased)
+
+- **Deferred chunk** — revisit later
+  - [x] 1.4.1 - done bit
+  - [ ] 1.4.2 - todo bit
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(
+            plan.phases[0].children.len(),
+            1,
+            "only the real task 1.1 is a child; no phantom subtasks injected: {:?}",
+            plan.phases[0].children
+        );
+        assert!(plan.phases[0].annotations.is_empty());
+        assert_eq!(
+            plan.backlog,
+            vec![
+                "- **Deferred chunk** — revisit later",
+                "  - [x] 1.4.1 - done bit",
+                "  - [ ] 1.4.2 - todo bit",
+            ]
+        );
+    }
+
+    #[test]
+    fn code_fenced_checkbox_in_backlog_does_not_defeat_the_lift() {
+        // Finding 2: a checkbox inside a fenced code block is documentation, not
+        // a task — it must not stop the backlog from lifting.
+        let input = "\
+## Phase 1 - X
+- [ ] 1.1 - t
+
+## Backlog (not yet phased)
+
+- **Template**
+
+  ```
+  - [ ] do thing
+  ```
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phases[0].children.len(), 1);
+        assert!(plan.phases[0].annotations.is_empty());
+        assert!(plan.backlog.iter().any(|l| l.contains("**Template**")));
+        assert!(plan.backlog.iter().any(|l| l.trim() == "- [ ] do thing"));
     }
 
     #[test]
