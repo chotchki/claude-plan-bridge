@@ -125,3 +125,39 @@ fn portable_wiring_install_stale_diagnose_fix_lifecycle() {
         "status still reports a stale cwd after the fix: {status_text}"
     );
 }
+
+#[test]
+fn status_flags_malformed_settings_json() {
+    let dir = scratch_dir();
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+
+    // A settings.json that name-drops the bridge enough times to read as
+    // "installed" but is NOT valid JSON — an unescaped backslash in a path, the
+    // exact Windows footgun. Before the fix, status fell through to a
+    // misleading "no claude-plan-bridge hooks found"; now it must call out the
+    // malformed JSON and point at the fix.
+    let bad = r#"{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "claude-plan-bridge resume --cwd 'C:\Users\me'"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claude-plan-bridge reconcile"}]}],
+    "PostToolUse": [{"matcher": "TaskCreate", "hooks": [{"type": "command", "command": "claude-plan-bridge writeback"}]}]
+  }
+}"#;
+    std::fs::write(dir.join(".claude/settings.json"), bad).unwrap();
+    std::fs::write(dir.join("PLAN.md"), "# PLAN\n## Phase 1 - Phase\n").unwrap();
+
+    let out = Command::new(binary())
+        .args(["status", "--cwd"])
+        .arg(&dir)
+        .output()
+        .expect("run status");
+    let status_text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        status_text.contains("not valid JSON"),
+        "status did not flag malformed settings.json: {status_text}"
+    );
+    assert!(
+        !status_text.contains("no claude-plan-bridge hooks found"),
+        "status misreported malformed settings as no hooks: {status_text}"
+    );
+}
