@@ -1227,50 +1227,66 @@ fn run_status(project: &ProjectArgs) -> Result<()> {
                 hooks_installed = count >= 3;
                 if hooks_installed {
                     println!();
-                    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
-                    let want: [(&str, &str); 4] = [
-                        ("SessionStart", "resume"),
-                        ("UserPromptSubmit", "reconcile"),
-                        ("PostToolUse(TaskCreate)", "writeback"),
-                        ("PostToolUse(TaskUpdate)", "writeback"),
-                    ];
-                    for (label, subcmd) in want {
-                        // Map the friendly label back to the hook event name
-                        // for the JSON walker.
-                        let event = label.split('(').next().unwrap_or(label);
-                        let present = parsed
-                            .as_ref()
-                            .map(|s| plan_bridge::init::hook_command_present(s, event, subcmd))
-                            .unwrap_or(false);
-                        let mark = if present { "✓" } else { "✗" };
-                        if !present {
-                            all_good = false;
-                        }
-                        println!("  {mark} {label} → claude-plan-bridge ... {subcmd}");
-                    }
-                    if let Some(s) = parsed.as_ref()
-                        && !plan_bridge::init::hooks_have_drift_proof_cwd(s)
-                    {
-                        println!(
-                            "  ⚠ hook entries are using a relative --cwd (or none) — \
-                             run `claude-plan-bridge upgrade-hooks` to rewrite them to \
-                             `--cwd \"$CLAUDE_PROJECT_DIR\"`, drift-proof and portable \
-                             across checkouts."
-                        );
-                        all_good = false;
-                    }
-                    if let Some(s) = parsed.as_ref() {
-                        let stale = plan_bridge::init::stale_baked_cwd_warnings(s);
-                        if !stale.is_empty() {
-                            for w in &stale {
-                                println!("  ✗ {w}");
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(parsed) => {
+                            let want: [(&str, &str); 4] = [
+                                ("SessionStart", "resume"),
+                                ("UserPromptSubmit", "reconcile"),
+                                ("PostToolUse(TaskCreate)", "writeback"),
+                                ("PostToolUse(TaskUpdate)", "writeback"),
+                            ];
+                            for (label, subcmd) in want {
+                                // Map the friendly label back to the hook event
+                                // name for the JSON walker.
+                                let event = label.split('(').next().unwrap_or(label);
+                                let present =
+                                    plan_bridge::init::hook_command_present(&parsed, event, subcmd);
+                                let mark = if present { "✓" } else { "✗" };
+                                if !present {
+                                    all_good = false;
+                                }
+                                println!("  {mark} {label} → claude-plan-bridge ... {subcmd}");
                             }
-                            println!(
-                                "    → this is the stale-path / renamed-checkout bug; run \
-                                 `claude-plan-bridge upgrade-hooks` to switch to the portable \
-                                 `--cwd \"$CLAUDE_PROJECT_DIR\"` form."
-                            );
+                            if !plan_bridge::init::hooks_have_drift_proof_cwd(&parsed) {
+                                println!(
+                                    "  ⚠ hook entries are using a relative --cwd (or none) — \
+                                     run `claude-plan-bridge upgrade-hooks` to rewrite them to \
+                                     `--cwd \"$CLAUDE_PROJECT_DIR\"`, drift-proof and portable \
+                                     across checkouts."
+                                );
+                                all_good = false;
+                            }
+                            let stale = plan_bridge::init::stale_baked_cwd_warnings(&parsed);
+                            if !stale.is_empty() {
+                                for w in &stale {
+                                    println!("  ✗ {w}");
+                                }
+                                println!(
+                                    "    → this is the stale-path / renamed-checkout bug; run \
+                                     `claude-plan-bridge upgrade-hooks` to switch to the portable \
+                                     `--cwd \"$CLAUDE_PROJECT_DIR\"` form."
+                                );
+                                all_good = false;
+                            }
+                        }
+                        Err(e) => {
+                            // The file name-drops the bridge but isn't parseable
+                            // JSON. The harness can't load these hooks, so the
+                            // bridge silently won't fire — and none of the
+                            // per-hook / stale-cwd checks below can run. Say so
+                            // loudly instead of falling through to a misleading
+                            // "no hooks found".
                             all_good = false;
+                            println!(
+                                "  ✗ settings.json names claude-plan-bridge but is not valid \
+                                 JSON ({e}) — the harness can't load these hooks, so the bridge \
+                                 won't fire and stale-path checks can't run."
+                            );
+                            println!(
+                                "    → fix the JSON syntax. A frequent cause on Windows is an \
+                                 unescaped backslash in a path (`C:\\Users\\...`); write `\\\\` \
+                                 or switch to `--cwd \"$CLAUDE_PROJECT_DIR\"`."
+                            );
                         }
                     }
                 } else {

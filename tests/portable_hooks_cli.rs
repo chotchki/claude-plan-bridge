@@ -21,19 +21,22 @@ fn read(p: &Path) -> String {
 fn stale_settings(dead: &str) -> String {
     // A four-hook install whose every command bakes an absolute `--cwd`
     // pointing at `dead` — the shape a committed settings.json takes after the
-    // repo is renamed or cloned to a different path.
-    format!(
-        r#"{{
-  "hooks": {{
-    "SessionStart": [{{"hooks": [{{"type": "command", "command": "claude-plan-bridge resume --cwd '{dead}'"}}]}}],
-    "UserPromptSubmit": [{{"hooks": [{{"type": "command", "command": "claude-plan-bridge reconcile --cwd '{dead}'"}}]}}],
-    "PostToolUse": [
-      {{"matcher": "TaskCreate", "hooks": [{{"type": "command", "command": "claude-plan-bridge writeback --event create --cwd '{dead}'"}}]}},
-      {{"matcher": "TaskUpdate", "hooks": [{{"type": "command", "command": "claude-plan-bridge writeback --event update --cwd '{dead}'"}}]}}
-    ]
-  }}
-}}"#
-    )
+    // repo is renamed or cloned to a different path. Built through serde_json so
+    // a Windows `dead` path's backslashes are JSON-escaped correctly; a
+    // hand-rolled `format!` would emit invalid escapes (`\U`, `\A`, ...) and the
+    // file would fail to parse only on Windows.
+    let cmd = |sub: &str| format!("claude-plan-bridge {sub} --cwd '{dead}'");
+    serde_json::json!({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": cmd("resume")}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": cmd("reconcile")}]}],
+            "PostToolUse": [
+                {"matcher": "TaskCreate", "hooks": [{"type": "command", "command": cmd("writeback --event create")}]},
+                {"matcher": "TaskUpdate", "hooks": [{"type": "command", "command": cmd("writeback --event update")}]}
+            ]
+        }
+    })
+    .to_string()
 }
 
 #[test]
@@ -120,5 +123,41 @@ fn portable_wiring_install_stale_diagnose_fix_lifecycle() {
     assert!(
         !status_text.contains("no longer exists"),
         "status still reports a stale cwd after the fix: {status_text}"
+    );
+}
+
+#[test]
+fn status_flags_malformed_settings_json() {
+    let dir = scratch_dir();
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+
+    // A settings.json that name-drops the bridge enough times to read as
+    // "installed" but is NOT valid JSON — an unescaped backslash in a path, the
+    // exact Windows footgun. Before the fix, status fell through to a
+    // misleading "no claude-plan-bridge hooks found"; now it must call out the
+    // malformed JSON and point at the fix.
+    let bad = r#"{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "claude-plan-bridge resume --cwd 'C:\Users\me'"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claude-plan-bridge reconcile"}]}],
+    "PostToolUse": [{"matcher": "TaskCreate", "hooks": [{"type": "command", "command": "claude-plan-bridge writeback"}]}]
+  }
+}"#;
+    std::fs::write(dir.join(".claude/settings.json"), bad).unwrap();
+    std::fs::write(dir.join("PLAN.md"), "# PLAN\n## Phase 1 - Phase\n").unwrap();
+
+    let out = Command::new(binary())
+        .args(["status", "--cwd"])
+        .arg(&dir)
+        .output()
+        .expect("run status");
+    let status_text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        status_text.contains("not valid JSON"),
+        "status did not flag malformed settings.json: {status_text}"
+    );
+    assert!(
+        !status_text.contains("no claude-plan-bridge hooks found"),
+        "status misreported malformed settings as no hooks: {status_text}"
     );
 }
