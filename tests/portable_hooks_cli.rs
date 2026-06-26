@@ -21,19 +21,22 @@ fn read(p: &Path) -> String {
 fn stale_settings(dead: &str) -> String {
     // A four-hook install whose every command bakes an absolute `--cwd`
     // pointing at `dead` — the shape a committed settings.json takes after the
-    // repo is renamed or cloned to a different path.
-    format!(
-        r#"{{
-  "hooks": {{
-    "SessionStart": [{{"hooks": [{{"type": "command", "command": "claude-plan-bridge resume --cwd '{dead}'"}}]}}],
-    "UserPromptSubmit": [{{"hooks": [{{"type": "command", "command": "claude-plan-bridge reconcile --cwd '{dead}'"}}]}}],
-    "PostToolUse": [
-      {{"matcher": "TaskCreate", "hooks": [{{"type": "command", "command": "claude-plan-bridge writeback --event create --cwd '{dead}'"}}]}},
-      {{"matcher": "TaskUpdate", "hooks": [{{"type": "command", "command": "claude-plan-bridge writeback --event update --cwd '{dead}'"}}]}}
-    ]
-  }}
-}}"#
-    )
+    // repo is renamed or cloned to a different path. Built through serde_json so
+    // a Windows `dead` path's backslashes are JSON-escaped correctly; a
+    // hand-rolled `format!` would emit invalid escapes (`\U`, `\A`, ...) and the
+    // file would fail to parse only on Windows.
+    let cmd = |sub: &str| format!("claude-plan-bridge {sub} --cwd '{dead}'");
+    serde_json::json!({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": cmd("resume")}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": cmd("reconcile")}]}],
+            "PostToolUse": [
+                {"matcher": "TaskCreate", "hooks": [{"type": "command", "command": cmd("writeback --event create")}]},
+                {"matcher": "TaskUpdate", "hooks": [{"type": "command", "command": cmd("writeback --event update")}]}
+            ]
+        }
+    })
+    .to_string()
 }
 
 #[test]
