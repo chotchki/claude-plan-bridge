@@ -83,15 +83,30 @@ fn faithful_subtree_remaps_ids_and_strips_marker() {
     );
 
     let plan = plan_text(&dir);
-    assert!(plan.contains("- [ ] CE.3 - Descoped parent"), "marker stripped:\n{plan}");
-    assert!(plan.contains("  - [ ] CE.3.1 - descoped child"), "child 1:\n{plan}");
-    assert!(plan.contains("  - [ ] CE.3.2 - another child"), "child 2:\n{plan}");
+    assert!(
+        plan.contains("- [ ] CE.3 - Descoped parent"),
+        "marker stripped:\n{plan}"
+    );
+    assert!(
+        plan.contains("  - [ ] CE.3.1 - descoped child"),
+        "child 1:\n{plan}"
+    );
+    assert!(
+        plan.contains("  - [ ] CE.3.2 - another child"),
+        "child 2:\n{plan}"
+    );
     // Old foreign ids are gone.
     assert!(!plan.contains("X.1.1"), "old ids remapped away:\n{plan}");
     // Backlog stanza drained; the simple idea remains as the sole entry.
     let listed = run(&dir, &["promote"]);
-    assert!(listed.contains("A simple loose idea"), "simple idea remains: {listed}");
-    assert!(!listed.contains("Descoped parent"), "subtree drained: {listed}");
+    assert!(
+        listed.contains("A simple loose idea"),
+        "simple idea remains: {listed}"
+    );
+    assert!(
+        !listed.contains("Descoped parent"),
+        "subtree drained: {listed}"
+    );
 }
 
 #[test]
@@ -104,7 +119,10 @@ fn into_a_task_nests_and_activate_scopes_the_phase() {
     );
     let out = run(&dir, &["promote", "1", "--into", "CE.3", "--activate"]);
     assert!(out.contains("as `CE.3.2`"), "nested under the task: {out}");
-    assert!(out.contains("activated `CE`"), "activated the root phase: {out}");
+    assert!(
+        out.contains("activated `CE`"),
+        "activated the root phase: {out}"
+    );
     assert!(plan_text(&dir).contains("  - [ ] CE.3.2 - nested idea"));
 }
 
@@ -120,7 +138,10 @@ fn promoted_leaves_surface_for_taskcreate_in_active_phase() {
     run(&dir, &["promote", "2", "--into", "CE"]);
     let recon = run(&dir, &["reconcile"]);
 
-    assert!(recon.contains("Active phase `CE` drift:"), "foregrounded: {recon}");
+    assert!(
+        recon.contains("Active phase `CE` drift:"),
+        "foregrounded: {recon}"
+    );
     // Every promoted leaf — not just the headline — is offered for TaskCreate.
     for id in ["CE.3", "CE.3.1", "CE.3.2"] {
         assert!(
@@ -147,7 +168,10 @@ fn promote_into_non_active_phase_surfaces_as_other() {
     // Still tracked (consider TaskCreate), but under the non-foreground bucket
     // since CF isn't the active phase.
     assert!(recon.contains("CF.2"), "new leaf surfaced: {recon}");
-    assert!(recon.contains("consider TaskCreate"), "still offered: {recon}");
+    assert!(
+        recon.contains("consider TaskCreate"),
+        "still offered: {recon}"
+    );
     assert!(
         recon.contains("Other phases / cross-cutting:"),
         "bucketed as non-active: {recon}"

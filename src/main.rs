@@ -925,7 +925,12 @@ fn main() -> Result<()> {
                 // existing phase or task rather than minting a new phase.
                 Some(n) if into.is_some() || after.is_some() => {
                     let report = plan
-                        .promote_backlog_into(n, into.as_deref(), after.as_deref(), title.as_deref())
+                        .promote_backlog_into(
+                            n,
+                            into.as_deref(),
+                            after.as_deref(),
+                            title.as_deref(),
+                        )
                         .map_err(|e| anyhow::anyhow!(e))?;
                     std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
                         .with_context(|| format!("write {}", plan_path.display()))?;
@@ -965,7 +970,9 @@ fn main() -> Result<()> {
                         );
                     }
                     if activate {
-                        println!("  activated `{activated_phase}` — working set scoped to this phase");
+                        println!(
+                            "  activated `{activated_phase}` — working set scoped to this phase"
+                        );
                     }
                     println!(
                         "  next: reconcile will surface the new leaf(s) for TaskCreate on your next turn"

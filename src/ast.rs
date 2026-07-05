@@ -2149,7 +2149,9 @@ mod tests {
         let mut plan = parse_for_test(
             "## Phase CE - x\n- [ ] CE.1 - a\n\n# Backlog (not yet phased)\n\n- x\n- y\n",
         );
-        let r = plan.promote_backlog_into(1, None, Some("CE.1"), None).unwrap();
+        let r = plan
+            .promote_backlog_into(1, None, Some("CE.1"), None)
+            .unwrap();
         assert_eq!(r.target, "CE");
         assert_eq!(r.root_id, "CE.1a");
         // A sibling that isn't actually a child of the target is rejected.
@@ -2179,9 +2181,8 @@ mod tests {
 
     #[test]
     fn ci_promote_into_title_override_applies_to_faithful_root() {
-        let mut plan = parse_for_test(
-            "## Phase CE - x\n\n# Backlog (not yet phased)\n\n- X.1 - original\n",
-        );
+        let mut plan =
+            parse_for_test("## Phase CE - x\n\n# Backlog (not yet phased)\n\n- X.1 - original\n");
         let r = plan
             .promote_backlog_into(1, Some("CE"), None, Some("renamed"))
             .unwrap();
@@ -2191,9 +2192,7 @@ mod tests {
 
     #[test]
     fn ci_promote_into_errors() {
-        let plan = parse_for_test(
-            "## Phase CE - x\n\n# Backlog (not yet phased)\n\n- only one\n",
-        );
+        let plan = parse_for_test("## Phase CE - x\n\n# Backlog (not yet phased)\n\n- only one\n");
         // Missing destination.
         assert!(
             plan.clone()
@@ -2217,15 +2216,9 @@ mod tests {
     #[test]
     fn ci_next_child_ordinal_ignores_letter_suffixes() {
         assert_eq!(next_child_ordinal(&[]), 1);
-        assert_eq!(
-            next_child_ordinal(&["CE.1".into(), "CE.2".into()]),
-            3
-        );
+        assert_eq!(next_child_ordinal(&["CE.1".into(), "CE.2".into()]), 3);
         // A letter-suffixed id doesn't advance the integer counter.
-        assert_eq!(
-            next_child_ordinal(&["CE.1".into(), "CE.1a".into()]),
-            2
-        );
+        assert_eq!(next_child_ordinal(&["CE.1".into(), "CE.1a".into()]), 2);
     }
 
     #[test]

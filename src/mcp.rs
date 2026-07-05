@@ -320,7 +320,11 @@ impl McpServer {
                     String::new()
                 };
                 let how = if report.faithful {
-                    format!("reconstructed {} task(s): {}", report.created_ids.len(), report.created_ids.join(", "))
+                    format!(
+                        "reconstructed {} task(s): {}",
+                        report.created_ids.len(),
+                        report.created_ids.join(", ")
+                    )
                 } else {
                     "filed as a single task (body kept as prose)".to_string()
                 };
@@ -1135,8 +1139,14 @@ mod tests {
             "faithful reported: {resp}"
         );
         let after = std::fs::read_to_string(&s.plan_path).unwrap();
-        assert!(after.contains("- [ ] CE.3 - Descoped"), "root task:\n{after}");
-        assert!(after.contains("  - [ ] CE.3.1 - child"), "child task:\n{after}");
+        assert!(
+            after.contains("- [ ] CE.3 - Descoped"),
+            "root task:\n{after}"
+        );
+        assert!(
+            after.contains("  - [ ] CE.3.1 - child"),
+            "child task:\n{after}"
+        );
         assert!(!after.contains("X.1.1"), "old ids remapped:\n{after}");
     }
 
