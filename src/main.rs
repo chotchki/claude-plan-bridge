@@ -354,23 +354,40 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         tasks: Vec<String>,
     },
-    /// Phase CG: promote a backlog entry into a new top-level phase. With no
-    /// `<index>`, lists the backlog entries (1-based) so you can pick one. With
-    /// an index, the entry's headline becomes the phase title (override with
-    /// `--title`) and the rest of the stanza becomes phase prose — break it into
-    /// tasks afterward with `phase-breakdown`. The new phase gets the next
-    /// `next-phase` id and the entry is removed from the backlog.
+    /// Phase CG/CI: promote a backlog entry into a phase. With no `<index>`,
+    /// lists the backlog entries (1-based) so you can pick one.
+    ///
+    /// Default (no `--into`): the entry becomes a NEW top-level phase — headline
+    /// is the title (override with `--title`), the rest becomes phase prose;
+    /// break it into tasks afterward with `phase-breakdown`.
+    ///
+    /// With `--into <phase|task>` (CI): the entry is filed as a TASK under an
+    /// existing phase or task instead. A descoped subtree (`- X.1 - …`) is
+    /// rebuilt faithfully with ids remapped onto the target; anything else lands
+    /// as a single leaf with its body kept as prose. `--after <sibling>` slots
+    /// the new task right after a named sibling (`CE.1` -> `CE.1a`) without
+    /// renumbering. The promoted leaves surface for `TaskCreate` via reconcile
+    /// on your next turn.
     Promote {
         #[command(flatten)]
         project: ProjectArgs,
         /// 1-based index of the backlog entry to promote. Omit to list entries.
         index: Option<usize>,
-        /// Override the phase title (defaults to the entry headline).
+        /// Override the title (defaults to the entry headline).
         #[arg(long)]
         title: Option<String>,
-        /// Activate the new phase (scope the working set to it) after promoting.
+        /// Activate the phase (scope the working set to it) after promoting.
         #[arg(long)]
         activate: bool,
+        /// CI: file the entry as a task under this existing phase or task id
+        /// (e.g. `CE` or `CE.3`) instead of minting a new phase.
+        #[arg(long)]
+        into: Option<String>,
+        /// CI: with `--into`, position the new task immediately after this
+        /// sibling id via an alpha suffix. Implies the parent when `--into` is
+        /// omitted.
+        #[arg(long)]
+        after: Option<String>,
     },
 }
 
@@ -881,6 +898,8 @@ fn main() -> Result<()> {
             index,
             title,
             activate,
+            into,
+            after,
         } => {
             let plan_path = project.plan_path();
             let text = std::fs::read_to_string(&plan_path)
@@ -901,6 +920,56 @@ fn main() -> Result<()> {
                             println!("  {}. {}", i + 1, e.headline);
                         }
                     }
+                }
+                // CI: `--into`/`--after` files the entry as a task under an
+                // existing phase or task rather than minting a new phase.
+                Some(n) if into.is_some() || after.is_some() => {
+                    let report = plan
+                        .promote_backlog_into(n, into.as_deref(), after.as_deref(), title.as_deref())
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    std::fs::write(&plan_path, plan_bridge::serializer::serialize(&plan))
+                        .with_context(|| format!("write {}", plan_path.display()))?;
+                    // `--activate` scopes the working set to the destination's
+                    // root phase (the first id segment).
+                    let activated_phase = report.target.split('.').next().unwrap_or(&report.target);
+                    if activate {
+                        let state_path = plan_bridge::state::default_state_path_for(&plan_path);
+                        plan_bridge::lock::with_state_lock(
+                            &state_path,
+                            plan_bridge::lock::DEFAULT_TIMEOUT,
+                            || {
+                                let mut state = plan_bridge::state::State::load(&state_path)?;
+                                state.set_active_phase(Some(activated_phase.to_string()));
+                                state.save(&state_path)?;
+                                Ok(())
+                            },
+                        )?;
+                    }
+                    println!(
+                        "claude-plan-bridge: promoted backlog entry {n} into `{}` as `{}` - `{}` in {}",
+                        report.target,
+                        report.root_id,
+                        report.title,
+                        plan_path.display()
+                    );
+                    if report.faithful {
+                        println!(
+                            "  reconstructed {} task(s): {}",
+                            report.created_ids.len(),
+                            report.created_ids.join(", ")
+                        );
+                    } else {
+                        println!(
+                            "  filed as a single task (not read as a task subtree; any body rides along as prose) — `phase-breakdown {} --tasks \"...\"` to add subtasks",
+                            report.root_id
+                        );
+                    }
+                    if activate {
+                        println!("  activated `{activated_phase}` — working set scoped to this phase");
+                    }
+                    println!(
+                        "  next: reconcile will surface the new leaf(s) for TaskCreate on your next turn"
+                    );
                 }
                 Some(n) => {
                     let id = plan_bridge::phase_seq::next_phase_id_for_plan(&plan_path);

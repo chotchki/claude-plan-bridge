@@ -268,11 +268,13 @@ impl McpServer {
         )))
     }
 
-    /// Phase CG: promote a backlog entry into a new phase. With no `index`,
+    /// Phase CG/CI: promote a backlog entry into a phase. With no `index`,
     /// returns the numbered backlog entries so the caller can pick one. With an
-    /// `index` (1-based), the entry's headline becomes the phase title (override
-    /// via `title`), its remaining stanza becomes phase prose, and the entry is
-    /// removed from the backlog. MCP mirror of the `promote` CLI.
+    /// `index` (1-based) and no `into`, the entry's headline becomes a NEW
+    /// phase's title (override via `title`) and its stanza becomes phase prose.
+    /// With `into` (CI), the entry is filed as a task under an existing phase or
+    /// task instead — `after` positions it via an alpha suffix. Either way the
+    /// entry is removed from the backlog. MCP mirror of the `promote` CLI.
     fn tool_plan_promote(&self, args: &Value) -> Result<Value> {
         let text = std::fs::read_to_string(&self.plan_path)?;
         let mut plan = parse(&text)?;
@@ -288,6 +290,44 @@ impl McpServer {
                     out.push_str(&format!("\n  {}. {}", i + 1, e.headline));
                 }
                 Ok(tool_text_result(&out))
+            }
+            Some(n) if args.get("into").is_some() || args.get("after").is_some() => {
+                // CI: file the entry as a task under an existing phase/task.
+                let title = args.get("title").and_then(Value::as_str);
+                let into = args.get("into").and_then(Value::as_str);
+                let after = args.get("after").and_then(Value::as_str);
+                let activate = args
+                    .get("activate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let report = plan
+                    .promote_backlog_into(n as usize, into, after, title)
+                    .map_err(|e| anyhow!(e))?;
+                std::fs::write(&self.plan_path, serialize(&plan))?;
+                let activated_phase = report
+                    .target
+                    .split('.')
+                    .next()
+                    .unwrap_or(&report.target)
+                    .to_string();
+                let activated = if activate {
+                    let state_path = crate::state::default_state_path_for(&self.plan_path);
+                    let mut state = crate::state::State::load(&state_path)?;
+                    state.set_active_phase(Some(activated_phase.clone()));
+                    state.save(&state_path)?;
+                    format!(" (activated `{activated_phase}`)")
+                } else {
+                    String::new()
+                };
+                let how = if report.faithful {
+                    format!("reconstructed {} task(s): {}", report.created_ids.len(), report.created_ids.join(", "))
+                } else {
+                    "filed as a single task (body kept as prose)".to_string()
+                };
+                Ok(tool_text_result(&format!(
+                    "promoted backlog entry {n} into `{}` as `{}` - `{}`{activated} — {how}. Reconcile will surface the new leaf(s) for TaskCreate.",
+                    report.target, report.root_id, report.title
+                )))
             }
             Some(n) => {
                 let title = args.get("title").and_then(Value::as_str);
@@ -804,13 +844,15 @@ fn tools_list() -> Value {
             },
             {
                 "name": "plan_promote",
-                "description": "Promote a backlog entry into a new top-level phase. Omit `index` to list the numbered backlog entries (a backlog entry is a top-level `- ` bullet plus everything beneath it up to the next top-level bullet). With a 1-based `index`, the entry's headline becomes the phase title (override with `title`) and the rest of the stanza becomes phase-level prose — NOT tasks; break it down afterward with `plan_breakdown`. The new phase gets the next uppercase-letter id and the entry is removed from the backlog.",
+                "description": "Promote a backlog entry into a phase. Omit `index` to list the numbered backlog entries (a backlog entry is a top-level `- ` bullet plus everything beneath it up to the next top-level bullet). Default: the entry becomes a NEW top-level phase — headline is the title (override with `title`), the rest becomes phase-level prose (NOT tasks; break down afterward with `plan_breakdown`). With `into` (a phase id like `CE` or a task id like `CE.3`), the entry is filed as a TASK under that existing node instead: a descoped subtree (`- X.1 - …`) is rebuilt faithfully with ids remapped onto the target, anything else lands as a single leaf. `after` (a sibling id) slots the new task right after it via an alpha suffix (`CE.1` → `CE.1a`) without renumbering. The promoted leaves surface for TaskCreate via reconcile on the next turn. The entry is removed from the backlog.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "index": {"type": "integer", "description": "1-based index of the backlog entry to promote. Omit to list entries."},
-                        "title": {"type": "string", "description": "Override the phase title (defaults to the entry headline)."},
-                        "activate": {"type": "boolean", "description": "Activate (focus the working set on) the new phase after promoting."}
+                        "title": {"type": "string", "description": "Override the title (defaults to the entry headline)."},
+                        "activate": {"type": "boolean", "description": "Activate (focus the working set on) the destination phase after promoting."},
+                        "into": {"type": "string", "description": "File the entry as a task under this existing phase or task id (e.g. `CE` or `CE.3`) instead of minting a new phase."},
+                        "after": {"type": "string", "description": "With `into`, position the new task immediately after this sibling id via an alpha suffix. Implies the parent when `into` is omitted."}
                     },
                     "additionalProperties": false
                 }
@@ -1072,6 +1114,50 @@ mod tests {
             after.contains("- **Drop fs4**"),
             "other entry remains:\n{after}"
         );
+    }
+
+    #[test]
+    fn plan_promote_into_files_entry_as_task_under_existing_phase() {
+        let (_, s) = scratch_plan(
+            "## Phase CE - Existing\n- [ ] CE.1 - a\n- [ ] CE.2 - b\n\n\
+             # Backlog (not yet phased)\n\n\
+             - X.1 - Descoped *(deferred from phase `X` on 2026-01-01)*\n  - X.1.1 - child\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_promote", "arguments": {"index": 1, "into": "CE"}
+            }}),
+        );
+        assert!(resp.get("error").is_none(), "got: {resp}");
+        assert!(
+            resp.to_string().contains("reconstructed 2 task(s)"),
+            "faithful reported: {resp}"
+        );
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        assert!(after.contains("- [ ] CE.3 - Descoped"), "root task:\n{after}");
+        assert!(after.contains("  - [ ] CE.3.1 - child"), "child task:\n{after}");
+        assert!(!after.contains("X.1.1"), "old ids remapped:\n{after}");
+    }
+
+    #[test]
+    fn plan_promote_after_positions_via_alpha_suffix() {
+        let (_, s) = scratch_plan(
+            "## Phase CE - x\n- [ ] CE.1 - a\n- [ ] CE.2 - b\n\n\
+             # Backlog (not yet phased)\n\n- loose idea\n",
+        );
+        let resp = rpc(
+            &s,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "plan_promote", "arguments": {"index": 1, "into": "CE", "after": "CE.1"}
+            }}),
+        );
+        assert!(resp.to_string().contains("as `CE.1a`"), "suffix id: {resp}");
+        let after = std::fs::read_to_string(&s.plan_path).unwrap();
+        let a = after.find("CE.1 - a").unwrap();
+        let mid = after.find("CE.1a - loose idea").unwrap();
+        let b = after.find("CE.2 - b").unwrap();
+        assert!(a < mid && mid < b, "wedged between siblings:\n{after}");
     }
 
     #[test]

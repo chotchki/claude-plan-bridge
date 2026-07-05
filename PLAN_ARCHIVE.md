@@ -645,3 +645,20 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CH.4 - Adversarial edge-case sweep, full test suite, binary reproduction
 - [x] CH.5 - Update docs and log the related out-of-scope absorption issue
 
+---
+
+## 2026-07-05
+
+## Phase CI - Promote a backlog item into an existing phase
+- [x] CI.0 - Lock the surface + PromoteReport shape; decide the --after suffix-insert rule
+- [x] CI.1 - AST core: promote_backlog_into(index, target, after, title)
+  - [x] CI.1.1 - Factor an "allocate next child suffix" helper out of breakdown
+  - [x] CI.1.2 - "In-between alpha-suffix id after sibling" helper
+  - [x] CI.1.3 - Stanza -> subtree faithful remap + prose fallback
+  - [x] CI.1.4 - Unit tests for the AST path
+- [x] CI.2 - CLI: extend Promote with --into / --after
+- [x] CI.3 - MCP: mirror into / after in tool_plan_promote
+- [x] CI.4 - "TaskCreate too" e2e: promoted leaves surface for tracking
+- [x] CI.5 - Docs: README verb surface + promote-into example
+- [x] CI.6 - Phase exit: suite green, docs updated, sweep to archive
+

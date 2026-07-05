@@ -428,6 +428,28 @@ pub struct BacklogEntry {
     pub len: usize,
 }
 
+/// Phase CI: the outcome of promoting a backlog entry into an existing phase
+/// or task (see [Plan::promote_backlog_into]). Carries enough for the CLI/MCP
+/// to tell the user exactly what landed where — and, crucially, the full list
+/// of ids created so the caller knows every leaf reconcile will surface for
+/// TaskCreate on the next turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromoteReport {
+    /// Id assigned to the promoted entry's root task (`CE.4`, or `CE.1a` for an
+    /// `--after` insert).
+    pub root_id: String,
+    /// The root task's title (headline, or the `--title` override).
+    pub title: String,
+    /// The resolved destination parent id (phase or task).
+    pub target: String,
+    /// Every task id created, root first, document order — one entry for a
+    /// fallback leaf, the whole remapped subtree for a faithful promote.
+    pub created_ids: Vec<String>,
+    /// `true` when the stanza was rebuilt as a task subtree; `false` when it
+    /// fell back to a single leaf with the body kept as prose.
+    pub faithful: bool,
+}
+
 /// A backlog entry boundary: a `- ` bullet at column 0 (no leading whitespace).
 fn is_top_level_bullet(line: &str) -> bool {
     line.starts_with("- ")
@@ -607,12 +629,7 @@ impl Plan {
         } else {
             return Err(format!("no phase or task with id `{parent}` in PLAN.md"));
         };
-        let mut next = existing
-            .iter()
-            .filter_map(|id| id.rsplit('.').next().and_then(|s| s.parse::<u64>().ok()))
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let mut next = next_child_ordinal(&existing);
         let mut added = Vec::new();
         for subject in subjects {
             let subject = subject.trim();
@@ -843,6 +860,128 @@ impl Plan {
         Ok(phase_title)
     }
 
+    /// Phase CI: promote the `index`-th (1-based) backlog entry into an
+    /// EXISTING phase or task — the "file it as a task somewhere in the plan"
+    /// move, as opposed to [Plan::promote_backlog_entry] which mints a fresh
+    /// top-level phase. `into` names the parent (a phase id like `CE` or a task
+    /// id at any depth like `CE.3`); the entry lands as a task under it. `after`
+    /// positions the new task immediately after a named sibling via an alpha
+    /// suffix (`CE.1` -> `CE.1a`) so nothing renumbers — the sibling must be a
+    /// child of the resolved parent. With only `after`, the parent is derived
+    /// from the sibling; with neither, this errors (use `promote_backlog_entry`).
+    ///
+    /// Reconstruction is *faithful* when the stanza's top bullet carries a
+    /// dotted id (`- X.1 - Title`, the descoped-subtree shape a phase sweep
+    /// leaves behind): the whole subtree is rebuilt as real tasks with ids
+    /// remapped onto the parent's numbering, and any id-less bullets / prose
+    /// ride along as annotations. Otherwise it falls back to a single leaf whose
+    /// title is the entry headline and whose body becomes prose.
+    /// [`PromoteReport::faithful`] records which path ran so the caller can say.
+    pub fn promote_backlog_into(
+        &mut self,
+        index: usize,
+        into: Option<&str>,
+        after: Option<&str>,
+        title_override: Option<&str>,
+    ) -> Result<PromoteReport, String> {
+        // Resolve the destination parent: explicit `--into` wins; otherwise
+        // derive it from `--after`'s sibling. One of the two must be present.
+        let target = match (into, after) {
+            (Some(t), _) => t.to_string(),
+            (None, Some(a)) => parent_id_for(a).ok_or_else(|| {
+                format!(
+                    "`--after {a}` names a top-level phase id (no parent to file under); \
+                     pass `--into <phase>` to say where"
+                )
+            })?,
+            (None, None) => {
+                return Err(
+                    "promote-into needs a destination: `--into <phase|task>` (or `--after <sibling>`)"
+                        .to_string(),
+                );
+            }
+        };
+
+        // The destination must already exist as a phase or a task; grab its
+        // current child ids to allocate the new one against.
+        let child_ids: Vec<String> = if let Some(ph) = self.find_phase(&target) {
+            ph.children.iter().map(|c| c.id.clone()).collect()
+        } else if let Some(n) = self.find(&target) {
+            n.children.iter().map(|c| c.id.clone()).collect()
+        } else {
+            return Err(format!("no phase or task with id `{target}` in PLAN.md"));
+        };
+
+        // Positioned insert (`--after`) vs plain append. `--after`'s sibling
+        // must be a real child of the resolved parent.
+        let root_id = match after {
+            Some(sib) => {
+                if parent_id_for(sib).as_deref() != Some(target.as_str()) {
+                    return Err(format!(
+                        "`--after {sib}` is not a child of `{target}` — can't position there"
+                    ));
+                }
+                if !child_ids.iter().any(|id| id == sib) {
+                    return Err(format!("no sibling `{sib}` under `{target}` in PLAN.md"));
+                }
+                suffix_after(sib, &child_ids)?
+            }
+            None => format!("{target}.{}", next_child_ordinal(&child_ids)),
+        };
+
+        // Locate the stanza (same 1-based indexing as `promote_backlog_entry`).
+        let entries = self.backlog_entries();
+        let n = entries.len();
+        let entry = index
+            .checked_sub(1)
+            .and_then(|zero| entries.get(zero))
+            .ok_or_else(|| {
+                if n == 0 {
+                    "no backlog entries to promote".to_string()
+                } else {
+                    format!("backlog entry {index} out of range (1..={n})")
+                }
+            })?;
+        let (start, len) = (entry.start, entry.len);
+        let headline = entry.headline.clone();
+        let detail = entry.detail.clone();
+        let raw: Vec<String> = self.backlog[start..start + len].to_vec();
+
+        // Faithful subtree when the top bullet is an id'd task line; else a
+        // single leaf whose stanza body becomes prose.
+        let (mut root, faithful) = match faithful_subtree(&raw, &root_id) {
+            Some(node) => (node, true),
+            None => {
+                let annotations = detail.iter().map(|l| line_to_annotation(l)).collect();
+                let node = Node {
+                    id: root_id.clone(),
+                    title: headline,
+                    state: NodeState::Pending,
+                    children: vec![],
+                    annotations,
+                };
+                (node, false)
+            }
+        };
+        if let Some(t) = title_override {
+            root.title = t.to_string();
+        }
+        let title = root.title.clone();
+        let mut created_ids = Vec::new();
+        collect_ids(&root, &mut created_ids);
+
+        self.add_child_of(&target, root)?;
+        self.backlog.drain(start..start + len);
+
+        Ok(PromoteReport {
+            root_id,
+            title,
+            target,
+            created_ids,
+            faithful,
+        })
+    }
+
     /// Sweep every `## Backlog (not yet phased)` block out of the preamble AND
     /// out of node annotations, merging their bullet bodies into `self.backlog`
     /// (the canonical bottom section) with exact-line dedup. Returns the number
@@ -1047,6 +1186,177 @@ fn phase_to_node(phase: Phase) -> Node {
         children: phase.children,
         annotations: phase.annotations,
     }
+}
+
+/// The next pure-integer child ordinal under a parent, given its current child
+/// ids: `max(integer final segment) + 1`, or 1 when there are none. Suffix-
+/// lettered ids (`CE.1a`) are ignored — they live *between* integers and never
+/// advance the counter. Shared by [Plan::breakdown] and
+/// [Plan::promote_backlog_into] so the append-id rule lives in one place.
+fn next_child_ordinal(child_ids: &[String]) -> u64 {
+    child_ids
+        .iter()
+        .filter_map(|id| id.rsplit('.').next().and_then(|s| s.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+/// Mint the id for an `--after <sibling>` insert: `{sibling}` plus the lowest
+/// unused single lowercase letter (`CE.1` -> `CE.1a`, then `CE.1b`, ...). Any
+/// single-letter suffix sorts strictly after the bare sibling and strictly
+/// before the next integer sibling (`CE.1z` < `CE.2`, since `1 < 2`), so the
+/// new task always lands in the gap without renumbering. `sibling_ids` is the
+/// parent's current children — a letter already taken there is skipped. Errs
+/// only in the absurd case of 26 in-between inserts at one anchor.
+fn suffix_after(sibling_id: &str, sibling_ids: &[String]) -> Result<String, String> {
+    for letter in b'a'..=b'z' {
+        let cand = format!("{sibling_id}{}", letter as char);
+        if !sibling_ids.iter().any(|id| id == &cand) {
+            return Ok(cand);
+        }
+    }
+    Err(format!(
+        "no free single-letter suffix after `{sibling_id}` — 26 in-between inserts already exist there"
+    ))
+}
+
+/// Depth-first walk collecting every node id (root first) into `out`.
+fn collect_ids(node: &Node, out: &mut Vec<String>) {
+    out.push(node.id.clone());
+    for child in &node.children {
+        collect_ids(child, out);
+    }
+}
+
+/// Leading-space count of a line.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Strip a single leading checkbox token (`[ ] `, `[x] `, `[>] `, `[-] `) from a
+/// bullet body, tolerating the hand-written variant of a backlog task line.
+/// Backlog subtrees the bridge writes carry no checkbox, so this is a no-op on
+/// them.
+fn strip_leading_checkbox(s: &str) -> &str {
+    let t = s.trim_start();
+    if let Some(rest) = t.strip_prefix('[')
+        && let Some(close) = rest.find("] ")
+        && close <= 1
+    {
+        return rest[close + 2..].trim_start();
+    }
+    s
+}
+
+/// Drop a trailing `*(deferred from phase … )*` provenance marker from a
+/// backlog task title so the promoted task reads clean.
+fn strip_deferred_marker(title: &str) -> String {
+    match title.find(" *(deferred from ") {
+        Some(pos) => title[..pos].trim_end().to_string(),
+        None => title.trim().to_string(),
+    }
+}
+
+/// Parse a raw backlog line as a task line: `<indent>- [state]? <dotted-id> -
+/// <title>`. Returns `(old_id, clean_title)` only when the leading token is a
+/// *dotted* plan id (`X.1`, not a bare word like `Backlog`) — that dot is what
+/// distinguishes a descoped task from a freeform note bullet. `None` for prose
+/// or id-less bullets.
+fn parse_backlog_task_line(line: &str) -> Option<(String, String)> {
+    let body = line.trim_start().strip_prefix("- ")?;
+    let body = strip_leading_checkbox(body);
+    let (id, title) = body.split_once(" - ")?;
+    let id = id.trim();
+    if id.contains('.') && is_valid_plan_id(id) {
+        Some((id.to_string(), strip_deferred_marker(title)))
+    } else {
+        None
+    }
+}
+
+/// Rebuild a backlog stanza as a task subtree rooted at `root_id`, remapping
+/// the stanza's stale dotted ids onto fresh ones under root (root's first child
+/// -> `{root_id}.1`, and so on, by indentation nesting). Id-less bullets and
+/// prose become annotations on the nearest open task. Returns `None` when the
+/// top line isn't an id'd task line — the signal for the caller to fall back to
+/// a single leaf + prose.
+fn faithful_subtree(lines: &[String], root_id: &str) -> Option<Node> {
+    let first = lines.first()?;
+    let (_old, root_title) = parse_backlog_task_line(first)?;
+    let base_indent = indent_of(first);
+
+    struct Frame {
+        depth: usize,
+        node: Node,
+        next_ord: u64,
+    }
+    let mut frames: Vec<Frame> = vec![Frame {
+        depth: 0,
+        node: Node {
+            id: root_id.to_string(),
+            title: root_title,
+            state: NodeState::Pending,
+            children: vec![],
+            annotations: vec![],
+        },
+        next_ord: 1,
+    }];
+
+    for line in &lines[1..] {
+        if line.trim().is_empty() {
+            let f = frames.last_mut().expect("root frame always present");
+            f.node.annotations.push(Annotation::Blank { count: 1 });
+            continue;
+        }
+        // Depth relative to the root; everything under root is at least 1 even
+        // if a malformed line is under-indented.
+        let depth = (indent_of(line).saturating_sub(base_indent) / 2).max(1);
+        match parse_backlog_task_line(line) {
+            Some((_old, title)) => {
+                // Close every frame at or below this depth into its parent.
+                while frames.len() > 1 && frames.last().expect("len > 1").depth >= depth {
+                    let done = frames.pop().expect("len > 1");
+                    frames
+                        .last_mut()
+                        .expect("parent frame")
+                        .node
+                        .children
+                        .push(done.node);
+                }
+                let parent = frames.last_mut().expect("parent frame");
+                let new_id = format!("{}.{}", parent.node.id, parent.next_ord);
+                parent.next_ord += 1;
+                frames.push(Frame {
+                    depth,
+                    node: Node {
+                        id: new_id,
+                        title,
+                        state: NodeState::Pending,
+                        children: vec![],
+                        annotations: vec![],
+                    },
+                    next_ord: 1,
+                });
+            }
+            None => {
+                let f = frames.last_mut().expect("root frame always present");
+                f.node.annotations.push(line_to_annotation(line));
+            }
+        }
+    }
+
+    // Collapse the remaining open frames into the root.
+    while frames.len() > 1 {
+        let done = frames.pop().expect("len > 1");
+        frames
+            .last_mut()
+            .expect("parent frame")
+            .node
+            .children
+            .push(done.node);
+    }
+    Some(frames.pop().expect("root frame").node)
 }
 
 /// Insert `new_node` into `siblings` at the first position whose id sorts
@@ -1754,5 +2064,176 @@ mod tests {
             .unwrap();
         assert_eq!(title, "Custom Title");
         assert_eq!(plan.find_phase("B").unwrap().title, "Custom Title");
+    }
+
+    // ---- Phase CI: promote a backlog entry INTO an existing phase/task ----
+
+    fn child_ids(plan: &Plan, phase: &str) -> Vec<String> {
+        plan.find_phase(phase)
+            .unwrap()
+            .children
+            .iter()
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn ci_promote_into_appends_simple_note_as_leaf() {
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.1 - a\n\n# Backlog (not yet phased)\n\n- Simple idea\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE"), None, None)
+            .unwrap();
+        assert_eq!(r.root_id, "CE.2"); // appended after CE.1
+        assert_eq!(r.title, "Simple idea");
+        assert!(!r.faithful, "no dotted id -> fallback leaf");
+        assert_eq!(r.created_ids, vec!["CE.2"]);
+        assert_eq!(child_ids(&plan, "CE"), vec!["CE.1", "CE.2"]);
+        assert!(plan.backlog_entries().is_empty(), "stanza drained");
+    }
+
+    #[test]
+    fn ci_promote_into_faithful_subtree_remaps_ids() {
+        // A descoped subtree (old X.* ids) files under CE with fresh numbering.
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.1 - a\n\n# Backlog (not yet phased)\n\n\
+             - X.1 - Old parent *(deferred from phase `X` on 2026-01-01)*\n  - X.1.1 - Old child\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE"), None, None)
+            .unwrap();
+        assert!(r.faithful, "top bullet has a dotted id -> faithful");
+        assert_eq!(r.root_id, "CE.2");
+        assert_eq!(r.created_ids, vec!["CE.2", "CE.2.1"]);
+        let root = plan.find("CE.2").unwrap();
+        assert_eq!(root.title, "Old parent", "deferred marker stripped");
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].id, "CE.2.1");
+        assert_eq!(root.children[0].title, "Old child");
+        assert!(plan.backlog_entries().is_empty());
+    }
+
+    #[test]
+    fn ci_promote_into_after_inserts_alpha_suffix() {
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.1 - a\n- [ ] CE.2 - b\n\n# Backlog (not yet phased)\n\n- Wedge me in\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE"), Some("CE.1"), None)
+            .unwrap();
+        assert_eq!(r.root_id, "CE.1a");
+        // Lands between CE.1 and CE.2 with no renumbering.
+        assert_eq!(child_ids(&plan, "CE"), vec!["CE.1", "CE.1a", "CE.2"]);
+    }
+
+    #[test]
+    fn ci_promote_into_after_second_insert_bumps_letter() {
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.1 - a\n- [ ] CE.1a - already\n- [ ] CE.2 - b\n\n\
+             # Backlog (not yet phased)\n\n- another\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE"), Some("CE.1"), None)
+            .unwrap();
+        assert_eq!(r.root_id, "CE.1b", "CE.1a taken -> next free letter");
+        assert_eq!(
+            child_ids(&plan, "CE"),
+            vec!["CE.1", "CE.1a", "CE.1b", "CE.2"]
+        );
+    }
+
+    #[test]
+    fn ci_promote_into_after_derives_parent_and_validates_child() {
+        // --after alone derives the parent from the sibling.
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.1 - a\n\n# Backlog (not yet phased)\n\n- x\n- y\n",
+        );
+        let r = plan.promote_backlog_into(1, None, Some("CE.1"), None).unwrap();
+        assert_eq!(r.target, "CE");
+        assert_eq!(r.root_id, "CE.1a");
+        // A sibling that isn't actually a child of the target is rejected.
+        let err = plan
+            .promote_backlog_into(1, Some("CE"), Some("CE.9"), None)
+            .unwrap_err();
+        assert!(err.contains("no sibling `CE.9`"), "got: {err}");
+    }
+
+    #[test]
+    fn ci_promote_into_a_task_nests_under_it() {
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n- [ ] CE.3 - parent\n  - [ ] CE.3.1 - existing\n\n\
+             # Backlog (not yet phased)\n\n- deeper idea\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE.3"), None, None)
+            .unwrap();
+        assert_eq!(r.root_id, "CE.3.2");
+        assert_eq!(r.target, "CE.3");
+        let parent = plan.find("CE.3").unwrap();
+        assert_eq!(
+            parent.children.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            vec!["CE.3.1", "CE.3.2"]
+        );
+    }
+
+    #[test]
+    fn ci_promote_into_title_override_applies_to_faithful_root() {
+        let mut plan = parse_for_test(
+            "## Phase CE - x\n\n# Backlog (not yet phased)\n\n- X.1 - original\n",
+        );
+        let r = plan
+            .promote_backlog_into(1, Some("CE"), None, Some("renamed"))
+            .unwrap();
+        assert_eq!(r.title, "renamed");
+        assert_eq!(plan.find("CE.1").unwrap().title, "renamed");
+    }
+
+    #[test]
+    fn ci_promote_into_errors() {
+        let plan = parse_for_test(
+            "## Phase CE - x\n\n# Backlog (not yet phased)\n\n- only one\n",
+        );
+        // Missing destination.
+        assert!(
+            plan.clone()
+                .promote_backlog_into(1, None, None, None)
+                .is_err()
+        );
+        // Unknown target.
+        assert!(
+            plan.clone()
+                .promote_backlog_into(1, Some("ZZ"), None, None)
+                .is_err()
+        );
+        // Index out of range.
+        assert!(
+            plan.clone()
+                .promote_backlog_into(9, Some("CE"), None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ci_next_child_ordinal_ignores_letter_suffixes() {
+        assert_eq!(next_child_ordinal(&[]), 1);
+        assert_eq!(
+            next_child_ordinal(&["CE.1".into(), "CE.2".into()]),
+            3
+        );
+        // A letter-suffixed id doesn't advance the integer counter.
+        assert_eq!(
+            next_child_ordinal(&["CE.1".into(), "CE.1a".into()]),
+            2
+        );
+    }
+
+    #[test]
+    fn ci_suffix_after_picks_lowest_free_letter() {
+        assert_eq!(suffix_after("CE.1", &["CE.1".into()]).unwrap(), "CE.1a");
+        assert_eq!(
+            suffix_after("CE.1", &["CE.1".into(), "CE.1a".into()]).unwrap(),
+            "CE.1b"
+        );
     }
 }

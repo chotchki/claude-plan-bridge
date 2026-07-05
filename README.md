@@ -232,18 +232,50 @@ Replace a phase's `*(depends on)*` / `*(prefer after)*` lists. At least
 one of the two flags must be passed; pass an empty list (`--depends-on
 ""`) to clear.
 
-### `promote [<index>] [--title T] [--activate]`
+### `promote [<index>] [--title T] [--activate] [--into <id>] [--after <sibling>]`
 
-Promote a **backlog entry** into a new top-level phase — the planning move
-that turns a parked idea into scheduled work. A backlog entry is a
-top-level `- ` bullet plus everything beneath it up to the next top-level
-bullet. Run with no `<index>` to **list** the entries (1-based) so you can
-pick one; run with an index to promote it: the entry's headline becomes the
-phase title (override with `--title`), the rest of the stanza becomes
-phase-level prose (**not** tasks — break it down afterward with
-`phase-breakdown`), the new phase takes the next `next-phase` id, and the
-entry is removed from the backlog. `--activate` focuses the working set on
-the new phase.
+Promote a **backlog entry** — the planning move that turns a parked idea into
+scheduled work. A backlog entry is a top-level `- ` bullet plus everything
+beneath it up to the next top-level bullet. Run with no `<index>` to **list**
+the entries (1-based) so you can pick one; run with an index to promote it.
+The entry is removed from the backlog either way.
+
+**New phase (default).** Without `--into`, the entry becomes a new top-level
+phase: its headline is the title (override with `--title`), the rest of the
+stanza becomes phase-level prose (**not** tasks — break it down afterward with
+`phase-breakdown`), and the phase takes the next `next-phase` id. `--activate`
+focuses the working set on it.
+
+**Into an existing phase or task (`--into`).** Files the entry as a **task**
+under an existing node instead of minting a phase — the "I already have a home
+for this" move. `--into` takes a phase id (`CE`) or a task id at any depth
+(`CE.3`). Two reconstruction paths, picked automatically:
+
+- **Faithful subtree** — when the entry's top bullet carries a dotted id
+  (`- X.1 - …`, the shape a phase sweep leaves in the backlog), the whole
+  subtree is rebuilt as real tasks with its stale ids **remapped** onto the
+  target's numbering (`X.1`/`X.1.1` → `CE.4`/`CE.4.1`), the deferral marker
+  stripped.
+- **Single leaf + prose** — anything else (a one-line idea, a freeform note)
+  lands as one task; any body rides along as prose. Break it down later with
+  `phase-breakdown`.
+
+`--after <sibling>` positions the new task **immediately after** a named
+sibling using an alpha suffix (`CE.1` → `CE.1a`) so nothing renumbers; the
+sibling must be a child of the target (with `--after` alone the parent is
+derived from it). The promoted leaves surface for `TaskCreate` via reconcile
+on your next turn, so the in-session task list picks them up.
+
+```sh
+# List, then file entry 2 as a task under phase CE, wedged after CE.1:
+$ claude-plan-bridge promote
+  1. A loose idea
+  2. X.1 - Descoped parent *(deferred from phase `X` on 2026-01-01)*
+$ claude-plan-bridge promote 2 --into CE --after CE.1
+claude-plan-bridge: promoted backlog entry 2 into `CE` as `CE.1a` - `Descoped parent` in ./PLAN.md
+  reconstructed 3 task(s): CE.1a, CE.1a.1, CE.1a.2
+  next: reconcile will surface the new leaf(s) for TaskCreate on your next turn
+```
 
 ### `activate <PHASE>` / `deactivate`
 
@@ -321,7 +353,8 @@ Tools:
 - **Phases**: `plan_new_phase` (templated, auto-id, optional activate),
   `plan_breakdown` (auto-numbered children under any phase/task, recursive),
   `plan_promote` (omit `index` to list backlog entries; promote one into a new
-  phase), `plan_add_phase` (omit `id` to auto-assign the next letter id; an
+  phase, or into an existing phase/task with `into`/`after`),
+  `plan_add_phase` (omit `id` to auto-assign the next letter id; an
   explicit `id` must be uppercase letters), `plan_next_phase` (read-only —
   report the next id), `plan_rename_phase`, `plan_set_phase_deps`
 - **Archive**: `plan_archive` (bulk), `plan_phase_exit` (single — accepts
@@ -489,7 +522,7 @@ Round-trip is **AST-stable**, not byte-stable: `parse(serialize(parse(x))) == pa
 
 `[>]` marks a leaf as **deferred from its current phase** — work you've consciously decided not to ship as part of this phase, but want to remember for later. Distinct from `[-]` (won't-do, abandoned) and `[ ]` (still active).
 
-All deferred and unphased work collects in a single **`## Backlog (not yet phased)` section pinned to the bottom of PLAN.md** — a visible, named holding pen, not an auto-discovered `Inbox` sub-list. When the time comes you make the planning move explicitly with **`promote <index>`** (or the `plan_promote` MCP tool), which lifts a backlog entry into a new phase; the bridge never auto-phases backlog items.
+All deferred and unphased work collects in a single **`## Backlog (not yet phased)` section pinned to the bottom of PLAN.md** — a visible, named holding pen, not an auto-discovered `Inbox` sub-list. When the time comes you make the planning move explicitly with **`promote <index>`** (or the `plan_promote` MCP tool): plain, it lifts a backlog entry into a **new phase**; with `--into <phase|task>` it files the entry as a **task under an existing node** (`--after` to position it), reconstructing a descoped subtree faithfully or falling back to a single leaf. The bridge never auto-phases backlog items.
 
 Four ways work lands in Backlog:
 
