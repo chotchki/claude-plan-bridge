@@ -15,7 +15,7 @@ Running both means living with two task lists that both want to be the source of
 ## Install
 
 ```sh
-# Once published to crates.io:
+# From crates.io:
 cargo install claude-plan-bridge
 
 # Or from source:
