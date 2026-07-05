@@ -1,0 +1,19 @@
+#!/bin/sh
+# Pre-push gate: run the same checks CI does, so a red build is caught here
+# instead of after the push. Mirrors .github/workflows/ci.yml (the `lint` and
+# `test` jobs). The whole suite runs in seconds, so there's no reason to skip.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Bypass in a pinch:       git push --no-verify
+set -e
+
+echo "pre-push: cargo fmt --check"
+cargo fmt --check
+
+echo "pre-push: cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "pre-push: cargo test --all-targets"
+cargo test --all-targets --quiet
+
+echo "pre-push: all gates passed"

@@ -546,6 +546,16 @@ If you're not sure: prefer `[>]`. Backlog preserves the work; won't-do discards 
 
 Bug reports and PRs welcome at [github.com/chotchki/claude-plan-bridge](https://github.com/chotchki/claude-plan-bridge). The implementation sequence is documented in [PLAN.md](./PLAN.md); design rationale in [SPEC.md](./SPEC.md). The bridge that ships in the binary drives both files in this repo, so dogfooding is the default development mode.
 
+### Pre-push hook
+
+A tracked hook in [`.githooks/pre-push`](./.githooks/pre-push) runs the same gates CI does — `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` — so a red build is caught before the push, not after. The whole suite runs in seconds. Enable it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Bypass in a pinch with `git push --no-verify`.
+
 ### Coverage
 
 `cargo-llvm-cov` is the coverage tool. CI runs it on every push and PR; the badge above is regenerated from the latest `main` push and lives on the orphan [`badges` branch](https://github.com/chotchki/claude-plan-bridge/tree/badges) alongside an HTML report. Color thresholds: ≥80% brightgreen, ≥60% yellow, ≥40% orange, <40% red.
