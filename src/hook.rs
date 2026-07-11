@@ -75,6 +75,12 @@ pub struct TaskUpdateInput {
     pub status: Option<String>,
     #[serde(default)]
     pub subject: Option<String>,
+    // Phase CK: a corrected `metadata.plan_path` on an update re-paths the task
+    // (fix a typo like `B.7.3` -> `B.7.4`). Deserialized with the same tolerant
+    // path as TaskCreate so a string-form `metadata` from a deferred-schema
+    // client still recovers rather than torpedoing the update.
+    #[serde(default, deserialize_with = "de_tolerant_metadata")]
+    pub metadata: Option<TaskMetadata>,
 }
 
 /// Bridge-managed metadata smuggled through `TaskCreate.metadata`. `plan_path`

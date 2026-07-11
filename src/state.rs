@@ -338,26 +338,37 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_file_without_active_phase_field_loads_clean() {
-        // Pre-40 state files don't have the active_phase field. They should
-        // still load — serde default makes it None.
+    fn legacy_state_file_without_defaulted_fields_loads_clean() {
+        // An old state file that predates fields we later added must still
+        // load. This exercises `#[serde(default)]` where it is actually
+        // load-bearing: the NON-Option `Mapping` fields (`last_synced_title`,
+        // `last_synced_state`, `last_synced_annotations`). A missing non-Option
+        // field is a hard "missing field" deserialize ERROR without the
+        // attribute — so omitting them here is the real test. (Omitting an
+        // `Option` field like `active_phase` would default to `None` even
+        // without `#[serde(default)]`, so it proves nothing — the prior fixture
+        // spelled the Mapping fields out and never took the default path.)
         let dir = scratch_dir();
         let path = dir.join("legacy_state.json");
         let legacy_json = r#"{
             "version": 1,
             "mappings": {
                 "task-1": {
-                    "plan_path": "1.2.3",
-                    "last_synced_title": "Old task",
-                    "last_synced_state": "pending",
-                    "last_synced_annotations": []
+                    "plan_path": "1.2.3"
                 }
             }
         }"#;
         std::fs::write(&path, legacy_json).unwrap();
         let loaded = State::load(&path).unwrap();
+        // Option field absent from the file → None (State-level).
         assert_eq!(loaded.active_phase(), None);
         assert_eq!(loaded.plan_path("task-1"), Some("1.2.3"));
+        // The three non-Option Mapping fields fell back to their defaults
+        // rather than failing the load.
+        let m = loaded.mappings.get("task-1").expect("task-1 mapping");
+        assert_eq!(m.last_synced_title, "");
+        assert_eq!(m.last_synced_state, crate::ast::NodeState::Pending);
+        assert!(m.last_synced_annotations.is_empty());
     }
 
     #[test]

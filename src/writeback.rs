@@ -456,17 +456,27 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
     crate::lock::with_state_lock(&state_path, crate::lock::DEFAULT_TIMEOUT, || {
         let mut state = State::load(&state_path)?;
 
-        let Some(node_path) = state.plan_path(&input.task_id).map(String::from) else {
+        let Some(mut node_path) = state.plan_path(&input.task_id).map(String::from) else {
             return Ok(HookOutput::silent());
         };
 
         let status = input.status.as_deref();
         let new_subject = input.subject.as_deref();
 
-        // Bail early if there's nothing to do (no actionable status AND no subject).
-        // `pending` / `in_progress` are status no-ops; subject still counts.
+        // Phase CK: a corrected `metadata.plan_path` re-paths the task (fix a
+        // mistaken id like `B.7.3` -> `B.7.4`). Only a target that differs from
+        // the current mapping is actionable.
+        let repath_target: Option<String> = input
+            .metadata
+            .as_ref()
+            .and_then(|m| m.plan_path.clone())
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty() && *p != node_path);
+
+        // Bail early if there's nothing to do (no actionable status, no subject,
+        // no re-path). `pending` / `in_progress` are status no-ops.
         let has_status_action = matches!(status, Some("completed") | Some("deleted"));
-        if !has_status_action && new_subject.is_none() {
+        if !has_status_action && new_subject.is_none() && repath_target.is_none() {
             return Ok(HookOutput::silent());
         }
 
@@ -531,6 +541,82 @@ pub fn writeback_update(payload: &HookPayload, plan_path: &Path) -> Result<HookO
         }
 
         let mut changes: Vec<String> = Vec::new();
+
+        // --- Phase CK: re-path a mistaken plan_path (e.g. B.7.3 -> B.7.4) ---
+        // Runs BEFORE subject/status so any accompanying rename or tick applies
+        // to the node at its NEW id. Leaf-only and conservative: it refuses
+        // (with a visible, non-blocking note) rather than guess when the move
+        // isn't clean — a malformed target, a missing node, a node with
+        // sub-tasks, a colliding target, or a missing destination parent.
+        if let Some(new_path) = &repath_target {
+            if !crate::ast::is_valid_plan_id(new_path) {
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: ignored re-path of {node_path}: `{new_path}` is not a valid dotted id"
+                    ),
+                ));
+            }
+            match plan.find(&node_path) {
+                None => {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: can't re-path {node_path} -> {new_path}: {node_path} not in PLAN.md (archived or hand-removed)"
+                        ),
+                    ));
+                }
+                Some(n) if !n.children.is_empty() => {
+                    return Ok(HookOutput::context(
+                        &payload.hook_event_name,
+                        format!(
+                            "claude-plan-bridge: won't re-path {node_path} -> {new_path}: it has sub-tasks (re-path is leaf-only — move or hand-edit the children first)"
+                        ),
+                    ));
+                }
+                Some(_) => {}
+            }
+            if plan.find_item(new_path).is_some() {
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: won't re-path {node_path} -> {new_path}: target id already exists"
+                    ),
+                ));
+            }
+            let Some(parent) = crate::ast::parent_id_for(new_path) else {
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: won't re-path {node_path} -> {new_path}: a task can't move to a top-level phase id"
+                    ),
+                ));
+            };
+            if plan.find_phase(&parent).is_none() && plan.find(&parent).is_none() {
+                return Ok(HookOutput::context(
+                    &payload.hook_event_name,
+                    format!(
+                        "claude-plan-bridge: won't re-path {node_path} -> {new_path}: destination parent `{parent}` doesn't exist"
+                    ),
+                ));
+            }
+            // All checks passed — detach, re-id, re-insert in order.
+            let mut node = plan
+                .remove(&node_path)
+                .expect("node confirmed present above");
+            node.id = new_path.clone();
+            plan.add_child_of(&parent, node)
+                .map_err(|e| anyhow::anyhow!("re-path insert failed: {e}"))?;
+            changes.push(format!("re-pathed {node_path} -> {new_path}"));
+            node_path = new_path.clone();
+            // The state mapping keys on task_id (unchanged); only its plan_path
+            // moves. The post-write refresh below rewrites it, but set it now so
+            // an early-returning status branch (e.g. deleted) still sees the new
+            // path.
+            if let Some(m) = state.mappings.get_mut(&input.task_id) {
+                m.plan_path = new_path.clone();
+            }
+        }
 
         // --- Subject rename (skip when also deleting — would rename then remove) ---
         if !matches!(status, Some("deleted"))
@@ -1961,6 +2047,154 @@ mod tests {
             tool_response: serde_json::json!({}),
             source: String::new(),
         }
+    }
+
+    // Phase CK: a TaskUpdate carrying a corrected metadata.plan_path.
+    fn payload_for_update_repath(task_id: &str, new_plan_path: &str) -> HookPayload {
+        HookPayload {
+            session_id: String::new(),
+            cwd: String::new(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: "TaskUpdate".to_string(),
+            tool_input: serde_json::json!({
+                "taskId": task_id,
+                "metadata": {"plan_path": new_plan_path}
+            }),
+            tool_response: serde_json::json!({}),
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn repath_moves_leaf_line_and_mapping() {
+        // The reported case: a B.7.3 -> B.7.4 typo fix. The line moves and the
+        // state mapping follows, keyed on the unchanged task_id.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase B - Work\n");
+        writeback_create(&payload_for_create("t-b7", "Parent", Some("B.7")), &plan).unwrap();
+        writeback_create(
+            &payload_for_create("t-typo", "Mistyped", Some("B.7.3")),
+            &plan,
+        )
+        .unwrap();
+
+        let out = writeback_update(&payload_for_update_repath("t-typo", "B.7.4"), &plan).unwrap();
+        assert!(out.to_json().contains("re-pathed"), "{}", out.to_json());
+
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] B.7.4 - Mistyped"),
+            "line not moved:\n{contents}"
+        );
+        assert!(!contents.contains("B.7.3"), "old id lingers:\n{contents}");
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-typo"), Some("B.7.4"));
+    }
+
+    #[test]
+    fn repath_preserves_checkbox_state() {
+        // Re-pathing a completed leaf must carry its [x] state to the new id.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
+        writeback_update(&payload_for_update("t-1", "completed"), &plan).unwrap();
+        writeback_update(&payload_for_update_repath("t-1", "1.2"), &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [x] 1.2 - Task"),
+            "done state not preserved:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn repath_with_rename_applies_both_at_new_id() {
+        // A combined update (re-path + subject) renames the node at its NEW id.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "Old", Some("1.1")), &plan).unwrap();
+        let combined = HookPayload {
+            tool_input: serde_json::json!({
+                "taskId": "t-1",
+                "subject": "New name",
+                "metadata": {"plan_path": "1.2"}
+            }),
+            ..payload_for_update("t-1", "pending")
+        };
+        writeback_update(&combined, &plan).unwrap();
+        let contents = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            contents.contains("- [ ] 1.2 - New name"),
+            "re-path + rename not applied:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn repath_refuses_collision_and_leaves_plan_unchanged() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "First", Some("1.1")), &plan).unwrap();
+        writeback_create(&payload_for_create("t-2", "Second", Some("1.2")), &plan).unwrap();
+        let before = std::fs::read_to_string(&plan).unwrap();
+
+        let out = writeback_update(&payload_for_update_repath("t-1", "1.2"), &plan).unwrap();
+        assert!(
+            out.to_json().contains("already exists"),
+            "{}",
+            out.to_json()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&plan).unwrap(),
+            before,
+            "collision must not mutate PLAN.md"
+        );
+        // Mapping unchanged.
+        let state = State::load(&default_state_path_for(&plan)).unwrap();
+        assert_eq!(state.plan_path("t-1"), Some("1.1"));
+    }
+
+    #[test]
+    fn repath_refuses_missing_destination_parent() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
+        // Parent `1.5` doesn't exist.
+        let out = writeback_update(&payload_for_update_repath("t-1", "1.5.9"), &plan).unwrap();
+        assert!(
+            out.to_json().contains("parent") && out.to_json().contains("doesn't exist"),
+            "{}",
+            out.to_json()
+        );
+        assert!(
+            std::fs::read_to_string(&plan)
+                .unwrap()
+                .contains("- [ ] 1.1 - Task")
+        );
+    }
+
+    #[test]
+    fn repath_refuses_node_with_children() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "Parent", Some("1.1")), &plan).unwrap();
+        writeback_create(&payload_for_create("t-1-1", "Child", Some("1.1.1")), &plan).unwrap();
+        let out = writeback_update(&payload_for_update_repath("t-1", "1.2"), &plan).unwrap();
+        assert!(out.to_json().contains("sub-tasks"), "{}", out.to_json());
+        // Nothing moved.
+        assert!(
+            std::fs::read_to_string(&plan)
+                .unwrap()
+                .contains("- [ ] 1.1 - Parent")
+        );
+    }
+
+    #[test]
+    fn repath_to_same_path_is_silent_noop() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "## Phase 1 - Phase\n");
+        writeback_create(&payload_for_create("t-1", "Task", Some("1.1")), &plan).unwrap();
+        let out = writeback_update(&payload_for_update_repath("t-1", "1.1"), &plan).unwrap();
+        // Same path is not an action → silent.
+        assert_eq!(out.to_json(), "{}", "expected silent no-op");
     }
 
     #[test]

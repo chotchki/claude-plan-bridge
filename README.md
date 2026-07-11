@@ -77,6 +77,7 @@ From the next session, the bridge runs invisibly:
 | `TaskUpdate(status="completed")` | Ticks `[ ]` → `[x]` at the mapped line |
 | `TaskUpdate(status="deleted")` | Removes the line (orphaned empty parents stay; you prune by hand) |
 | `TaskUpdate(subject="...")` | Rewrites the node's title in `PLAN.md` (works with or without a status change) |
+| `TaskUpdate(metadata.plan_path="...")` | Re-paths a mistyped id (`B.7.3` → `B.7.4`): moves the line and the mapping. Leaf-only; refuses (non-blocking note) on a collision, a node with sub-tasks, or a missing destination parent |
 | *you* edit `PLAN.md` between turns | Next `UserPromptSubmit` feeds the diff to Claude as `additionalContext` |
 
 When a phase is fully resolved, sweep it:
@@ -123,6 +124,7 @@ PostToolUse hook handler. Reads the hook payload from stdin, mutates `PLAN.md` +
   - **Gotcha: load the `TaskCreate` schema first.** `TaskCreate` is a *deferred* tool. If its schema isn't loaded, the `metadata` object can serialize as a string or get dropped before the hook sees it. The bridge is hardened against both (Phase CC): a string-form `metadata` is parsed back into `plan_path`/`plan_phase` rather than hard-failing the create, and a dropped `metadata` is recovered from `description` when it carries the id. Recovery isn't a substitute for the clean path, though — run `ToolSearch select:TaskCreate` before metadata-carrying creates so `metadata` arrives intact. Only a create with no usable `plan_path` *and* no recoverable `description` falls to `## Backlog`.
   - **Subject escape-normalization.** A subject like `Build \"/blog\" page` is normalized to `Build "/blog" page` before storage — markdown doesn't need `\"` escaping and the stray backslashes used to cause eternal title drift once the user hand-cleaned the file.
 - **update** (`TaskUpdate`): `status="completed"` flips `[ ]` → `[x]`; `status="deleted"` removes the line; `status="pending"`/`"in_progress"` is a no-op. A `subject` field (with or without a status change) rewrites the node's title in `PLAN.md` and refreshes the synced baseline — useful when task text gets refined mid-work. Same `\"` → `"` normalization as create.
+  - **Re-path (Phase CK).** A corrected `metadata.plan_path` that differs from the task's current mapping moves the leaf to the new id — the fix for a mistyped path like `B.7.3` → `B.7.4`, which used to be a no-op (the update path didn't read `metadata`). It runs before any accompanying `subject`/`status`, so a combined update lands the rename/tick at the new id. Deliberately conservative and **leaf-only**: it refuses — with a visible, non-blocking note, changing nothing — when the target id already exists, the node has sub-tasks (their ids would need re-prefixing), or the destination parent doesn't exist. Same tolerant `metadata` decode as create, so a string-form `metadata` still works.
 
 ### `resume`
 
