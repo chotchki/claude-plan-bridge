@@ -673,3 +673,11 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CJ.4 - Maintain the marker on every mutation
 - [x] CJ.5 - Docs + e2e coverage
 
+---
+
+## 2026-07-11
+
+## Phase CK - Backlog cleanup: serde-default fixture + TaskUpdate re-path
+- [x] CK.1 - Fix the legacy-load fixture to actually exercise #[serde(default)]
+- [x] CK.2 - Support re-pathing a task via TaskUpdate(metadata.plan_path)
+
