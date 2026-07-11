@@ -407,11 +407,12 @@ impl McpServer {
         // callers don't hand-pick (or collide on) a letter.
         let id = match args.get("id").and_then(Value::as_str) {
             Some(explicit) => {
-                if !crate::phase_seq::is_alpha_phase_id(explicit) {
+                if !crate::phase_seq::is_sequence_phase_id(explicit) {
                     return Err(anyhow!(
                         "phase id `{explicit}` must be uppercase letters \
-                         (A, B, ..., Z, AA, AB, ...). Omit `id` to auto-assign the next \
-                         one, or call `plan_next_phase` to see it."
+                         (A, B, ..., Z, AA, AB, ...) and at most {} long. Omit `id` to \
+                         auto-assign the next one, or call `plan_next_phase` to see it.",
+                        crate::phase_seq::MAX_PHASE_ID_LEN
                     ));
                 }
                 explicit.to_string()

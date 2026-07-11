@@ -42,6 +42,12 @@ pub fn archive(plan_path: &Path, dry_run: bool, today: &str) -> Result<ArchiveRe
         .with_context(|| format!("read {}", plan_path.display()))?;
     let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
 
+    // Phase CJ: capture EVERY current phase id into the high-water marker
+    // before any leaves PLAN.md. This is the one place the marker is strictly
+    // required — once a swept phase's header is gone, the marker is all that
+    // stops its id from being re-handed-out.
+    crate::phase_seq::refresh_plan_marker(&mut plan, plan_path);
+
     // Partition phases into "stay" vs "archive" preserving order.
     let mut keep: Vec<Phase> = Vec::new();
     let mut archive: Vec<Phase> = Vec::new();
@@ -140,6 +146,10 @@ pub fn archive_phase(
     let text = std::fs::read_to_string(plan_path)
         .with_context(|| format!("read {}", plan_path.display()))?;
     let mut plan = parse(&text).with_context(|| format!("parse {}", plan_path.display()))?;
+
+    // Phase CJ: pin every current phase id into the marker before this one is
+    // removed, so its id survives once its header leaves PLAN.md.
+    crate::phase_seq::refresh_plan_marker(&mut plan, plan_path);
 
     let phase_idx = plan
         .phases
@@ -333,6 +343,8 @@ fn build_archive_section(today: &str, archived: &[Phase]) -> String {
             phases: vec![phase.clone()],
             backlog: vec![],
             backlog_h1: false,
+            // The marker lives in PLAN.md, never in an archived phase section.
+            phase_high_water: None,
         };
         out.push_str(&serialize(&temp));
         out.push('\n');
@@ -380,6 +392,54 @@ mod tests {
     // crate::test_utils. scratch_dir takes a per-module prefix string.
     fn scratch_dir() -> std::path::PathBuf {
         crate::test_utils::scratch_dir("archive")
+    }
+
+    #[test]
+    fn bulk_archive_pins_swept_id_into_marker_and_next_id_skips_archive() {
+        // Phase CJ: archiving a phase must persist its id in the high-water
+        // marker so it's never re-handed-out once its header leaves PLAN.md.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase A - done\n  - [x] A.1 Done\n## Phase B - live\n  - [ ] B.1 open\n",
+        );
+        let report = archive(&plan, false, "2026-07-11").unwrap();
+        assert_eq!(report.archived_phase_ids, vec!["A"]);
+
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("## Phase A - done"), "A should be swept");
+        // Marker pins the max live id at archive time (B) — B >= the swept A.
+        assert!(
+            after.contains("<!-- plan-bridge:phase-high-water=B -->"),
+            "marker not written:\n{after}"
+        );
+        // next-id now derives from the marker; even a bogus-high ARCHIVE id is
+        // ignored because the marker is present. Prove it:
+        std::fs::write(
+            crate::phase_seq::archive_path_for(&plan),
+            "## Phase ZZ - bogus\n",
+        )
+        .unwrap();
+        assert_eq!(crate::phase_seq::next_phase_id_for_plan(&plan), "C");
+    }
+
+    #[test]
+    fn archive_phase_pins_swept_id_when_it_is_the_highest() {
+        // Sweep the highest live phase (B); the marker must remember B so the
+        // next id is C, not a re-issued B, even though B is gone from PLAN.md.
+        let dir = scratch_dir();
+        let plan = write_plan(
+            &dir,
+            "## Phase A - live\n  - [ ] A.1 open\n## Phase B - done\n  - [x] B.1 Done\n",
+        );
+        archive_phase(&plan, "B", "2026-07-11", false).unwrap();
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(!after.contains("## Phase B - done"));
+        assert!(
+            after.contains("<!-- plan-bridge:phase-high-water=B -->"),
+            "swept-highest id not pinned:\n{after}"
+        );
+        assert_eq!(crate::phase_seq::next_phase_id_for_plan(&plan), "C");
     }
 
     #[test]

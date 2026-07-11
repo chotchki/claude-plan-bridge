@@ -47,6 +47,32 @@ pub fn parse(input: &str) -> Result<Plan, ParseError> {
     plan.backlog = trailing_backlog;
     plan.backlog_h1 = backlog_was_h1;
 
+    // Phase CJ: peel the phase high-water marker out of the body BEFORE the
+    // tree walk, so it doesn't land in the preamble (the serializer re-emits it
+    // at the top). Keep the highest VALID sequence id among any markers found;
+    // a garbled or over-cap marker value is dropped (the field stays `None` and
+    // the stale line is removed). Non-marker lines pass through untouched.
+    let mut high_water: Option<&str> = None;
+    let body: Vec<&str> = body
+        .into_iter()
+        .filter(
+            |line| match crate::phase_seq::parse_high_water_marker(line) {
+                Some(val) => {
+                    if crate::phase_seq::is_sequence_phase_id(val)
+                        && high_water.is_none_or(|h| {
+                            crate::phase_seq::cmp_phase_ids(val, h) == std::cmp::Ordering::Greater
+                        })
+                    {
+                        high_water = Some(val);
+                    }
+                    false
+                }
+                None => true,
+            },
+        )
+        .collect();
+    plan.phase_high_water = high_water.map(str::to_string);
+
     for (idx, raw_line) in body.iter().enumerate() {
         let raw_line = *raw_line;
         let line_no = idx + 1;

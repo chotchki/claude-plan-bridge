@@ -30,6 +30,16 @@ pub struct Plan {
     /// v2. Routine writes preserve the parsed value.
     #[serde(default)]
     pub backlog_h1: bool,
+    /// Phase CJ: the phase high-water mark — the highest phase id ever handed
+    /// out, persisted verbatim as an HTML-comment marker
+    /// (`<!-- plan-bridge:phase-high-water=CI -->`) so next-id derivation reads
+    /// it instead of scraping PLAN_ARCHIVE.md. `None` when the plan carries no
+    /// marker yet (a pre-CJ plan); the derivation falls back to scanning
+    /// PLAN + PLAN_ARCHIVE that one time, then the next write persists the
+    /// marker. The parser lifts the marker line out of the body here so it
+    /// doesn't double as preamble; the serializer re-emits it at the top.
+    #[serde(default)]
+    pub phase_high_water: Option<String>,
 }
 
 /// A top-level phase. Tasks live in `children`; phase-level metadata
@@ -1506,6 +1516,7 @@ mod tests {
             preamble: vec!["# Header".to_string(), "".to_string()],
             backlog: vec![],
             backlog_h1: false,
+            phase_high_water: None,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1548,6 +1559,7 @@ mod tests {
             preamble: vec![],
             backlog: vec![],
             backlog_h1: false,
+            phase_high_water: None,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),
@@ -1586,6 +1598,7 @@ mod tests {
             preamble: vec![],
             backlog: vec![],
             backlog_h1: false,
+            phase_high_water: None,
             phases: vec![Phase {
                 id: "1.0".to_string(),
                 title: "Phase".to_string(),

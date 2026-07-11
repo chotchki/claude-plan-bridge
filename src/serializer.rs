@@ -9,6 +9,14 @@ use crate::ast::{Annotation, Node, NodeState, Phase, Plan};
 /// discards them), so round-trip is AST-stable, not byte-stable.
 pub fn serialize(plan: &Plan) -> String {
     let mut out = String::new();
+    // Phase CJ: the phase high-water marker pins to the very top, above the
+    // preamble, on its own line. Emitted only when set, so a pre-CJ plan (no
+    // marker) round-trips byte-for-byte as before. The parser peels this line
+    // back out on the next read, so the round-trip is stable.
+    if let Some(id) = &plan.phase_high_water {
+        out.push_str(&crate::phase_seq::render_high_water_marker(id));
+        out.push('\n');
+    }
     for line in &plan.preamble {
         out.push_str(line);
         out.push('\n');
@@ -167,6 +175,77 @@ mod tests {
     #[test]
     fn empty_plan() {
         assert_eq!(serialize(&Plan::default()), "");
+    }
+
+    #[test]
+    fn markerless_plan_serializes_without_marker() {
+        // Phase CJ: a pre-CJ plan (no high-water marker) must round-trip
+        // byte-for-byte as before — no marker line injected.
+        let input = "# PLAN\n\n## Phase A - Work\n- [ ] A.1 - task\n";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phase_high_water, None);
+        assert_eq!(serialize(&plan), input);
+        assert!(!serialize(&plan).contains("phase-high-water"));
+    }
+
+    #[test]
+    fn marker_serializes_at_top_and_roundtrips() {
+        // The marker pins above the preamble on its own line, and the parse ->
+        // serialize -> parse round-trip is AST-stable.
+        let input = "\
+<!-- plan-bridge:phase-high-water=CI -->
+# PLAN
+
+## Phase A - Work
+- [ ] A.1 - task
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phase_high_water.as_deref(), Some("CI"));
+        // Marker did NOT leak into the preamble.
+        assert!(
+            !plan.preamble.iter().any(|l| l.contains("phase-high-water")),
+            "marker leaked into preamble: {:?}",
+            plan.preamble
+        );
+        let out = serialize(&plan);
+        assert!(
+            out.starts_with("<!-- plan-bridge:phase-high-water=CI -->\n"),
+            "marker not at top: {out}"
+        );
+        roundtrip_stable(input);
+    }
+
+    #[test]
+    fn garbled_marker_value_is_dropped() {
+        // An over-cap / garbled marker value is not a usable sequence id: the
+        // field stays None and the stale line is removed on serialize.
+        let input = "\
+<!-- plan-bridge:phase-high-water=CICJ -->
+# PLAN
+
+## Phase A - Work
+- [ ] A.1 - task
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(
+            plan.phase_high_water, None,
+            "garbled marker must be dropped"
+        );
+        assert!(!serialize(&plan).contains("phase-high-water"));
+    }
+
+    #[test]
+    fn highest_marker_wins_when_duplicated() {
+        // Defensive: two markers (shouldn't happen) collapse to the highest
+        // valid id, and only one marker line survives serialization.
+        let input = "\
+<!-- plan-bridge:phase-high-water=B -->
+<!-- plan-bridge:phase-high-water=CI -->
+# PLAN
+";
+        let plan = parse(input).unwrap();
+        assert_eq!(plan.phase_high_water.as_deref(), Some("CI"));
+        assert_eq!(serialize(&plan).matches("phase-high-water").count(), 1);
     }
 
     #[test]

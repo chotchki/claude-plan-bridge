@@ -22,6 +22,7 @@ pub struct UpgradeHooksReport {
 }
 
 const STARTER_PLAN: &str = "\
+<!-- plan-bridge:phase-high-water=A -->
 # PLAN
 
 Describe what you're building.
@@ -548,15 +549,27 @@ mod tests {
         // phase is `B`.
         let dir = scratch_dir();
         init(&dir, false).unwrap();
-        let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
+        let plan_path = dir.join("PLAN.md");
+        let plan = std::fs::read_to_string(&plan_path).unwrap();
         assert!(
             plan.contains("## Phase A - "),
             "skeleton must seed alpha phase `A`: {plan}"
+        );
+        // Phase CJ: the skeleton also ships the high-water marker (= A), so a
+        // brand-new project is migrated from the first write — next id is B.
+        assert!(
+            plan.contains("<!-- plan-bridge:phase-high-water=A -->"),
+            "skeleton must ship the high-water marker: {plan}"
         );
         assert_eq!(
             crate::phase_seq::next_phase_id_from_texts(&plan, ""),
             "B",
             "next phase after the skeleton must be `B`, not a legacy-id-induced `A`"
+        );
+        assert_eq!(
+            crate::phase_seq::next_phase_id_for_plan(&plan_path),
+            "B",
+            "marker-based derivation must also yield `B`"
         );
     }
 

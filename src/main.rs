@@ -448,6 +448,12 @@ fn main() -> Result<()> {
                 report.baselined.len(),
                 report.already_mapped.len()
             );
+            if let Some(id) = &report.marker_seeded {
+                println!(
+                    "claude-plan-bridge: seeded phase high-water marker `{id}` in PLAN.md — \
+                     next-phase now reads the marker instead of scraping PLAN_ARCHIVE.md"
+                );
+            }
             if !report.skipped_no_id.is_empty() {
                 println!(
                     "claude-plan-bridge: NOTE: skipped {} bare-checkbox leaf(s) with no id — \

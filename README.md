@@ -102,7 +102,9 @@ Emit the parsed `PLAN.md` AST as pretty-printed JSON on stdout. (Reports top-lev
 
 ### `next-phase`
 
-Print the next phase id in the uppercase-letter sequence (`A`..`Z` → `AA`..`AZ` → `BA`..`BZ` → ...; bijective base-26, like spreadsheet columns), reconstructed by scanning `PLAN.md` and the sibling `PLAN_ARCHIVE.md` for the highest existing uppercase-letter phase id and incrementing it. Outputs `A` for a fresh project; legacy numeric phase ids (`1`, `42`) are ignored. Scanning the archive too means a swept id is never re-handed-out. Call it before creating a new phase so you don't hand-pick — or collide on — the next letter:
+Print the next phase id in the uppercase-letter sequence (`A`..`Z` → `AA`..`AZ` → `BA`..`BZ` → ...; bijective base-26, like spreadsheet columns), the successor of the current phase high-water mark. Outputs `A` for a fresh project; legacy numeric phase ids (`1`, `42`) are ignored. Call it before creating a new phase so you don't hand-pick — or collide on — the next letter:
+
+The high-water mark is derived **marker-first** (Phase CJ). `PLAN.md` carries a machine marker — `<!-- plan-bridge:phase-high-water=CI -->` — that pins the highest id ever handed out. When present it is authoritative and **`PLAN_ARCHIVE.md` is not read**: an archived phase's id survives in the marker even after its header is swept out of the live plan. Live `## Phase` headers are still consulted (the max of marker and live wins), so a phase you hand-add above the marker can't collide. A pre-CJ plan with no marker falls back to scanning `PLAN.md` + `PLAN_ARCHIVE.md` exactly as before; the next `archive` (or a `baseline`) writes the marker and the archive read stops. Ids are length-capped at 3 letters (18,278 — far past any real plan): a longer all-caps token is treated as a garbled/concatenated header, ignored rather than allowed to poison the sequence into permanent 4+ letter ids.
 
 ```
 $ claude-plan-bridge next-phase
@@ -330,6 +332,8 @@ Together with focus mode (above), this makes the harness TaskList behave as a sm
 
 Seed the state file with synthetic `baseline:<plan_path>` mappings for every leaf currently in `PLAN.md`. Run once when installing into a project with an existing plan. Idempotent. When Claude later `TaskCreate`s against a baselined path, the baseline mapping is silently replaced.
 
+`baseline` is also the manual migration to the Phase-CJ phase high-water marker (see `next-phase`): it recomputes the true high-water over live `PLAN.md` + `PLAN_ARCHIVE.md` and writes the `<!-- plan-bridge:phase-high-water=… -->` marker into `PLAN.md` if it's missing or behind — a minimal top-of-file edit that leaves the rest of the document untouched. After that, `next-phase` reads the marker and stops scraping the archive. (A new project gets the marker straight from `init`; an existing one gets it here, or automatically on its next `archive`.)
+
 **Adopting baselined leaves into TaskList.** On a fresh session against a pre-populated `PLAN.md`, the harness's TaskList starts empty even though state has baseline mappings for every leaf. Reconcile surfaces a one-line advisory listing the baseline-only `plan_path`s so the agent sees them. To adopt: `TaskCreate(metadata.plan_path="N.M", subject="...")` — `writeback` dedupes against the existing line (no duplicate inserted) and replaces the `baseline:` mapping with the real `task_id`. Hand-editing the line directly also works; the bridge picks up the change via the next reconcile.
 
 **Leaves with empty ids** (bare-checkbox bullets like `- [ ] no id here`) are *skipped*: they have no stable `plan_path` to key state by, so the bridge can't track them. `baseline` reports the count under "NOTE: skipped N bare-checkbox leaf(s)…" — add a dotted id (`- [ ] 1.2.3 description`) to make a leaf trackable.
@@ -428,6 +432,7 @@ Phases are h2 markdown headers; tasks are checkboxes underneath. The full
 shape:
 
 ```
+<!-- plan-bridge:phase-high-water=AI -->
 ## Phase AI - Studio dogfood *(depends on: AH)* *(prefer after: AG)*
 
 Intro paragraph at the phase level — sweeps with the phase to archive.
@@ -447,10 +452,19 @@ Intro paragraph at the phase level — sweeps with the phase to archive.
 - **Phases**: `## Phase <ID> - <Title>` (h2 header). New ids use the
   uppercase-letter sequence — `A`..`Z` → `AA`..`AZ` → `BA`..`BZ` → ... (bijective
   base-26, like spreadsheet columns); `claude-plan-bridge next-phase` /
-  `plan_next_phase` hand out the next one, scanning PLAN.md + PLAN_ARCHIVE.md so
-  swept ids aren't reused. Numeric ids (`1`, `42`) are **legacy** — still parsed,
-  but not generated. A legacy `.0` anchor suffix is stripped on read
-  (`## Phase 1.0` → phase id `1`). Title optional.
+  `plan_next_phase` hand out the next one. Ids are capped at **3 letters**
+  (18,278 — far past any real plan); a longer all-caps token is treated as a
+  garbled header and ignored, so a concatenated `## Phase CICJ` can't poison the
+  sequence. Numeric ids (`1`, `42`) are **legacy** — still parsed, but not
+  generated. A legacy `.0` anchor suffix is stripped on read (`## Phase 1.0` →
+  phase id `1`). Title optional.
+- **Phase high-water marker**: `<!-- plan-bridge:phase-high-water=<ID> -->` — an
+  optional HTML-comment line (invisible in rendered markdown) that pins the
+  highest phase id ever handed out. It's how `next-phase` avoids scraping
+  `PLAN_ARCHIVE.md`: the marker remembers a swept id after its `## Phase` header
+  leaves the live plan. `init` ships it, `archive` advances it, `baseline` seeds
+  it into a pre-existing plan; you never write it by hand. Absent it, next-id
+  falls back to scanning PLAN.md + PLAN_ARCHIVE.md. See [`next-phase`](#next-phase).
 - **Phase dependency markers**: `*(depends on: X, Y)*` (hard sequencing
   hint) and/or `*(prefer after: A, B)*` (soft hint). Informational only —
   reconcile surfaces them; the bridge never blocks an operation.
@@ -494,6 +508,8 @@ there's nothing left to canonicalize.
 ```jsonc
 {
   "preamble": ["raw markdown lines before the first checkbox"],
+  "phase_high_water": "AI",   // Phase CJ: highest id ever handed out, or null.
+                              // Serialized as the top-of-file marker comment.
   "phases": [
     {
       "id": "AI",             // bare phase id (letter-sequence or legacy numeric)

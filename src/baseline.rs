@@ -27,6 +27,10 @@ pub struct BaselineReport {
     /// Untrackable — no stable plan_path to key state by. Reported so users
     /// can see how many leaves the bridge can't follow without explicit ids.
     pub skipped_no_id: Vec<String>,
+    /// Phase CJ: `Some(id)` when baseline wrote/advanced the phase high-water
+    /// marker in PLAN.md (the migration path for a pre-CJ plan). `None` when the
+    /// marker was already correct (or the plan has no phases to pin).
+    pub marker_seeded: Option<String>,
 }
 
 pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
@@ -77,6 +81,22 @@ pub fn baseline(plan_path: &Path) -> Result<BaselineReport> {
     if !report.baselined.is_empty() {
         state.save(&state_path)?;
     }
+
+    // Phase CJ: seed / advance the phase high-water marker so an existing
+    // (pre-CJ) plan migrates off the PLAN_ARCHIVE.md scrape. Recompute the true
+    // high-water over live PLAN.md + PLAN_ARCHIVE.md + any existing marker, and
+    // rewrite the marker only when it's actually missing or behind — a minimal
+    // top-of-file edit that leaves the rest of the document untouched, so
+    // baseline stays a non-reformatting resync.
+    if let Some(id) = crate::phase_seq::seed_high_water_for_plan(plan_path)
+        && crate::phase_seq::marker_of_text(&text).as_deref() != Some(id.as_str())
+    {
+        let new_text = crate::phase_seq::set_marker_in_text(&text, &id);
+        std::fs::write(plan_path, new_text)
+            .with_context(|| format!("write {}", plan_path.display()))?;
+        report.marker_seeded = Some(id);
+    }
+
     Ok(report)
 }
 
@@ -177,6 +197,48 @@ mod tests {
         assert_eq!(state.plan_path("baseline:1.1"), Some("1.1"));
         assert_eq!(state.plan_path("baseline:"), None);
         assert_eq!(state.mappings.len(), 1);
+    }
+
+    #[test]
+    fn seeds_marker_from_live_and_archive_for_pre_cj_plan() {
+        // Phase CJ migration: a markerless plan with a live phase LOWER than an
+        // already-archived id. baseline must seed the marker to the true
+        // high-water (the archived `CI`), so the next read skips the archive and
+        // still can't re-hand-out a swept id.
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "# PLAN\n## Phase B - live\n  - [ ] B.1 open\n");
+        std::fs::write(
+            crate::phase_seq::archive_path_for(&plan),
+            "## Phase CA - swept\n## Phase CI - swept\n",
+        )
+        .unwrap();
+
+        let report = baseline(&plan).unwrap();
+        assert_eq!(report.marker_seeded.as_deref(), Some("CI"));
+        let after = std::fs::read_to_string(&plan).unwrap();
+        assert!(
+            after.starts_with("<!-- plan-bridge:phase-high-water=CI -->\n"),
+            "marker not seeded at top:\n{after}"
+        );
+        // Live content preserved verbatim below the marker.
+        assert!(after.contains("## Phase B - live"));
+        assert!(after.contains("- [ ] B.1 open"));
+        // Second baseline is a no-op on the marker (already correct).
+        let report2 = baseline(&plan).unwrap();
+        assert_eq!(report2.marker_seeded, None);
+    }
+
+    #[test]
+    fn baseline_no_marker_for_plan_without_phases() {
+        let dir = scratch_dir();
+        let plan = write_plan(&dir, "# PLAN\n\nJust prose, no phases.\n");
+        let report = baseline(&plan).unwrap();
+        assert_eq!(report.marker_seeded, None);
+        assert!(
+            !std::fs::read_to_string(&plan)
+                .unwrap()
+                .contains("phase-high-water")
+        );
     }
 
     #[test]
