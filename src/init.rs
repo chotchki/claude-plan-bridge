@@ -42,13 +42,13 @@ This PLAN.md is driven by `claude-plan-bridge` (FORMATv2):
   looks wrong.
 -->
 
-## Phase 1 - Phase one
-- [ ] 1.1 - First task
+## Phase A - First phase
+- [ ] A.1 - First task
 ";
 
 /// Idempotent install of the bridge into the project rooted at `cwd`:
 ///
-/// 1. Scaffold `PLAN.md` with a starter `## Phase 1 - Phase one` if missing (or
+/// 1. Scaffold `PLAN.md` with a starter `## Phase A - First phase` if missing (or
 ///    always if `force=true`).
 /// 2. Merge plan-bridge hooks into `.claude/settings.json`. Existing
 ///    `plan-bridge` entries are stripped and replaced — re-running is safe.
@@ -520,7 +520,7 @@ mod tests {
         assert!(report.created_gitignore);
 
         let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
-        assert!(plan.contains("## Phase 1 - Phase one"));
+        assert!(plan.contains("## Phase A - First phase"));
 
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
@@ -536,6 +536,28 @@ mod tests {
 
         let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert!(gi.contains(".claude/plan-bridge-state.json"));
+    }
+
+    #[test]
+    fn starter_plan_phase_id_is_alpha_so_next_phase_is_b() {
+        // The whole phase-id scheme is bijective base-26 alpha (A, B, ... — see
+        // phase_seq). A legacy numeric skeleton (`## Phase 1`) is invisible to
+        // next_phase_id_from_texts, which then hands out `A` for the first
+        // TaskCreate-made phase — leaving a `Phase 1` + `Phase A` Frankenplan.
+        // Seeding `Phase A` keeps the skeleton IN the sequence so the next
+        // phase is `B`.
+        let dir = scratch_dir();
+        init(&dir, false).unwrap();
+        let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
+        assert!(
+            plan.contains("## Phase A - "),
+            "skeleton must seed alpha phase `A`: {plan}"
+        );
+        assert_eq!(
+            crate::phase_seq::next_phase_id_from_texts(&plan, ""),
+            "B",
+            "next phase after the skeleton must be `B`, not a legacy-id-induced `A`"
+        );
     }
 
     #[test]
@@ -1254,7 +1276,7 @@ mod tests {
         let report = init(&dir, true).unwrap();
         assert!(report.created_plan);
         let plan = std::fs::read_to_string(dir.join("PLAN.md")).unwrap();
-        assert!(plan.contains("## Phase 1 - Phase one"));
+        assert!(plan.contains("## Phase A - First phase"));
     }
 
     #[test]
