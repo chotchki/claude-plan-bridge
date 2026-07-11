@@ -662,3 +662,14 @@ Spike decision (CF.1): **full removal → v1.0.0**; migration path is `canonical
 - [x] CI.5 - Docs: README verb surface + promote-into example
 - [x] CI.6 - Phase exit: suite green, docs updated, sweep to archive
 
+---
+
+## 2026-07-11
+
+## Phase CJ - Next-phase marker in PLAN.md + garbled-id cap
+- [x] CJ.1 - Cap the sequence-id namespace so garbled/concatenated headers can't ratchet the high-water
+- [x] CJ.2 - Next-phase high-water marker as a first-class Plan AST field
+- [x] CJ.3 - Rewire next-id derivation to the marker; drop the PLAN_ARCHIVE.md scrape
+- [x] CJ.4 - Maintain the marker on every mutation
+- [x] CJ.5 - Docs + e2e coverage
+

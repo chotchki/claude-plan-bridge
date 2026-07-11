@@ -1,3 +1,4 @@
+<!-- plan-bridge:phase-high-water=CJ -->
 # PLAN: plan-to-task bridge
 
 Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
@@ -5,6 +6,10 @@ Spec: see [SPEC.md](./SPEC.md). This plan sequences the implementation.
 Phase exit rule (per global CLAUDE.md workflow): every box ticked, unit + e2e tests pass, docs updated. Then summarize and sweep to PLAN_ARCHIVE.md.
 
 ## Backlog (not yet phased)
+
+- Reported bug:
+  - plan-bridge's legacy-load fixture should omit a non-Option field so it actually exercises the #[serde(default)] guarantee it advertises. Small fix, worth doing before you cut a v1.2.1 and re-pin. Want me to open that as a task somewhere, or is the sidebar note enough?
+  - One plan-bridge item for its own repo: TaskUpdate with a corrected metadata.plan_path is a writeback no-op, so my B.7.3→B.7.4 typo couldn't be re-pathed (cosmetic gap left in Phase B).
 
 - **Out of scope — session-feedback items the bridge can't / shouldn't own** (recorded 2026-05-28 so they don't resurface as confusion):
   - *"Task tools haven't been used recently" reminder is noise* — **not bridge-emitted.** It's a Claude Code harness built-in (no such string anywhere in `src/`); it fires on turns with no task-tool call. The bridge has no lever to silence a reminder it doesn't produce.
